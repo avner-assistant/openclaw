@@ -1,4 +1,4 @@
-// Meta live tests prove muse-spark-1.1 auth and Responses API completion.
+// Meta live tests prove current Muse Spark auth and Responses API completion.
 import { streamSimple, type Model } from "openclaw/plugin-sdk/llm";
 import { extractNonEmptyAssistantText, isLiveTestEnabled } from "openclaw/plugin-sdk/test-env";
 import { describe, expect, it } from "vitest";
@@ -6,7 +6,7 @@ import { buildMetaProvider } from "./provider-catalog.js";
 import { wrapMetaProviderStream } from "./stream.js";
 
 const MODEL_API_KEY = process.env.MODEL_API_KEY?.trim() ?? "";
-const LIVE_MODEL_ID = "muse-spark-1.1";
+const LIVE_MODEL_ID = "muse-spark-1.3";
 const LIVE =
   isLiveTestEnabled(["META_LIVE_TEST", "MODEL_API_LIVE_TEST"]) && MODEL_API_KEY.length > 0;
 const describeLive = LIVE ? describe : describe.skip;
@@ -38,7 +38,7 @@ function resolveLiveStreamFn() {
 }
 
 describeLive("meta plugin live", () => {
-  it("lists muse-spark-1.1 via the /models endpoint", async () => {
+  it("lists the current Muse Spark model via the /models endpoint", async () => {
     const provider = buildMetaProvider();
     const response = await fetch(`${provider.baseUrl}/models`, {
       headers: { Authorization: `Bearer ${MODEL_API_KEY}` },
@@ -49,7 +49,7 @@ describeLive("meta plugin live", () => {
     expect(ids).toContain(LIVE_MODEL_ID);
   }, 30_000);
 
-  it("completes a muse-spark-1.1 Responses API turn with high reasoning effort", async () => {
+  it("completes a current Muse Spark Responses API turn with high reasoning effort", async () => {
     const model = resolveLiveModel();
     let capturedPayload: Record<string, unknown> | undefined;
     const stream = await resolveLiveStreamFn()(

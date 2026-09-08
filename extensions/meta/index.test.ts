@@ -1,7 +1,7 @@
 // Meta tests cover plugin registration and catalog shape.
 import { capturePluginRegistration } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { describe, expect, it } from "vitest";
-import { buildMetaProvider } from "./api.js";
+import { applyMetaConfig, buildMetaProvider } from "./api.js";
 import plugin from "./index.js";
 
 function requireThinkingProfileResolver(
@@ -45,6 +45,29 @@ describe("meta provider", () => {
     expect(model.maxTokens).toBe(131072);
     expect(model.reasoning).toBe(true);
     expect(model.input).toContain("image");
+  });
+
+  it("ships Muse Spark 1.3 as the default with its contributor variant", () => {
+    expect(applyMetaConfig({}).agents?.defaults).toMatchObject({
+      model: { primary: "meta/muse-spark-1.3" },
+      models: { "meta/muse-spark-1.3": { alias: "Muse Spark 1.3" } },
+    });
+
+    const providerConfig = buildMetaProvider();
+    expect(
+      providerConfig.models
+        .filter((model) => model.id.startsWith("muse-spark-1.3"))
+        .map(({ id, cost }) => ({ id, cost })),
+    ).toEqual([
+      {
+        id: "muse-spark-1.3",
+        cost: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 },
+      },
+      {
+        id: "muse-spark-1.3-contributor",
+        cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+      },
+    ]);
   });
 
   it("advertises a high default thinking profile for muse-spark-1.1", () => {
