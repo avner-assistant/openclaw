@@ -57,7 +57,7 @@ let createIsolatedCodexAppServerClient: typeof import("./shared-client.js").crea
 let detachSharedCodexAppServerClientIfCurrent: typeof import("./shared-client.js").detachSharedCodexAppServerClientIfCurrent;
 let getLeasedSharedCodexAppServerClient: typeof import("./shared-client.js").getLeasedSharedCodexAppServerClient;
 let getSharedCodexAppServerClient: typeof import("./shared-client.js").getSharedCodexAppServerClient;
-let retainSharedCodexAppServerClientIfCurrent: typeof import("./shared-client.js").retainSharedCodexAppServerClientIfCurrent;
+let retainSharedCodexAppServerClientForNativeChild: typeof import("./shared-client.js").retainSharedCodexAppServerClientForNativeChild;
 let releaseLeasedSharedCodexAppServerClient: typeof import("./shared-client.js").releaseLeasedSharedCodexAppServerClient;
 let retireSharedCodexAppServerClientIfCurrent: typeof import("./shared-client.js").retireSharedCodexAppServerClientIfCurrent;
 let resetSharedCodexAppServerClientForTests: typeof import("./shared-client.js").resetSharedCodexAppServerClientForTests;
@@ -138,7 +138,7 @@ describe("shared Codex app-server client", () => {
       detachSharedCodexAppServerClientIfCurrent,
       getLeasedSharedCodexAppServerClient,
       getSharedCodexAppServerClient,
-      retainSharedCodexAppServerClientIfCurrent,
+      retainSharedCodexAppServerClientForNativeChild,
       releaseLeasedSharedCodexAppServerClient,
       retireSharedCodexAppServerClientIfCurrent,
       resetSharedCodexAppServerClientForTests,
@@ -722,12 +722,13 @@ describe("shared Codex app-server client", () => {
     await sendEmptyModelList(first);
     await expect(firstList).resolves.toEqual({ models: [] });
 
-    const releaseFirst = retainSharedCodexAppServerClientIfCurrent(first.client);
-    const releaseSecond = retainSharedCodexAppServerClientIfCurrent(first.client);
-    expect(releaseFirst).toBeTypeOf("function");
-    expect(releaseSecond).toBeTypeOf("function");
+    const releaseFirst = retainSharedCodexAppServerClientForNativeChild(first.client);
+    const releaseSecond = retainSharedCodexAppServerClientForNativeChild(first.client);
+    expect(releaseFirst.status).toBe("retained");
+    expect(releaseSecond.status).toBe("retained");
     expect(retireSharedCodexAppServerClientIfCurrent(first.client)).toEqual({
-      activeLeases: 2,
+      activeLeases: 0,
+      activeNativeChildOwners: 2,
       closed: false,
     });
     expect(first.process.stdin.destroyed).toBe(false);
@@ -737,16 +738,63 @@ describe("shared Codex app-server client", () => {
     await sendEmptyModelList(second);
     await expect(secondList).resolves.toEqual({ models: [] });
 
-    releaseFirst?.();
+    if (releaseFirst.status === "retained") {
+      releaseFirst.release();
+    }
     expect(first.process.stdin.destroyed).toBe(false);
-    releaseSecond?.();
+    if (releaseSecond.status === "retained") {
+      releaseSecond.release();
+    }
     expect(first.process.stdin.destroyed).toBe(true);
     expect(second.process.kill).not.toHaveBeenCalled();
     expect(retireSharedCodexAppServerClientIfCurrent(second.client)).toEqual({
       activeLeases: 0,
+      activeNativeChildOwners: 0,
       closed: true,
     });
     expect(second.process.stdin.destroyed).toBe(true);
+  });
+
+  it("keeps a retired shared app-server alive until detached native-child owners release", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const close = vi.spyOn(harness.client, "close");
+
+    const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leasedClient).resolves.toBe(harness.client);
+
+    const firstChildOwner = retainSharedCodexAppServerClientForNativeChild(harness.client);
+    expect(firstChildOwner.status).toBe("retained");
+    expect(retireSharedCodexAppServerClientIfCurrent(harness.client)).toEqual({
+      activeLeases: 1,
+      activeNativeChildOwners: 1,
+      closed: false,
+    });
+
+    const detachedChildOwner = retainSharedCodexAppServerClientForNativeChild(harness.client);
+    expect(detachedChildOwner.status).toBe("retained");
+    expect(retireSharedCodexAppServerClientIfCurrent(harness.client)).toEqual({
+      activeLeases: 1,
+      activeNativeChildOwners: 2,
+      closed: false,
+    });
+
+    expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+    expect(harness.process.stdin.destroyed).toBe(false);
+    if (firstChildOwner.status === "retained") {
+      firstChildOwner.release();
+    }
+    expect(harness.process.stdin.destroyed).toBe(false);
+    if (detachedChildOwner.status === "retained") {
+      detachedChildOwner.release();
+      detachedChildOwner.release();
+    }
+    expect(harness.process.stdin.destroyed).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+    expect(retainSharedCodexAppServerClientForNativeChild(harness.client)).toEqual({
+      status: "closed",
+    });
   });
 
   it("leases shared app-server clients before returning concurrent acquirers", async () => {
@@ -761,10 +809,12 @@ describe("shared Codex app-server client", () => {
 
     expect(retireSharedCodexAppServerClientIfCurrent(first.client)).toEqual({
       activeLeases: 2,
+      activeNativeChildOwners: 0,
       closed: false,
     });
     expect(retireSharedCodexAppServerClientIfCurrent(first.client)).toEqual({
       activeLeases: 2,
+      activeNativeChildOwners: 0,
       closed: false,
     });
     expect(first.process.stdin.destroyed).toBe(false);

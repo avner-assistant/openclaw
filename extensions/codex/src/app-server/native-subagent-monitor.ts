@@ -32,6 +32,10 @@ import {
 } from "./native-subagent-task-mirror.js";
 import type { CodexServerNotification, JsonObject, JsonValue } from "./protocol.js";
 import { isJsonObject } from "./protocol.js";
+import {
+  retainSharedCodexAppServerClientForNativeChild,
+  type NativeChildClientRetention,
+} from "./shared-client.js";
 
 type NativeSubagentMonitorRuntime = {
   createAgentHarnessTaskRuntime: typeof createAgentHarnessTaskRuntime;
@@ -64,6 +68,8 @@ type ChildState = {
   deliveringCompletionKey?: string;
   noFinalCompletionFallbackTimer?: ReturnType<typeof setTimeout>;
   settledWithoutCompletion: boolean;
+  ownershipOnly: boolean;
+  releaseClientOwnership?: () => void;
 };
 
 type ChildAssistantMessages = {
@@ -83,6 +89,9 @@ type MonitorOptions = {
   transcriptPollDelaysMs?: readonly number[];
   completionDeliveryRetryDelaysMs?: readonly number[];
   taskRowReconcileIntervalMs?: number;
+  retainClientForNativeChild?: (
+    client: Pick<CodexAppServerClient, "addNotificationHandler" | "addCloseHandler">,
+  ) => NativeChildClientRetention;
 };
 
 const DEFAULT_TRANSCRIPT_POLL_DELAYS_MS = [
@@ -144,12 +153,21 @@ export class CodexNativeSubagentMonitor {
   private transcriptPollDelaysMs: readonly number[];
   private completionDeliveryRetryDelaysMs: readonly number[];
   private taskRowReconcileTimer?: ReturnType<typeof setInterval>;
+  private readonly retainClientForNativeChild: NonNullable<
+    MonitorOptions["retainClientForNativeChild"]
+  >;
 
   constructor(
-    client: Pick<CodexAppServerClient, "addNotificationHandler" | "addCloseHandler">,
+    private readonly client: Pick<
+      CodexAppServerClient,
+      "addNotificationHandler" | "addCloseHandler"
+    >,
     private readonly runtime: NativeSubagentMonitorRuntime = defaultRuntime,
     options: MonitorOptions = {},
   ) {
+    this.retainClientForNativeChild =
+      options.retainClientForNativeChild ??
+      ((client) => retainSharedCodexAppServerClientForNativeChild(client as CodexAppServerClient));
     this.codexHome = normalizeOptionalString(options.codexHome);
     this.transcriptPollDelaysMs =
       options.transcriptPollDelaysMs ?? DEFAULT_TRANSCRIPT_POLL_DELAYS_MS;
@@ -164,6 +182,9 @@ export class CodexNativeSubagentMonitor {
 
   dispose(): void {
     this.clearTimers();
+    for (const childState of this.childStates.values()) {
+      this.releaseChildClientOwnership(childState);
+    }
     this.parentStates.clear();
     this.childThreadParents.clear();
     this.childStates.clear();
@@ -253,6 +274,7 @@ export class CodexNativeSubagentMonitor {
     const childState = childThreadId ? this.childStates.get(childThreadId) : undefined;
     if (childState) {
       childState.settledWithoutCompletion = false;
+      this.retainChildClientOwnership(childState);
     }
   }
 
@@ -269,6 +291,7 @@ export class CodexNativeSubagentMonitor {
     const childState = childThreadId ? this.childStates.get(childThreadId) : undefined;
     if (childState) {
       childState.settledWithoutCompletion = true;
+      this.releaseChildClientOwnership(childState);
       await this.flushDeferredParentSettlements(childState.parentThreadId);
     }
   }
@@ -300,27 +323,44 @@ export class CodexNativeSubagentMonitor {
     }
     if (notification.method === "thread/started") {
       const thread = isJsonObject(params.thread) ? params.thread : undefined;
-      const parentThreadId = readSpawnParentThreadId(thread);
+      const directParentThreadId = readSpawnParentThreadId(thread);
       const childThreadId = thread ? readString(thread, "id")?.trim() : undefined;
       const agentPath = readSpawnAgentPath(thread);
-      const state = parentThreadId ? this.parentStates.get(parentThreadId) : undefined;
-      if (state && childThreadId && parentThreadId) {
-        this.registerChildThread(parentThreadId, childThreadId, { agentPath });
+      const directParentState = directParentThreadId
+        ? this.parentStates.get(directParentThreadId)
+        : undefined;
+      const state = directParentThreadId
+        ? (directParentState ?? this.resolveParentStateForChild(directParentThreadId))
+        : undefined;
+      if (state && childThreadId) {
+        this.registerChildThread(state.parentThreadId, childThreadId, {
+          agentPath,
+          ownershipOnly: !directParentState,
+        });
       }
-      return state;
+      return directParentState;
     }
     if (notification.method === "thread/status/changed") {
       const childThreadId = readString(params, "threadId")?.trim();
-      const parentThreadId = childThreadId ? this.childThreadParents.get(childThreadId) : undefined;
-      return parentThreadId ? this.parentStates.get(parentThreadId) : undefined;
+      const childState = childThreadId ? this.childStates.get(childThreadId) : undefined;
+      if (childState?.ownershipOnly) {
+        return undefined;
+      }
+      return childState ? this.parentStates.get(childState.parentThreadId) : undefined;
     }
     if (notification.method === "item/started" || notification.method === "item/completed") {
       const item = isJsonObject(params.item) ? params.item : undefined;
-      const parentThreadId = item
+      const directParentThreadId = item
         ? (readString(item, "senderThreadId") ?? readString(params, "threadId"))?.trim()
         : undefined;
-      const state = parentThreadId ? this.parentStates.get(parentThreadId) : undefined;
-      if (state && parentThreadId) {
+      const directParentState = directParentThreadId
+        ? this.parentStates.get(directParentThreadId)
+        : undefined;
+      const state = directParentThreadId
+        ? (directParentState ?? this.resolveParentStateForChild(directParentThreadId))
+        : undefined;
+      if (state && directParentThreadId) {
+        const ownershipOnly = !directParentState;
         // Codex multi-agent V2 exposes the child only through this parent-scoped
         // activity item; the later wait item has no receiver thread ids.
         if (
@@ -330,13 +370,12 @@ export class CodexNativeSubagentMonitor {
           const childThreadId = readString(item, "agentThreadId")?.trim();
           const agentPath = readString(item, "agentPath");
           if (childThreadId) {
-            this.registerChildThread(
-              parentThreadId,
-              childThreadId,
-              agentPath === undefined ? {} : { agentPath },
-            );
+            this.registerChildThread(state.parentThreadId, childThreadId, {
+              ...(agentPath === undefined ? {} : { agentPath }),
+              ownershipOnly,
+            });
           }
-          return state;
+          return directParentState;
         }
         const isSpawnAgentTool = normalizeToolName(readString(item, "tool")) === "spawnagent";
         const childThreadIds = isSpawnAgentTool
@@ -346,10 +385,10 @@ export class CodexNativeSubagentMonitor {
             ])
           : new Set(readStringArray(item?.receiverThreadIds));
         for (const childThreadId of childThreadIds) {
-          this.registerChildThread(parentThreadId, childThreadId);
+          this.registerChildThread(state.parentThreadId, childThreadId, { ownershipOnly });
         }
       }
-      return state;
+      return directParentState;
     }
     return undefined;
   }
@@ -357,7 +396,9 @@ export class CodexNativeSubagentMonitor {
   private async handleCompletionNotification(notification: CodexServerNotification): Promise<void> {
     const params = isJsonObject(notification.params) ? notification.params : undefined;
     const parentThreadId = params ? readString(params, "threadId")?.trim() : undefined;
-    const state = parentThreadId ? this.parentStates.get(parentThreadId) : undefined;
+    const state = parentThreadId
+      ? (this.parentStates.get(parentThreadId) ?? this.resolveParentStateForChild(parentThreadId))
+      : undefined;
     if (!state) {
       return;
     }
@@ -500,6 +541,7 @@ export class CodexNativeSubagentMonitor {
       // Codex keeps interrupted agents resumable but intentionally sends no
       // parent completion, so one-shot cleanup may settle until another turn starts.
       childState.settledWithoutCompletion = true;
+      this.releaseChildClientOwnership(childState);
       await this.flushDeferredParentSettlements(childState.parentThreadId);
       return;
     }
@@ -573,6 +615,7 @@ export class CodexNativeSubagentMonitor {
     const childState = this.childStates.get(completion.childThreadId);
     if (childState) {
       childState.transcriptTerminal = true;
+      this.releaseChildClientOwnership(childState);
       if (childState.transcriptPollTimer) {
         clearTimeout(childState.transcriptPollTimer);
         childState.transcriptPollTimer = undefined;
@@ -581,6 +624,10 @@ export class CodexNativeSubagentMonitor {
         clearTimeout(childState.noFinalCompletionFallbackTimer);
         childState.noFinalCompletionFallbackTimer = undefined;
       }
+    }
+    if (childState?.ownershipOnly) {
+      await this.flushDeferredParentSettlements(state.parentThreadId);
+      return;
     }
     if (!state.requesterSessionKey) {
       await this.flushDeferredParentSettlements(state.parentThreadId);
@@ -779,7 +826,11 @@ export class CodexNativeSubagentMonitor {
   private registerChildThread(
     parentThreadId: string,
     childThreadId: string,
-    options: { agentPath?: string; scheduleTranscriptPoll?: boolean } = {},
+    options: {
+      agentPath?: string;
+      scheduleTranscriptPoll?: boolean;
+      ownershipOnly?: boolean;
+    } = {},
   ): void {
     const normalizedParentThreadId = parentThreadId.trim();
     const normalizedChildThreadId = childThreadId.trim();
@@ -812,12 +863,40 @@ export class CodexNativeSubagentMonitor {
         transcriptTerminal: false,
         completionDeliveryAttempt: 0,
         settledWithoutCompletion: false,
+        ownershipOnly: options.ownershipOnly === true,
       };
       this.childStates.set(normalizedChildThreadId, childState);
+      this.retainChildClientOwnership(childState);
+    } else if (!options.ownershipOnly && childState.ownershipOnly) {
+      childState.ownershipOnly = false;
     }
-    if (options.scheduleTranscriptPoll !== false) {
+    if (!childState.ownershipOnly && options.scheduleTranscriptPoll !== false) {
       this.scheduleTranscriptPoll(childState);
     }
+  }
+
+  private resolveParentStateForChild(childThreadId: string): ParentState | undefined {
+    const childState = this.childStates.get(childThreadId);
+    return childState ? this.parentStates.get(childState.parentThreadId) : undefined;
+  }
+
+  private retainChildClientOwnership(childState: ChildState): void {
+    if (childState.releaseClientOwnership || childState.transcriptTerminal) {
+      return;
+    }
+    const retained = this.retainClientForNativeChild(this.client);
+    if (retained.status === "retained") {
+      childState.releaseClientOwnership = retained.release;
+    }
+  }
+
+  private releaseChildClientOwnership(childState: ChildState): void {
+    const release = childState.releaseClientOwnership;
+    if (!release) {
+      return;
+    }
+    childState.releaseClientOwnership = undefined;
+    release();
   }
 
   private ensureChildState(parentThreadId: string, childThreadId: string): ChildState {

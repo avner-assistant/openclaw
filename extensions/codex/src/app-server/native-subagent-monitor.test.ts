@@ -161,6 +161,7 @@ function nativeCompletionNotification(params: {
 function childTurnCompletedNotification(params: {
   status: "completed" | "failed" | "interrupted";
   error?: string;
+  threadId?: string;
   turnId?: string;
   items?: JsonValue[];
 }): CodexServerNotification {
@@ -168,7 +169,7 @@ function childTurnCompletedNotification(params: {
   return {
     method: "turn/completed",
     params: {
-      threadId: "child-thread",
+      threadId: params.threadId ?? "child-thread",
       turn: {
         id: turnId,
         status: params.status,
@@ -907,6 +908,58 @@ describe("CodexNativeSubagentMonitor", () => {
 
     expect(cleanup).toHaveBeenCalledOnce();
     expect(runtime.deliverAgentHarnessTaskCompletion).not.toHaveBeenCalled();
+  });
+
+  it("retains native-child compute exactly once across duplicates, resume, and nesting", async () => {
+    const client = createClient();
+    const runtime = createRuntime();
+    const releases: Array<ReturnType<typeof vi.fn>> = [];
+    const retainClientForNativeChild = vi.fn(() => {
+      const release = vi.fn();
+      releases.push(release);
+      return { status: "retained" as const, release };
+    });
+    const monitor = new CodexNativeSubagentMonitor(client, runtime, {
+      retainClientForNativeChild,
+    });
+    monitor.registerParent({
+      parentThreadId: "parent-thread",
+      requesterSessionKey: "agent:main:main",
+      taskRuntimeScope: createTaskScope("agent:main:main"),
+      agentId: "main",
+    });
+
+    await notifyChildStarted(client);
+    await notifyChildStarted(client);
+    expect(retainClientForNativeChild).toHaveBeenCalledTimes(1);
+
+    await client.notify(childTurnCompletedNotification({ status: "interrupted" }));
+    expect(releases[0]).toHaveBeenCalledOnce();
+
+    await client.notify({
+      method: "turn/started",
+      params: { threadId: "child-thread", turn: { id: "resumed-turn" } },
+    });
+    expect(retainClientForNativeChild).toHaveBeenCalledTimes(2);
+
+    await notifyChildStarted(client, "child-thread", "grandchild-thread");
+    expect(retainClientForNativeChild).toHaveBeenCalledTimes(3);
+    expect(runtime.createRunningTaskRun).toHaveBeenCalledTimes(1);
+
+    await client.notify(
+      childTurnCompletedNotification({
+        threadId: "grandchild-thread",
+        status: "completed",
+        items: [],
+      }),
+    );
+    expect(releases[2]).toHaveBeenCalledOnce();
+    expect(runtime.deliverAgentHarnessTaskCompletion).not.toHaveBeenCalled();
+
+    const completion = childTurnCompletedNotification({ status: "failed", error: "failed" });
+    await client.notify(completion);
+    await client.notify(completion);
+    expect(releases[1]).toHaveBeenCalledOnce();
   });
 
   it("runs deferred parent cleanup when a child ends in a system error", async () => {

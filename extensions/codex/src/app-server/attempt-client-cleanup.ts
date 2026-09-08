@@ -152,5 +152,6 @@ export async function retireCodexAppServerClientAfterTimedOutTurn(
     detachedSharedClient,
     closedClient,
     activeSharedClientLeases: retiredSharedClient?.activeLeases ?? 0,
+    activeNativeChildOwners: retiredSharedClient?.activeNativeChildOwners ?? 0,
   });
 }

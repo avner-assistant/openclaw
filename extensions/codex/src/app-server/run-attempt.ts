@@ -1399,6 +1399,7 @@ export async function runCodexAppServerAttempt(
       sessionId: params.sessionId,
       sessionKey: params.sessionKey,
       activeLeases: retired?.activeLeases ?? null,
+      activeNativeChildOwners: retired?.activeNativeChildOwners ?? null,
       closed: retired?.closed ?? false,
       matchedSharedClient: Boolean(retired),
     });
