@@ -1894,7 +1894,7 @@ describe("runCodexAppServerAttempt", () => {
 
   it("retires the shared Codex app-server client after one-shot cleanup turns", async () => {
     const retireSpy = vi.spyOn(sharedClientModule, "retireSharedCodexAppServerClientIfCurrent");
-    retireSpy.mockReturnValue({ activeLeases: 0, closed: true });
+    retireSpy.mockReturnValue({ activeLeases: 0, activeNativeChildOwners: 0, closed: true });
     const events: string[] = [];
     const closeAndWait = vi.fn(async () => {
       events.push("closeAndWait");
@@ -1957,7 +1957,7 @@ describe("runCodexAppServerAttempt", () => {
 
   it("retires the shared Codex app-server client after one-shot turn start failures", async () => {
     const retireSpy = vi.spyOn(sharedClientModule, "retireSharedCodexAppServerClientIfCurrent");
-    retireSpy.mockReturnValue({ activeLeases: 0, closed: true });
+    retireSpy.mockReturnValue({ activeLeases: 0, activeNativeChildOwners: 0, closed: true });
     const events: string[] = [];
     const closeAndWait = vi.fn(async () => {
       events.push("closeAndWait");

@@ -32,6 +32,7 @@ type SharedCodexAppServerClientEntry = {
 type SharedCodexAppServerClientState = {
   clients: Map<string, SharedCodexAppServerClientEntry>;
   clientEntries: WeakMap<CodexAppServerClient, SharedCodexAppServerClientEntry>;
+  liveClients: Set<CodexAppServerClient>;
   leasedReleases: WeakMap<CodexAppServerClient, Array<() => void>>;
 };
 
@@ -43,6 +44,7 @@ type LegacySharedCodexAppServerClientState = Partial<SharedCodexAppServerClientE
 type KeyedSharedCodexAppServerClientState = {
   clients: Map<string, Partial<SharedCodexAppServerClientEntry>>;
   clientEntries?: unknown;
+  liveClients?: unknown;
   leasedReleases?: unknown;
 };
 
@@ -70,6 +72,10 @@ function getSharedCodexAppServerClientState(): SharedCodexAppServerClientState {
     const nextState: SharedCodexAppServerClientState = {
       clients,
       clientEntries,
+      liveClients:
+        keyedState.liveClients instanceof Set
+          ? keyedState.liveClients
+          : new Set([...clients.values()].flatMap((entry) => (entry.client ? [entry.client] : []))),
       leasedReleases:
         keyedState.leasedReleases instanceof WeakMap ? keyedState.leasedReleases : new WeakMap(),
     };
@@ -100,6 +106,7 @@ function getSharedCodexAppServerClientState(): SharedCodexAppServerClientState {
   const nextState: SharedCodexAppServerClientState = {
     clients,
     clientEntries,
+    liveClients: new Set(legacyState?.client ? [legacyState.client] : []),
     leasedReleases: new WeakMap(),
   };
   globalState[SHARED_CODEX_APP_SERVER_CLIENT_STATE] = nextState;
@@ -265,6 +272,7 @@ async function acquireSharedCodexAppServerClient(
       const client = CodexAppServerClient.start(startOptions);
       entry.client = client;
       state.clientEntries.set(client, entry);
+      state.liveClients.add(client);
       options?.onStartedClient?.(client);
       client.setActiveSharedLeaseCountProviderForUnscopedNotifications(() => entry.activeLeases);
       client.addCloseHandler((closedClient) => clearSharedClientEntryIfCurrent(key, closedClient));
@@ -352,7 +360,6 @@ export function resetSharedCodexAppServerClientForTests(): void {
   const state = getSharedCodexAppServerClientState();
   const clients = collectSharedClients(state);
   state.clients.clear();
-  state.clientEntries = new WeakMap();
   state.leasedReleases = new WeakMap();
   for (const client of clients) {
     client.close();
@@ -364,7 +371,6 @@ export function clearSharedCodexAppServerClient(): void {
   const state = getSharedCodexAppServerClientState();
   const clients = collectSharedClients(state);
   state.clients.clear();
-  state.clientEntries = new WeakMap();
   for (const client of clients) {
     client.close();
   }
@@ -536,6 +542,7 @@ function clearSharedClientEntryIfCurrent(key: string, client: CodexAppServerClie
     state.clients.delete(key);
   }
   const trackedEntry = state.clientEntries.get(client);
+  state.liveClients.delete(client);
   if (trackedEntry?.client === client) {
     trackedEntry.client = undefined;
     trackedEntry.closeWhenIdle = false;
@@ -659,11 +666,5 @@ function closeSharedClientEntryIfUnclaimed(
 }
 
 function collectSharedClients(state: SharedCodexAppServerClientState): CodexAppServerClient[] {
-  return [
-    ...new Set(
-      [...state.clients.values()]
-        .map((entry) => entry.client)
-        .filter((client): client is CodexAppServerClient => Boolean(client)),
-    ),
-  ];
+  return [...state.liveClients];
 }

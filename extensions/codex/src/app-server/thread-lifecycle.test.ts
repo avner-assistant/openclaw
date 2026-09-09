@@ -417,8 +417,8 @@ describe("Codex app-server native code mode config", () => {
       config,
     });
 
-    expect(started.config?.["features.multi_agent_v2"]).toBe(false);
-    expect(resumed.config?.["features.multi_agent_v2"]).toBe(false);
+    expect(started.config).toMatchObject({ "features.multi_agent_v2": false });
+    expect(resumed.config).toMatchObject({ "features.multi_agent_v2": false });
   });
 
   it("enables hosted Codex web search on thread/start by default", () => {

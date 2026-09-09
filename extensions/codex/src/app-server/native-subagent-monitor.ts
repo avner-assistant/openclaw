@@ -51,7 +51,7 @@ type ParentState = {
   mirror?: CodexNativeSubagentTaskMirror;
   deferredSettlement?: () => Promise<void> | void;
   deliveredCompletionKeys: Set<string>;
-  pendingChildSpawns: Map<string, (() => void) | undefined>;
+  pendingChildSpawns: Map<string, { release?: () => void; turnId?: string }>;
 };
 
 type ChildState = {
@@ -63,7 +63,7 @@ type ChildState = {
   transcriptPollAttempt: number;
   transcriptPollTimer?: ReturnType<typeof setTimeout>;
   transcriptTerminal: boolean;
-  pendingCompletion?: CodexNativeSubagentCompletion;
+  pendingCompletion?: ChildCompletion;
   pendingCompletionEventAt?: number;
   completionDeliveryAttempt: number;
   completionDeliveryTimer?: ReturnType<typeof setTimeout>;
@@ -71,6 +71,13 @@ type ChildState = {
   noFinalCompletionFallbackTimer?: ReturnType<typeof setTimeout>;
   settledWithoutCompletion: boolean;
   ownershipOnly: boolean;
+  observedLive: boolean;
+  provisionalDiscoveryUntil?: number;
+  ownershipGeneration: number;
+  reconcileTerminalTurnId?: string;
+  reconcileTerminalCancelled?: boolean;
+  reconcilingTerminal?: boolean;
+  turnStartedAt?: number;
   clientOwnershipTurnId?: string;
   releaseClientOwnership?: () => void;
 };
@@ -82,9 +89,13 @@ type ChildAssistantMessages = {
   finalMessageIds: Set<string>;
 };
 
-type TranscriptCompletion = CodexNativeSubagentCompletion & {
+// Monitor-local completion record. `turnId` names the child turn the terminal
+// evidence belongs to so a completion that arrives late - from a delayed
+// fallback or a rollout read - cannot settle a child that is live again.
+type ChildCompletion = CodexNativeSubagentCompletion & {
   parentThreadId?: string;
   completedAt?: number;
+  turnId?: string;
 };
 
 type MonitorOptions = {
@@ -148,6 +159,7 @@ export function registerCodexNativeSubagentMonitor(params: {
 export class CodexNativeSubagentMonitor {
   private readonly startedAt = Date.now();
   private readonly parentStates = new Map<string, ParentState>();
+  private readonly settlingSpawnParents = new Set<string>();
   private readonly childThreadParents = new Map<string, string>();
   private readonly childStates = new Map<string, ChildState>();
   private readonly childThreadIdsByAgentPath = new Map<string, string>();
@@ -164,13 +176,15 @@ export class CodexNativeSubagentMonitor {
     private readonly client: Pick<
       CodexAppServerClient,
       "addNotificationHandler" | "addCloseHandler"
-    >,
+    > &
+      Partial<Pick<CodexAppServerClient, "request">>,
     private readonly runtime: NativeSubagentMonitorRuntime = defaultRuntime,
     options: MonitorOptions = {},
   ) {
     this.retainClientForNativeChild =
       options.retainClientForNativeChild ??
-      ((client) => retainSharedCodexAppServerClientForNativeChild(client as CodexAppServerClient));
+      ((nativeChildClient) =>
+        retainSharedCodexAppServerClientForNativeChild(nativeChildClient as CodexAppServerClient));
     this.codexHome = normalizeOptionalString(options.codexHome);
     this.transcriptPollDelaysMs =
       options.transcriptPollDelaysMs ?? DEFAULT_TRANSCRIPT_POLL_DELAYS_MS;
@@ -186,8 +200,8 @@ export class CodexNativeSubagentMonitor {
   dispose(): void {
     this.clearTimers();
     for (const state of this.parentStates.values()) {
-      for (const release of state.pendingChildSpawns.values()) {
-        release?.();
+      for (const pending of state.pendingChildSpawns.values()) {
+        pending.release?.();
       }
       state.pendingChildSpawns.clear();
     }
@@ -269,10 +283,22 @@ export class CodexNativeSubagentMonitor {
       }
     }
     this.markChildTurnStarted(notification);
-    await this.handleChildSystemError(notification);
+    // Start terminal processing before the first await: transport handlers run
+    // concurrently, so completion A must capture ownership before start B.
+    const systemError = this.handleChildSystemError(notification);
     this.captureChildAssistantMessage(notification);
-    await this.handleChildTurnCompletion(notification);
+    const completion = this.handleChildTurnCompletion(notification);
+    await systemError;
+    await completion;
     await this.handleCompletionNotification(notification);
+    if (notification.method === "turn/completed") {
+      const params = isJsonObject(notification.params) ? notification.params : undefined;
+      const threadId = readString(params, "threadId");
+      const turn = isJsonObject(params?.turn) ? params.turn : undefined;
+      if (threadId) {
+        await this.settlePendingChildSpawns(threadId, readString(turn, "id"));
+      }
+    }
   }
 
   private markChildTurnStarted(notification: CodexServerNotification): void {
@@ -284,6 +310,13 @@ export class CodexNativeSubagentMonitor {
     const childState = childThreadId ? this.childStates.get(childThreadId) : undefined;
     if (childState) {
       childState.settledWithoutCompletion = false;
+      childState.observedLive = true;
+      childState.provisionalDiscoveryUntil = undefined;
+      childState.reconcileTerminalTurnId = undefined;
+      childState.reconcileTerminalCancelled = undefined;
+      childState.ownershipGeneration += 1;
+      childState.turnStartedAt = Date.now();
+      childState.transcriptTerminal = false;
       const turn = isJsonObject(params?.turn) ? params.turn : undefined;
       this.retainChildClientOwnership(childState, readString(turn, "id"));
     }
@@ -393,7 +426,12 @@ export class CodexNativeSubagentMonitor {
         const isSpawnAgentTool = normalizeToolName(readString(item, "tool")) === "spawnagent";
         const itemId = readString(item, "id")?.trim();
         if (isSpawnAgentTool && itemId && notification.method === "item/started") {
-          this.retainPendingChildSpawn(state, directParentThreadId, itemId);
+          this.retainPendingChildSpawn(
+            state,
+            directParentThreadId,
+            itemId,
+            readString(params, "turnId"),
+          );
         }
         const childThreadIds = isSpawnAgentTool
           ? new Set([
@@ -587,7 +625,7 @@ export class CodexNativeSubagentMonitor {
   private async processChildCompletion(
     state: ParentState,
     childState: ChildState,
-    completion: CodexNativeSubagentCompletion,
+    completion: ChildCompletion,
   ): Promise<void> {
     if (shouldWaitForTranscriptCompletion(completion, this.codexHome)) {
       // Codex can notify `completed: null` before the child transcript exposes
@@ -616,8 +654,20 @@ export class CodexNativeSubagentMonitor {
     if (!codexHome) {
       return false;
     }
+    const generation = childState.ownershipGeneration;
     const completion = await this.findTranscriptCompletionForChild(childState, options);
-    if (!completion) {
+    if (!completion || generation !== childState.ownershipGeneration) {
+      return false;
+    }
+    const terminal = completion.completion;
+    if (
+      childState.clientOwnershipTurnId &&
+      (terminal.turnId
+        ? terminal.turnId !== childState.clientOwnershipTurnId
+        : !terminal.completedAt ||
+          !childState.turnStartedAt ||
+          terminal.completedAt < childState.turnStartedAt)
+    ) {
       return false;
     }
     const transcriptParentThreadId = completion.completion.parentThreadId;
@@ -637,11 +687,34 @@ export class CodexNativeSubagentMonitor {
 
   private async processCompletion(
     state: ParentState,
-    completion: CodexNativeSubagentCompletion,
+    completion: ChildCompletion,
     eventAt: number = Date.now(),
   ): Promise<void> {
-    this.finalizeCompletionTask(completion, eventAt);
     const childState = this.childStates.get(completion.childThreadId);
+    if (childState?.clientOwnershipTurnId && !completion.turnId) {
+      // The V1 reporter can precede the child's terminal notification, but does
+      // not identify its turn. Treat it as a reconciliation hint, never as proof
+      // that the currently owned (possibly resumed) turn has finished.
+      childState.reconcileTerminalTurnId = childState.clientOwnershipTurnId;
+      childState.reconcileTerminalCancelled ||= completion.status === "cancelled";
+      await this.reconcileReportedTerminal(state, childState);
+      return;
+    }
+    // Terminal evidence is per turn. A delayed fallback or a rollout terminal can
+    // name an earlier turn than the one the child is running now; settling on it
+    // would finalize the task row and drop the live turn's client owner. Later
+    // reconciles carry the newer turn id, so waiting here stays durable.
+    if (
+      childState?.clientOwnershipTurnId &&
+      completion.turnId !== childState.clientOwnershipTurnId
+    ) {
+      return;
+    }
+    const completionKey = buildCompletionDedupeKey(state.parentThreadId, completion);
+    if (state.deliveredCompletionKeys.has(completionKey)) {
+      return;
+    }
+    this.finalizeCompletionTask(completion, eventAt);
     if (childState) {
       childState.transcriptTerminal = true;
       this.releaseChildClientOwnership(childState);
@@ -662,16 +735,72 @@ export class CodexNativeSubagentMonitor {
       await this.flushDeferredParentSettlements(state.parentThreadId);
       return;
     }
-    const completionKey = buildCompletionDedupeKey(state.parentThreadId, completion);
-    if (state.deliveredCompletionKeys.has(completionKey)) {
-      return;
-    }
     const deliveryState =
       childState ?? this.ensureChildState(state.parentThreadId, completion.childThreadId);
     deliveryState.pendingCompletion = completion;
     deliveryState.pendingCompletionEventAt = eventAt;
     this.markCompletionDeliveryPending(completion);
     await this.deliverPendingCompletion(state, deliveryState);
+  }
+
+  private async reconcileReportedTerminal(state: ParentState, child: ChildState): Promise<void> {
+    const turnId = child.reconcileTerminalTurnId;
+    if (!turnId || child.reconcilingTerminal || !this.client.request) {
+      return;
+    }
+    child.reconcilingTerminal = true;
+    const generation = child.ownershipGeneration;
+    try {
+      const response = await this.client.request(
+        "thread/read",
+        { threadId: child.childThreadId, includeTurns: true },
+        { timeoutMs: 5_000 },
+      );
+      if (
+        generation !== child.ownershipGeneration ||
+        child.clientOwnershipTurnId !== turnId ||
+        this.parentStates.get(state.parentThreadId) !== state
+      ) {
+        return;
+      }
+      const thread =
+        isJsonObject(response) && isJsonObject(response.thread) ? response.thread : undefined;
+      // A newer server turn can be active before its notification reaches us.
+      // Historical terminal evidence for our old local turn cannot retire it.
+      if (isJsonObject(thread?.status) && readString(thread.status, "type") === "active") {
+        return;
+      }
+      const turn = Array.isArray(thread?.turns)
+        ? thread.turns.find((entry) => isJsonObject(entry) && readString(entry, "id") === turnId)
+        : undefined;
+      if (isJsonObject(turn)) {
+        this.captureChildTurnAssistantMessages(child, turn);
+        const completion = toChildTurnCompletion(child, turn);
+        if (completion) {
+          await this.processChildCompletion(state, child, completion);
+          return;
+        }
+      }
+      if (
+        child.reconcileTerminalCancelled &&
+        isJsonObject(thread?.status) &&
+        readString(thread.status, "type") === "notLoaded"
+      ) {
+        // The server confirms there is no compute on this transport. Do not
+        // attribute the turnless reporter's possibly older result to this turn.
+        await this.processCompletion(state, {
+          childThreadId: child.childThreadId,
+          turnId,
+          status: "cancelled",
+          statusLabel: "not_loaded",
+          result: "Codex native subagent is no longer loaded.",
+        });
+      }
+    } catch (error) {
+      embeddedAgentLog.debug("Codex reported terminal reconciliation will retry", { error });
+    } finally {
+      child.reconcilingTerminal = false;
+    }
   }
 
   private async deliverPendingCompletion(
@@ -695,7 +824,7 @@ export class CodexNativeSubagentMonitor {
         scope: state.taskRuntimeScope,
         childSessionKey: codexNativeSubagentRunId(completion.childThreadId),
         childSessionId: completion.childThreadId,
-        announceId: `codex-native:${state.parentThreadId}:${completion.childThreadId}:${completion.status}`,
+        announceId: `codex-native:${state.parentThreadId}:${completion.childThreadId}:${completion.status}${completion.turnId ? `:${completion.turnId}` : ""}`,
         announceType: "Codex native subagent",
         taskLabel: "Codex native subagent",
         status: completion.status,
@@ -789,7 +918,9 @@ export class CodexNativeSubagentMonitor {
         childState.parentThreadId === parentThreadId &&
         (childState.pendingCompletion !== undefined ||
           childState.deliveringCompletionKey !== undefined ||
-          (!childState.transcriptTerminal && !childState.settledWithoutCompletion))
+          (childState.observedLive &&
+            !childState.transcriptTerminal &&
+            !childState.settledWithoutCompletion))
       ) {
         return true;
       }
@@ -863,6 +994,7 @@ export class CodexNativeSubagentMonitor {
       directParentThreadId?: string;
       scheduleTranscriptPoll?: boolean;
       ownershipOnly?: boolean;
+      recovered?: boolean;
     } = {},
   ): void {
     const normalizedParentThreadId = parentThreadId.trim();
@@ -899,11 +1031,19 @@ export class CodexNativeSubagentMonitor {
         completionDeliveryAttempt: 0,
         settledWithoutCompletion: false,
         ownershipOnly: options.ownershipOnly === true,
+        observedLive: options.recovered !== true,
+        ownershipGeneration: 0,
       };
       this.childStates.set(normalizedChildThreadId, childState);
-      this.retainChildClientOwnership(childState);
+      if (childState.observedLive) {
+        this.retainChildClientOwnership(childState);
+      }
     } else if (!options.ownershipOnly && childState.ownershipOnly) {
       childState.ownershipOnly = false;
+    }
+    if (!options.recovered && !childState.observedLive) {
+      childState.observedLive = true;
+      this.retainChildClientOwnership(childState);
     }
     const directParentThreadId = normalizeOptionalString(options.directParentThreadId);
     if (directParentThreadId) {
@@ -923,16 +1063,17 @@ export class CodexNativeSubagentMonitor {
     state: ParentState,
     directParentThreadId: string,
     itemId: string,
+    turnId?: string,
   ): void {
     const key = `${directParentThreadId}\u0000${itemId}`;
     if (state.pendingChildSpawns.has(key)) {
       return;
     }
     const retained = this.retainClientForNativeChild(this.client);
-    state.pendingChildSpawns.set(
-      key,
-      retained.status === "retained" ? retained.release : undefined,
-    );
+    state.pendingChildSpawns.set(key, {
+      release: retained.status === "retained" ? retained.release : undefined,
+      turnId,
+    });
   }
 
   private releasePendingChildSpawn(
@@ -944,10 +1085,118 @@ export class CodexNativeSubagentMonitor {
     if (!state.pendingChildSpawns.has(key)) {
       return;
     }
-    const release = state.pendingChildSpawns.get(key);
+    const pending = state.pendingChildSpawns.get(key);
     state.pendingChildSpawns.delete(key);
-    release?.();
+    pending?.release?.();
     void this.flushDeferredParentSettlements(state.parentThreadId);
+  }
+
+  // An interrupted or invalid V1 spawn may never emit item/completed. Before
+  // dropping its provisional owner, discover children already created on this
+  // transport. Read failures retain ownership and retry; they are not emptiness.
+  async settlePendingChildSpawns(directParentThreadId: string, turnId?: string): Promise<void> {
+    const state =
+      this.parentStates.get(directParentThreadId) ??
+      this.resolveParentStateForChild(directParentThreadId);
+    const prefix = `${directParentThreadId}\u0000`;
+    const pending = [...(state?.pendingChildSpawns.entries() ?? [])].filter(
+      ([key, spawn]) =>
+        key.startsWith(prefix) && (!turnId || !spawn.turnId || spawn.turnId === turnId),
+    );
+    if (!state || pending.length === 0 || this.settlingSpawnParents.has(directParentThreadId)) {
+      return;
+    }
+    const request = this.client.request?.bind(this.client);
+    if (!request) {
+      return;
+    }
+    this.settlingSpawnParents.add(directParentThreadId);
+    try {
+      const response = await request(
+        "thread/read",
+        { threadId: directParentThreadId, includeTurns: false },
+        { timeoutMs: 5_000 },
+      );
+      const parent =
+        isJsonObject(response) && isJsonObject(response.thread) ? response.thread : undefined;
+      const status = isJsonObject(parent?.status) ? readString(parent.status, "type") : undefined;
+      if (status !== "idle" && status !== "systemError" && status !== "notLoaded") {
+        return;
+      }
+      const threads: JsonObject[] = [];
+      let cursor: string | undefined;
+      do {
+        const loaded = await request(
+          "thread/loaded/list",
+          { limit: 100, ...(cursor ? { cursor } : {}) },
+          { timeoutMs: 5_000 },
+        );
+        if (!isJsonObject(loaded) || !Array.isArray(loaded.data)) {
+          return;
+        }
+        for (const id of readStringArray(loaded.data)) {
+          if (id === directParentThreadId) {
+            continue;
+          }
+          const result = await request(
+            "thread/read",
+            { threadId: id, includeTurns: false },
+            { timeoutMs: 5_000 },
+          );
+          if (!isJsonObject(result) || !isJsonObject(result.thread)) {
+            return;
+          }
+          threads.push(result.thread);
+        }
+        cursor = readString(loaded, "nextCursor");
+      } while (cursor);
+      if (this.parentStates.get(state.parentThreadId) !== state) {
+        return;
+      }
+      // Resolve ancestry before releasing even one provisional owner. Loaded
+      // children can be idle before their initial queued input starts.
+      const descendants = new Set([directParentThreadId]);
+      for (let changed = true; changed; ) {
+        changed = false;
+        for (const thread of threads) {
+          const id = readString(thread, "id");
+          const parentId = readSpawnParentThreadId(thread);
+          if (!id || !parentId || !descendants.has(parentId) || descendants.has(id)) {
+            continue;
+          }
+          descendants.add(id);
+          changed = true;
+          this.registerChildThread(state.parentThreadId, id, {
+            directParentThreadId: parentId,
+            ownershipOnly: !this.parentStates.has(parentId),
+            agentPath: readSpawnAgentPath(thread),
+          });
+          const discovered = this.childStates.get(id);
+          const childStatus = isJsonObject(thread.status)
+            ? readString(thread.status, "type")
+            : undefined;
+          if (discovered && !discovered.clientOwnershipTurnId && childStatus !== "active") {
+            // Only never-started discovery is provisional. A turn/started
+            // notification or active status promotes it to unbounded compute
+            // ownership. Fresh idle evidence after the startup grace reclaims
+            // an abandoned spawn without imposing a worker execution timeout.
+            discovered.provisionalDiscoveryUntil ??= Date.now() + 30_000;
+          }
+        }
+      }
+      for (const [key, spawn] of pending) {
+        if (state.pendingChildSpawns.get(key) !== spawn) {
+          continue;
+        }
+        state.pendingChildSpawns.delete(key);
+        spawn.release?.();
+      }
+      await this.flushDeferredParentSettlements(state.parentThreadId);
+    } catch (error) {
+      embeddedAgentLog.debug("Codex pending spawn discovery will retry", { error });
+    } finally {
+      this.settlingSpawnParents.delete(directParentThreadId);
+    }
   }
 
   private retainChildClientOwnership(childState: ChildState, turnId?: string): void {
@@ -980,6 +1229,8 @@ export class CodexNativeSubagentMonitor {
       return false;
     }
     childState.clientOwnershipTurnId = undefined;
+    childState.reconcileTerminalTurnId = undefined;
+    childState.reconcileTerminalCancelled = undefined;
     childState.releaseClientOwnership = undefined;
     release();
     return true;
@@ -1034,7 +1285,7 @@ export class CodexNativeSubagentMonitor {
   private scheduleNoFinalCompletionFallback(
     state: ParentState,
     childState: ChildState,
-    completion: CodexNativeSubagentCompletion,
+    completion: ChildCompletion,
     eventAt: number,
   ): void {
     if (childState.transcriptTerminal || childState.noFinalCompletionFallbackTimer) {
@@ -1051,7 +1302,7 @@ export class CodexNativeSubagentMonitor {
   private async deliverNoFinalCompletionFallback(
     state: ParentState,
     childState: ChildState,
-    completion: CodexNativeSubagentCompletion,
+    completion: ChildCompletion,
     eventAt: number,
   ): Promise<void> {
     const reconciled = await this.reconcileChildTranscript(childState.childThreadId).catch(
@@ -1107,6 +1358,58 @@ export class CodexNativeSubagentMonitor {
   }
 
   async reconcileKnownTaskRows(): Promise<void> {
+    for (const child of this.childStates.values()) {
+      if (child.reconcileTerminalTurnId) {
+        const state = this.parentStates.get(child.parentThreadId);
+        if (state) {
+          await this.reconcileReportedTerminal(state, child);
+        }
+      }
+      if (
+        !child.provisionalDiscoveryUntil ||
+        child.provisionalDiscoveryUntil > Date.now() ||
+        !this.client.request
+      ) {
+        continue;
+      }
+      const generation = child.ownershipGeneration;
+      try {
+        const result = await this.client.request(
+          "thread/read",
+          { threadId: child.childThreadId, includeTurns: false },
+          { timeoutMs: 5_000 },
+        );
+        if (generation !== child.ownershipGeneration) {
+          continue;
+        }
+        const thread =
+          isJsonObject(result) && isJsonObject(result.thread) ? result.thread : undefined;
+        const status = isJsonObject(thread?.status) ? readString(thread.status, "type") : undefined;
+        if (status === "active") {
+          child.provisionalDiscoveryUntil = undefined;
+          continue;
+        }
+        if (status !== "idle" && status !== "notLoaded" && status !== "systemError") {
+          continue;
+        }
+        child.provisionalDiscoveryUntil = undefined;
+        child.observedLive = false;
+        child.settledWithoutCompletion = true;
+        this.releaseChildClientOwnership(child);
+        await this.flushDeferredParentSettlements(child.parentThreadId);
+      } catch {
+        /* A failed status read cannot prove that a worker is idle. */
+      }
+    }
+    const pendingParents = new Set<string>();
+    for (const state of this.parentStates.values()) {
+      for (const key of state.pendingChildSpawns.keys()) {
+        pendingParents.add(key.split("\u0000", 1)[0]);
+      }
+    }
+    for (const parentId of pendingParents) {
+      await this.settlePendingChildSpawns(parentId);
+    }
     if (!this.codexHome) {
       return;
     }
@@ -1134,6 +1437,7 @@ export class CodexNativeSubagentMonitor {
       }
       this.registerChildThread(state.parentThreadId, childThreadId, {
         scheduleTranscriptPoll: false,
+        recovered: true,
       });
       const childState = this.childStates.get(childThreadId);
       if (childState && !childState.transcriptPollTimer) {
@@ -1171,6 +1475,7 @@ export class CodexNativeSubagentMonitor {
       }
       this.registerChildThread(state.parentThreadId, childThreadId, {
         scheduleTranscriptPoll: false,
+        recovered: true,
       });
       const childState = this.childStates.get(childThreadId);
       if (!childState || childState.transcriptPollTimer) {
@@ -1180,10 +1485,11 @@ export class CodexNativeSubagentMonitor {
     }
     await this.primeTranscriptPathCacheForChildren(candidates.map(({ childState }) => childState));
     for (const { task, childThreadId, childState } of candidates) {
+      const generation = childState.ownershipGeneration;
       const transcriptCompletion = await this.findTranscriptCompletionForChild(childState, {
         allowTreeScan: false,
       });
-      if (!transcriptCompletion) {
+      if (!transcriptCompletion || generation !== childState.ownershipGeneration) {
         this.scheduleTranscriptPoll(childState);
         continue;
       }
@@ -1278,7 +1584,7 @@ export class CodexNativeSubagentMonitor {
   private async findTranscriptCompletionForChild(
     childState: ChildState,
     options: { allowTreeScan?: boolean } = {},
-  ): Promise<{ transcriptPath: string; completion: TranscriptCompletion } | undefined> {
+  ): Promise<{ transcriptPath: string; completion: ChildCompletion } | undefined> {
     const codexHome = this.codexHome;
     if (!codexHome) {
       return undefined;
@@ -1300,27 +1606,27 @@ export class CodexNativeSubagentMonitor {
   }
 }
 
-function buildCompletionDedupeKey(
-  parentThreadId: string,
-  completion: CodexNativeSubagentCompletion,
-): string {
+function buildCompletionDedupeKey(parentThreadId: string, completion: ChildCompletion): string {
   const hash = createHash("sha256").update(completion.result).digest("hex").slice(0, 16);
-  return `${parentThreadId}:${completion.childThreadId}:${completion.status}:${hash}`;
+  // Resumed turns may produce identical text. Only repeat evidence for the same
+  // turn is a duplicate; otherwise its owner must settle and its result deliver.
+  return `${parentThreadId}:${completion.childThreadId}:${completion.turnId ?? ""}:${completion.status}:${hash}`;
 }
 
 function toChildTurnCompletion(
   childState: ChildState,
   turn: JsonObject,
-): CodexNativeSubagentCompletion | undefined {
+): ChildCompletion | undefined {
   const status = readString(turn, "status");
+  const turnId = readString(turn, "id");
   if (status === "completed") {
-    const turnId = readString(turn, "id");
     const result = turnId ? lastChildAssistantMessage(childState, turnId) : undefined;
     return {
       childThreadId: childState.childThreadId,
       status: "succeeded",
       statusLabel: result ? "turn_completed" : "completed_without_final_message",
       result: result ?? "Codex native subagent completed without a final assistant message.",
+      turnId,
     };
   }
   if (status === "failed") {
@@ -1329,6 +1635,7 @@ function toChildTurnCompletion(
       status: "failed",
       statusLabel: "turn_failed",
       result: readTurnErrorMessage(turn) ?? "Codex native subagent failed.",
+      turnId,
     };
   }
   return undefined;
@@ -1442,7 +1749,7 @@ async function findTranscriptCompletion(params: {
 }): Promise<
   | {
       transcriptPath: string;
-      completion: TranscriptCompletion;
+      completion: ChildCompletion;
     }
   | undefined
 > {
@@ -1544,7 +1851,7 @@ async function findTranscriptPath(params: {
 async function readTranscriptCompletion(
   transcriptPath: string,
   childThreadId: string,
-): Promise<TranscriptCompletion | undefined> {
+): Promise<ChildCompletion | undefined> {
   let contents: string;
   try {
     contents = await fs.readFile(transcriptPath, "utf8");
@@ -1552,7 +1859,8 @@ async function readTranscriptCompletion(
     return undefined;
   }
   let parentThreadId: string | undefined;
-  let completion: TranscriptCompletion | undefined;
+  let transcriptTurnId: string | undefined;
+  let completion: ChildCompletion | undefined;
   for (const line of contents.split(/\r?\n/u)) {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -1579,12 +1887,16 @@ async function readTranscriptCompletion(
       continue;
     }
     const payloadType = readString(payload, "type");
-    if (payloadType === "task_complete") {
+    if (payloadType === "task_started") {
+      transcriptTurnId = readString(payload, "turn_id");
+      completion = undefined;
+    } else if (payloadType === "task_complete") {
       const result =
         readString(payload, "last_agent_message")?.trim() || readString(payload, "message")?.trim();
       completion = {
         childThreadId,
         parentThreadId,
+        turnId: readString(payload, "turn_id") ?? transcriptTurnId,
         status: "succeeded",
         statusLabel: result ? "task_complete" : "completed_without_final_message",
         result: result ?? "Codex native subagent completed without a final assistant message.",
@@ -1599,6 +1911,7 @@ async function readTranscriptCompletion(
       completion = {
         childThreadId,
         parentThreadId,
+        turnId: readString(payload, "turn_id") ?? transcriptTurnId,
         status: "failed",
         statusLabel: "task_failed",
         result,

@@ -54,6 +54,7 @@ vi.mock("openclaw/plugin-sdk/agent-runtime", () => ({
 }));
 
 let listCodexAppServerModels: typeof import("./models.js").listCodexAppServerModels;
+let clearSharedCodexAppServerClientAndWait: typeof import("./shared-client.js").clearSharedCodexAppServerClientAndWait;
 let clearSharedCodexAppServerClient: typeof import("./shared-client.js").clearSharedCodexAppServerClient;
 let clearSharedCodexAppServerClientIfCurrent: typeof import("./shared-client.js").clearSharedCodexAppServerClientIfCurrent;
 let clearSharedCodexAppServerClientIfCurrentAndWait: typeof import("./shared-client.js").clearSharedCodexAppServerClientIfCurrentAndWait;
@@ -138,6 +139,7 @@ describe("shared Codex app-server client", () => {
     ({ listCodexAppServerModels } = await import("./models.js"));
     ({
       clearSharedCodexAppServerClient,
+      clearSharedCodexAppServerClientAndWait,
       clearSharedCodexAppServerClientIfCurrent,
       clearSharedCodexAppServerClientIfCurrentAndWait,
       createIsolatedCodexAppServerClient,
@@ -1276,6 +1278,198 @@ describe("shared Codex app-server client", () => {
       });
     }
   });
+  it.each(["clear", "reset", "wait"])(
+    "HQ regression: explicit %s reaps an owned retired client exactly once",
+    async (operation) => {
+      const harness = createClientHarness();
+      vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+      const close = vi.spyOn(harness.client, "close");
+      const leased = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+      await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+      await expect(leased).resolves.toBe(harness.client);
+      const owner = retainSharedCodexAppServerClientForNativeChild(harness.client);
+      expect(owner.status).toBe("retained");
+      retireSharedCodexAppServerClientIfCurrent(harness.client);
+      releaseLeasedSharedCodexAppServerClient(harness.client);
+      expect(close).not.toHaveBeenCalled();
+      if (operation === "clear") {
+        clearSharedCodexAppServerClient();
+      } else if (operation === "reset") {
+        resetSharedCodexAppServerClientForTests();
+      } else {
+        let finishExit: (() => void) | undefined;
+        const exit = new Promise<void>((resolve) => {
+          finishExit = resolve;
+        });
+        const closeAndWait = vi
+          .spyOn(harness.client, "closeAndWait")
+          .mockImplementation(async () => {
+            harness.client.close();
+            await exit;
+          });
+        let settled = false;
+        const teardown = clearSharedCodexAppServerClientAndWait().then(() => {
+          settled = true;
+        });
+        await vi.waitFor(() => expect(closeAndWait).toHaveBeenCalledOnce());
+        expect(settled).toBe(false);
+        finishExit?.();
+        await teardown;
+        expect(settled).toBe(true);
+      }
+      expect(harness.process.stdin.destroyed).toBe(true);
+      expect(close).toHaveBeenCalledOnce();
+      if (owner.status === "retained") {
+        owner.release();
+        owner.release();
+      }
+      expect(close).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("HQ regression: startup cleanup awaits the real client's synchronous close", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const leased = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leased).resolves.toBe(harness.client);
+    releaseLeasedSharedCodexAppServerClient(harness.client);
+    let finishExit: (() => void) | undefined;
+    const exit = new Promise<void>((resolve) => {
+      finishExit = resolve;
+    });
+    const closeAndWait = vi.spyOn(harness.client, "closeAndWait").mockImplementation(async () => {
+      await exit;
+    });
+    let settled = false;
+    const cleanup = closeCodexStartupClientBestEffort(harness.client).then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(closeAndWait).toHaveBeenCalledOnce());
+    expect(harness.process.stdin.destroyed).toBe(true);
+    expect(settled).toBe(false);
+    finishExit?.();
+    await cleanup;
+    expect(settled).toBe(true);
+  });
+  it.each([
+    "invalid-spawn",
+    "missed-terminal",
+    "read-error",
+    "late-child",
+    "abandoned-child",
+    "active-after-discovery",
+  ])(
+    "settles provisional spawn ownership after %s without killing a discovered child",
+    async (scenario) => {
+      const harness = createClientHarness();
+      vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+      const close = vi.spyOn(harness.client, "close");
+      const leased = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+      await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+      await expect(leased).resolves.toBe(harness.client);
+      let failed = false;
+      let childActive = false;
+      const hasChild = ["late-child", "abandoned-child", "active-after-discovery"].includes(
+        scenario,
+      );
+      if (scenario === "abandoned-child" || scenario === "active-after-discovery") {
+        vi.useFakeTimers();
+      }
+      vi.spyOn(harness.client, "request").mockImplementation((async (
+        method: string,
+        params: { threadId?: string },
+      ) => {
+        if (scenario === "read-error" && !failed) {
+          failed = true;
+          throw new Error("temporary read failure");
+        }
+        if (method === "thread/loaded/list") {
+          return {
+            data: hasChild ? ["parent-thread", "late-child"] : ["parent-thread"],
+            nextCursor: null,
+          };
+        }
+        if (method === "thread/read") {
+          return {
+            thread: {
+              id: params.threadId,
+              status:
+                childActive && params.threadId === "late-child"
+                  ? { type: "active", activeFlags: [] }
+                  : { type: "idle" },
+              turns: [],
+              source:
+                params.threadId === "late-child"
+                  ? { subAgent: { thread_spawn: { parent_thread_id: "parent-thread" } } }
+                  : "cli",
+            },
+          };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      }) as typeof harness.client.request);
+      const monitor = new CodexNativeSubagentMonitor(harness.client);
+      monitor.registerParent({ parentThreadId: "parent-thread" });
+      await monitor.handleNotification({
+        method: "item/started",
+        params: {
+          threadId: "parent-thread",
+          turnId: "parent-a",
+          item: {
+            id: "spawn-1",
+            type: "collabAgentToolCall",
+            tool: "spawn_agent",
+            senderThreadId: "parent-thread",
+            receiverThreadIds: [],
+          },
+        },
+      });
+      releaseLeasedSharedCodexAppServerClient(harness.client);
+      retireSharedCodexAppServerClientIfCurrent(harness.client);
+      expect(close).not.toHaveBeenCalled();
+      if (scenario === "missed-terminal") {
+        await monitor.reconcileKnownTaskRows();
+      } else {
+        await monitor.handleNotification({
+          method: "turn/completed",
+          params: {
+            threadId: "parent-thread",
+            turn: { id: "parent-a", status: "interrupted", items: [] },
+          },
+        });
+      }
+      if (scenario === "read-error") {
+        expect(close).not.toHaveBeenCalled();
+        await monitor.reconcileKnownTaskRows();
+      }
+      if (scenario === "abandoned-child") {
+        expect(close).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(30_000);
+      }
+      if (scenario === "active-after-discovery") {
+        childActive = true;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(close).not.toHaveBeenCalled();
+      }
+      if (scenario === "late-child" || scenario === "active-after-discovery") {
+        // The loaded child exists but its initial input has not projected as active yet.
+        expect(close).not.toHaveBeenCalled();
+        await monitor.handleNotification({
+          method: "turn/started",
+          params: { threadId: "late-child", turn: { id: "child-a" } },
+        });
+        await monitor.handleNotification({
+          method: "turn/completed",
+          params: {
+            threadId: "late-child",
+            turn: { id: "child-a", status: "interrupted", items: [] },
+          },
+        });
+      }
+      expect(close).toHaveBeenCalledOnce();
+      monitor.dispose();
+    },
+  );
 });
 
 function rawDataToText(data: RawData): string {

@@ -1,6 +1,7 @@
 // Codex tests cover thread lifecycle.binding plugin behavior.
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { fingerprintCodexAppServerNetworkProxyConfigPatch } from "./config.js";
 import type { CodexDynamicToolFunctionSpec } from "./protocol.js";
 import {
   createParams as createRunAttemptParams,
@@ -12,7 +13,6 @@ import {
   readCodexAppServerBinding,
   writeCodexAppServerBinding as writeRawCodexAppServerBinding,
 } from "./session-binding.js";
-import { fingerprintCodexAppServerNetworkProxyConfigPatch } from "./config.js";
 import {
   shouldRotateCodexAppServerBindingForRuntime,
   startOrResumeThread,
@@ -78,6 +78,7 @@ function createParams(sessionFile: string, workspaceDir: string) {
 }
 
 const DEFAULT_CODEX_RUNTIME_THREAD_CONFIG = {
+  "features.multi_agent_v2": false,
   "features.code_mode": true,
   "features.code_mode_only": false,
   "features.apply_patch_streaming_events": true,
