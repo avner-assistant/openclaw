@@ -391,10 +391,34 @@ describe("Codex app-server native code mode config", () => {
       "features.code_mode": true,
       "features.code_mode_only": false,
       "features.apply_patch_streaming_events": true,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "cached",
     });
     expect(request.personality).toBe("none");
+  });
+
+  it("forces multi-agent V2 off for new and resumed native threads", () => {
+    const params = createAttemptParams({ provider: "openai" });
+    const appServer = createAppServerOptions() as never;
+    const config = { "features.multi_agent_v2": true };
+
+    const started = buildThreadStartParams(params, {
+      cwd: "/repo",
+      dynamicTools: [],
+      appServer,
+      developerInstructions: "test instructions",
+      config,
+    });
+    const resumed = buildThreadResumeParams(params, {
+      threadId: "thread-1",
+      appServer,
+      developerInstructions: "test instructions",
+      config,
+    });
+
+    expect(started.config?.["features.multi_agent_v2"]).toBe(false);
+    expect(resumed.config?.["features.multi_agent_v2"]).toBe(false);
   });
 
   it("enables hosted Codex web search on thread/start by default", () => {
@@ -536,6 +560,7 @@ describe("Codex app-server native code mode config", () => {
       "features.code_mode_only": false,
       "features.apply_patch_streaming_events": true,
       "features.multi_agent": false,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "cached",
     });
@@ -576,6 +601,7 @@ describe("Codex app-server native code mode config", () => {
       "features.code_mode": true,
       "features.code_mode_only": true,
       "features.apply_patch_streaming_events": true,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "cached",
     });
@@ -597,6 +623,7 @@ describe("Codex app-server native code mode config", () => {
       "features.code_mode": true,
       "features.code_mode_only": true,
       "features.apply_patch_streaming_events": true,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "cached",
     });
@@ -613,6 +640,7 @@ describe("Codex app-server native code mode config", () => {
       "features.code_mode": true,
       "features.code_mode_only": false,
       "features.apply_patch_streaming_events": true,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "cached",
     });
@@ -636,6 +664,7 @@ describe("Codex app-server native code mode config", () => {
     expect(request.config).toEqual({
       "features.code_mode": false,
       "features.code_mode_only": false,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "disabled",
     });
@@ -655,6 +684,7 @@ describe("Codex app-server native code mode config", () => {
     expect(request.config).toEqual({
       "features.code_mode": false,
       "features.code_mode_only": false,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "disabled",
     });
@@ -685,6 +715,7 @@ describe("Codex app-server native code mode config", () => {
       "features.code_mode": true,
       "features.code_mode_only": false,
       "features.apply_patch_streaming_events": true,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "cached",
     });
@@ -708,6 +739,7 @@ describe("Codex app-server native code mode config", () => {
       "features.code_mode": true,
       "features.code_mode_only": false,
       "features.apply_patch_streaming_events": true,
+      "features.multi_agent_v2": false,
       "features.standalone_web_search": false,
       web_search: "cached",
     });
@@ -859,6 +891,7 @@ describe("Codex app-server turn params", () => {
         "features.code_mode": true,
         "features.code_mode_only": false,
         "features.apply_patch_streaming_events": true,
+        "features.multi_agent_v2": false,
         "features.standalone_web_search": false,
         web_search: "cached",
       },

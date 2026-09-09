@@ -130,6 +130,13 @@ const CODEX_TOOL_SEARCH_UNSUPPORTED_THREAD_CONFIG: JsonObject = {
   "features.multi_agent": false,
 };
 
+// V2 starts a native child before emitting its first ownership-bearing app-server
+// notification. Until Codex provides a pre-spawn signal, keep OpenClaw on V1 so
+// timeout cleanup cannot close the shared client during that discovery gap.
+const CODEX_MULTI_AGENT_COMPAT_THREAD_CONFIG: JsonObject = {
+  "features.multi_agent_v2": false,
+};
+
 export type CodexThreadLifecycleTimingSpan = {
   name: string;
   durationMs: number;
@@ -1331,8 +1338,10 @@ export function buildCodexRuntimeThreadConfig(
     const disabledConfig = mergeCodexThreadConfigs(
       config,
       CODEX_CODE_MODE_DISABLED_THREAD_CONFIG,
+      CODEX_MULTI_AGENT_COMPAT_THREAD_CONFIG,
     ) ?? {
       ...CODEX_CODE_MODE_DISABLED_THREAD_CONFIG,
+      ...CODEX_MULTI_AGENT_COMPAT_THREAD_CONFIG,
     };
     // Native patch streaming is part of native code mode, so do not send it
     // when runtime policy disables that tool surface.
@@ -1341,17 +1350,22 @@ export function buildCodexRuntimeThreadConfig(
   }
   if (options.nativeCodeModeOnlyEnabled === true) {
     return (
-      mergeCodexThreadConfigs(codeModeConfig, config, {
-        "features.code_mode_only": true,
-      }) ?? {
+      mergeCodexThreadConfigs(
+        codeModeConfig,
+        config,
+        { "features.code_mode_only": true },
+        CODEX_MULTI_AGENT_COMPAT_THREAD_CONFIG,
+      ) ?? {
         ...codeModeConfig,
         "features.code_mode_only": true,
+        ...CODEX_MULTI_AGENT_COMPAT_THREAD_CONFIG,
       }
     );
   }
   return (
-    mergeCodexThreadConfigs(codeModeConfig, config) ?? {
+    mergeCodexThreadConfigs(codeModeConfig, config, CODEX_MULTI_AGENT_COMPAT_THREAD_CONFIG) ?? {
       ...codeModeConfig,
+      ...CODEX_MULTI_AGENT_COMPAT_THREAD_CONFIG,
     }
   );
 }

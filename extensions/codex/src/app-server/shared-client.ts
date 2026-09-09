@@ -649,9 +649,13 @@ function closeSharedClientEntryIfUnclaimed(
   if (state.clients.get(key) !== entry) {
     return false;
   }
+  const client = entry.client;
+  if (!client) {
+    return false;
+  }
   state.clients.delete(key);
-  entry.client?.close();
-  return Boolean(entry.client);
+  client.close();
+  return true;
 }
 
 function collectSharedClients(state: SharedCodexAppServerClientState): CodexAppServerClient[] {

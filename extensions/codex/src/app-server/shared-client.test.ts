@@ -57,6 +57,7 @@ let listCodexAppServerModels: typeof import("./models.js").listCodexAppServerMod
 let clearSharedCodexAppServerClient: typeof import("./shared-client.js").clearSharedCodexAppServerClient;
 let clearSharedCodexAppServerClientIfCurrent: typeof import("./shared-client.js").clearSharedCodexAppServerClientIfCurrent;
 let clearSharedCodexAppServerClientIfCurrentAndWait: typeof import("./shared-client.js").clearSharedCodexAppServerClientIfCurrentAndWait;
+let closeCodexStartupClientBestEffort: typeof import("./attempt-client-cleanup.js").closeCodexStartupClientBestEffort;
 let createIsolatedCodexAppServerClient: typeof import("./shared-client.js").createIsolatedCodexAppServerClient;
 let detachSharedCodexAppServerClientIfCurrent: typeof import("./shared-client.js").detachSharedCodexAppServerClientIfCurrent;
 let getLeasedSharedCodexAppServerClient: typeof import("./shared-client.js").getLeasedSharedCodexAppServerClient;
@@ -133,6 +134,7 @@ function clientStartCall(startSpy: unknown) {
 
 describe("shared Codex app-server client", () => {
   beforeAll(async () => {
+    ({ closeCodexStartupClientBestEffort } = await import("./attempt-client-cleanup.js"));
     ({ listCodexAppServerModels } = await import("./models.js"));
     ({
       clearSharedCodexAppServerClient,
@@ -1067,6 +1069,22 @@ describe("shared Codex app-server client", () => {
     expect(clearSharedCodexAppServerClientIfCurrent(harness.client)).toBe(false);
     expect(retireSharedCodexAppServerClientIfCurrent(harness.client)).toBeUndefined();
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("waits for a real unclaimed shared startup client to exit after closing it", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const closeAndWait = vi.spyOn(harness.client, "closeAndWait");
+
+    const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leasedClient).resolves.toBe(harness.client);
+    expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+
+    await closeCodexStartupClientBestEffort(harness.client);
+
+    expect(closeAndWait).toHaveBeenCalledOnce();
+    expect(harness.process.stdin.destroyed).toBe(true);
   });
 
   it("detaches instead of killing a shared client that a native child still owns during a wait-close", async () => {
