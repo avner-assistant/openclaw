@@ -1,8 +1,12 @@
 // Codex tests cover shared client plugin behavior.
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { WebSocketServer, type RawData } from "ws";
 import { CodexAppServerClient, MIN_CODEX_APP_SERVER_VERSION } from "./client.js";
 import { codexAppServerStartOptionsKey } from "./config.js";
+import { CodexNativeSubagentMonitor } from "./native-subagent-monitor.js";
 import { createClientHarness } from "./test-support.js";
 
 const mocks = vi.hoisted(() => ({
@@ -821,6 +825,222 @@ describe("shared Codex app-server client", () => {
     if (childOwner.status === "retained") {
       childOwner.release();
     }
+    expect(close).toHaveBeenCalledOnce();
+    expect(harness.process.stdin.destroyed).toBe(true);
+  });
+
+  it("keeps a resumed native child alive when a stale prior-turn terminal arrives", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const close = vi.spyOn(harness.client, "close");
+
+    const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leasedClient).resolves.toBe(harness.client);
+
+    const monitor = new CodexNativeSubagentMonitor(harness.client);
+    monitor.registerParent({ parentThreadId: "parent-thread" });
+    await monitor.handleNotification({
+      method: "thread/started",
+      params: {
+        thread: {
+          id: "child-thread",
+          source: {
+            subAgent: {
+              thread_spawn: { parent_thread_id: "parent-thread", depth: 1 },
+            },
+          },
+        },
+      },
+    });
+    expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+
+    await monitor.handleNotification({
+      method: "turn/started",
+      params: {
+        threadId: "child-thread",
+        turn: { id: "turn-a", status: "inProgress", items: [] },
+      },
+    });
+    await monitor.handleNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "child-thread",
+        turn: { id: "turn-a", status: "interrupted", items: [] },
+      },
+    });
+    await monitor.handleNotification({
+      method: "turn/started",
+      params: {
+        threadId: "child-thread",
+        turn: { id: "turn-b", status: "inProgress", items: [] },
+      },
+    });
+
+    // A delayed duplicate for the old turn must not release turn B's ownership.
+    await monitor.handleNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "child-thread",
+        turn: { id: "turn-a", status: "interrupted", items: [] },
+      },
+    });
+    expect(clearSharedCodexAppServerClientIfCurrent(harness.client)).toBe(true);
+    expect(close).not.toHaveBeenCalled();
+    expect(harness.process.stdin.destroyed).toBe(false);
+
+    await monitor.handleNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "child-thread",
+        turn: { id: "turn-b", status: "completed", items: [] },
+      },
+    });
+    expect(close).toHaveBeenCalledOnce();
+    expect(harness.process.stdin.destroyed).toBe(true);
+  });
+
+  it("releases a nested native child from transcript evidence when its terminal event is missed", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-nested-owner-"));
+    try {
+      const codexHome = path.join(tempDir, "codex-home");
+      const transcriptDir = path.join(codexHome, "sessions", "2026", "09", "09");
+      await fs.mkdir(transcriptDir, { recursive: true });
+      await fs.writeFile(
+        path.join(transcriptDir, "rollout-2026-09-09T07-00-00-grandchild-thread.jsonl"),
+        [
+          JSON.stringify({
+            type: "session_meta",
+            payload: {
+              id: "grandchild-thread",
+              source: {
+                subagent: { thread_spawn: { parent_thread_id: "child-thread" } },
+              },
+            },
+          }),
+          JSON.stringify({
+            timestamp: "2026-09-09T07:00:05.000Z",
+            type: "event_msg",
+            payload: {
+              type: "task_complete",
+              last_agent_message: "nested child final result",
+              completed_at: 1788937205,
+            },
+          }),
+          "",
+        ].join("\n"),
+      );
+
+      const harness = createClientHarness();
+      vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+      const close = vi.spyOn(harness.client, "close");
+      const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+      await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+      await expect(leasedClient).resolves.toBe(harness.client);
+
+      const monitor = new CodexNativeSubagentMonitor(harness.client, undefined, {
+        codexHome,
+        transcriptPollDelaysMs: [1],
+      });
+      monitor.registerParent({ parentThreadId: "parent-thread" });
+      await monitor.handleNotification({
+        method: "thread/started",
+        params: {
+          thread: {
+            id: "child-thread",
+            source: {
+              subAgent: { thread_spawn: { parent_thread_id: "parent-thread", depth: 1 } },
+            },
+          },
+        },
+      });
+      await monitor.handleNotification({
+        method: "thread/started",
+        params: {
+          thread: {
+            id: "grandchild-thread",
+            source: {
+              subAgent: { thread_spawn: { parent_thread_id: "child-thread", depth: 2 } },
+            },
+          },
+        },
+      });
+      expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+      await monitor.handleNotification({
+        method: "turn/completed",
+        params: {
+          threadId: "child-thread",
+          turn: { id: "child-turn", status: "interrupted", items: [] },
+        },
+      });
+      expect(clearSharedCodexAppServerClientIfCurrent(harness.client)).toBe(true);
+      expect(close).not.toHaveBeenCalled();
+
+      await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+      expect(harness.process.stdin.destroyed).toBe(true);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the shared client alive from spawn start until the child is discovered", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const close = vi.spyOn(harness.client, "close");
+    const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leasedClient).resolves.toBe(harness.client);
+
+    const monitor = new CodexNativeSubagentMonitor(harness.client);
+    monitor.registerParent({ parentThreadId: "parent-thread" });
+    await monitor.handleNotification({
+      method: "item/started",
+      params: {
+        threadId: "parent-thread",
+        turnId: "parent-turn",
+        item: {
+          id: "spawn-call",
+          type: "collabAgentToolCall",
+          tool: "spawn_agent",
+          status: "inProgress",
+          senderThreadId: "parent-thread",
+          receiverThreadIds: [],
+          agentsStates: {},
+        },
+      },
+    });
+    expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+
+    // Parent cleanup can race ahead of child creation, but the in-flight spawn
+    // is durable protocol evidence that a child may still need this transport.
+    expect(clearSharedCodexAppServerClientIfCurrent(harness.client)).toBe(true);
+    expect(close).not.toHaveBeenCalled();
+
+    await monitor.handleNotification({
+      method: "item/completed",
+      params: {
+        threadId: "parent-thread",
+        turnId: "parent-turn",
+        item: {
+          id: "spawn-call",
+          type: "collabAgentToolCall",
+          tool: "spawn_agent",
+          status: "completed",
+          senderThreadId: "parent-thread",
+          receiverThreadIds: ["late-child"],
+          agentsStates: { "late-child": { status: "running" } },
+        },
+      },
+    });
+    expect(close).not.toHaveBeenCalled();
+
+    await monitor.handleNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "late-child",
+        turn: { id: "late-child-turn", status: "completed", items: [] },
+      },
+    });
     expect(close).toHaveBeenCalledOnce();
     expect(harness.process.stdin.destroyed).toBe(true);
   });

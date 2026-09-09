@@ -51,11 +51,13 @@ type ParentState = {
   mirror?: CodexNativeSubagentTaskMirror;
   deferredSettlement?: () => Promise<void> | void;
   deliveredCompletionKeys: Set<string>;
+  pendingChildSpawns: Map<string, (() => void) | undefined>;
 };
 
 type ChildState = {
   childThreadId: string;
   parentThreadId: string;
+  directParentThreadId: string;
   assistantMessagesByTurn: Map<string, ChildAssistantMessages>;
   transcriptPath?: string;
   transcriptPollAttempt: number;
@@ -69,6 +71,7 @@ type ChildState = {
   noFinalCompletionFallbackTimer?: ReturnType<typeof setTimeout>;
   settledWithoutCompletion: boolean;
   ownershipOnly: boolean;
+  clientOwnershipTurnId?: string;
   releaseClientOwnership?: () => void;
 };
 
@@ -182,6 +185,12 @@ export class CodexNativeSubagentMonitor {
 
   dispose(): void {
     this.clearTimers();
+    for (const state of this.parentStates.values()) {
+      for (const release of state.pendingChildSpawns.values()) {
+        release?.();
+      }
+      state.pendingChildSpawns.clear();
+    }
     for (const childState of this.childStates.values()) {
       this.releaseChildClientOwnership(childState);
     }
@@ -234,6 +243,7 @@ export class CodexNativeSubagentMonitor {
         taskRuntimeScope: params.taskRuntimeScope,
         agentId: params.agentId,
         deliveredCompletionKeys: new Set<string>(),
+        pendingChildSpawns: new Map(),
       };
       this.ensureParentTaskRuntime(state);
       this.parentStates.set(parentThreadId, {
@@ -274,7 +284,8 @@ export class CodexNativeSubagentMonitor {
     const childState = childThreadId ? this.childStates.get(childThreadId) : undefined;
     if (childState) {
       childState.settledWithoutCompletion = false;
-      this.retainChildClientOwnership(childState);
+      const turn = isJsonObject(params?.turn) ? params.turn : undefined;
+      this.retainChildClientOwnership(childState, readString(turn, "id"));
     }
   }
 
@@ -335,6 +346,7 @@ export class CodexNativeSubagentMonitor {
       if (state && childThreadId) {
         this.registerChildThread(state.parentThreadId, childThreadId, {
           agentPath,
+          directParentThreadId,
           ownershipOnly: !directParentState,
         });
       }
@@ -372,12 +384,17 @@ export class CodexNativeSubagentMonitor {
           if (childThreadId) {
             this.registerChildThread(state.parentThreadId, childThreadId, {
               ...(agentPath === undefined ? {} : { agentPath }),
+              directParentThreadId,
               ownershipOnly,
             });
           }
           return directParentState;
         }
         const isSpawnAgentTool = normalizeToolName(readString(item, "tool")) === "spawnagent";
+        const itemId = readString(item, "id")?.trim();
+        if (isSpawnAgentTool && itemId && notification.method === "item/started") {
+          this.retainPendingChildSpawn(state, directParentThreadId, itemId);
+        }
         const childThreadIds = isSpawnAgentTool
           ? new Set([
               ...readStringArray(item?.receiverThreadIds),
@@ -385,7 +402,13 @@ export class CodexNativeSubagentMonitor {
             ])
           : new Set(readStringArray(item?.receiverThreadIds));
         for (const childThreadId of childThreadIds) {
-          this.registerChildThread(state.parentThreadId, childThreadId, { ownershipOnly });
+          this.registerChildThread(state.parentThreadId, childThreadId, {
+            directParentThreadId,
+            ownershipOnly,
+          });
+        }
+        if (isSpawnAgentTool && itemId && notification.method === "item/completed") {
+          this.releasePendingChildSpawn(state, directParentThreadId, itemId);
         }
       }
       return directParentState;
@@ -535,14 +558,20 @@ export class CodexNativeSubagentMonitor {
     const turn = isJsonObject(params?.turn) ? params.turn : undefined;
     if (childState && turn && readString(turn, "status") === "interrupted") {
       const turnId = readString(turn, "id");
+      if (!this.matchesOwnedChildTurn(childState, turnId)) {
+        return;
+      }
+      this.releaseChildClientOwnership(childState, turnId);
       if (turnId) {
         childState.assistantMessagesByTurn.delete(turnId);
       }
       // Codex keeps interrupted agents resumable but intentionally sends no
       // parent completion, so one-shot cleanup may settle until another turn starts.
       childState.settledWithoutCompletion = true;
-      this.releaseChildClientOwnership(childState);
       await this.flushDeferredParentSettlements(childState.parentThreadId);
+      return;
+    }
+    if (childState && turn && !this.matchesOwnedChildTurn(childState, readString(turn, "id"))) {
       return;
     }
     if (childState && turn) {
@@ -592,10 +621,10 @@ export class CodexNativeSubagentMonitor {
       return false;
     }
     const transcriptParentThreadId = completion.completion.parentThreadId;
-    if (transcriptParentThreadId && transcriptParentThreadId !== state.parentThreadId) {
+    if (transcriptParentThreadId && transcriptParentThreadId !== childState.directParentThreadId) {
       embeddedAgentLog.warn("Codex native subagent transcript parent did not match monitor state", {
         childThreadId: childState.childThreadId,
-        expectedParentThreadId: state.parentThreadId,
+        expectedParentThreadId: childState.directParentThreadId,
         transcriptParentThreadId,
       });
       childState.transcriptPath = undefined;
@@ -752,6 +781,9 @@ export class CodexNativeSubagentMonitor {
   }
 
   private hasUnsettledChildren(parentThreadId: string): boolean {
+    if ((this.parentStates.get(parentThreadId)?.pendingChildSpawns.size ?? 0) > 0) {
+      return true;
+    }
     for (const childState of this.childStates.values()) {
       if (
         childState.parentThreadId === parentThreadId &&
@@ -828,6 +860,7 @@ export class CodexNativeSubagentMonitor {
     childThreadId: string,
     options: {
       agentPath?: string;
+      directParentThreadId?: string;
       scheduleTranscriptPoll?: boolean;
       ownershipOnly?: boolean;
     } = {},
@@ -858,6 +891,8 @@ export class CodexNativeSubagentMonitor {
       childState = {
         childThreadId: normalizedChildThreadId,
         parentThreadId: normalizedParentThreadId,
+        directParentThreadId:
+          normalizeOptionalString(options.directParentThreadId) ?? normalizedParentThreadId,
         assistantMessagesByTurn: new Map<string, ChildAssistantMessages>(),
         transcriptPollAttempt: 0,
         transcriptTerminal: false,
@@ -870,7 +905,11 @@ export class CodexNativeSubagentMonitor {
     } else if (!options.ownershipOnly && childState.ownershipOnly) {
       childState.ownershipOnly = false;
     }
-    if (!childState.ownershipOnly && options.scheduleTranscriptPoll !== false) {
+    const directParentThreadId = normalizeOptionalString(options.directParentThreadId);
+    if (directParentThreadId) {
+      childState.directParentThreadId = directParentThreadId;
+    }
+    if (options.scheduleTranscriptPoll !== false) {
       this.scheduleTranscriptPoll(childState);
     }
   }
@@ -880,23 +919,70 @@ export class CodexNativeSubagentMonitor {
     return childState ? this.parentStates.get(childState.parentThreadId) : undefined;
   }
 
-  private retainChildClientOwnership(childState: ChildState): void {
-    if (childState.releaseClientOwnership || childState.transcriptTerminal) {
+  private retainPendingChildSpawn(
+    state: ParentState,
+    directParentThreadId: string,
+    itemId: string,
+  ): void {
+    const key = `${directParentThreadId}\u0000${itemId}`;
+    if (state.pendingChildSpawns.has(key)) {
+      return;
+    }
+    const retained = this.retainClientForNativeChild(this.client);
+    state.pendingChildSpawns.set(
+      key,
+      retained.status === "retained" ? retained.release : undefined,
+    );
+  }
+
+  private releasePendingChildSpawn(
+    state: ParentState,
+    directParentThreadId: string,
+    itemId: string,
+  ): void {
+    const key = `${directParentThreadId}\u0000${itemId}`;
+    if (!state.pendingChildSpawns.has(key)) {
+      return;
+    }
+    const release = state.pendingChildSpawns.get(key);
+    state.pendingChildSpawns.delete(key);
+    release?.();
+    void this.flushDeferredParentSettlements(state.parentThreadId);
+  }
+
+  private retainChildClientOwnership(childState: ChildState, turnId?: string): void {
+    if (childState.releaseClientOwnership) {
+      childState.clientOwnershipTurnId = turnId ?? childState.clientOwnershipTurnId;
+      return;
+    }
+    if (childState.transcriptTerminal) {
       return;
     }
     const retained = this.retainClientForNativeChild(this.client);
     if (retained.status === "retained") {
+      childState.clientOwnershipTurnId = turnId;
       childState.releaseClientOwnership = retained.release;
     }
   }
 
-  private releaseChildClientOwnership(childState: ChildState): void {
+  private matchesOwnedChildTurn(childState: ChildState, turnId: string | undefined): boolean {
+    return (
+      !turnId || !childState.clientOwnershipTurnId || childState.clientOwnershipTurnId === turnId
+    );
+  }
+
+  private releaseChildClientOwnership(childState: ChildState, turnId?: string): boolean {
+    if (!this.matchesOwnedChildTurn(childState, turnId)) {
+      return false;
+    }
     const release = childState.releaseClientOwnership;
     if (!release) {
-      return;
+      return false;
     }
+    childState.clientOwnershipTurnId = undefined;
     childState.releaseClientOwnership = undefined;
     release();
+    return true;
   }
 
   private ensureChildState(parentThreadId: string, childThreadId: string): ChildState {

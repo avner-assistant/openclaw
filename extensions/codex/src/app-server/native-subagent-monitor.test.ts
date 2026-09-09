@@ -956,7 +956,11 @@ describe("CodexNativeSubagentMonitor", () => {
     expect(releases[2]).toHaveBeenCalledOnce();
     expect(runtime.deliverAgentHarnessTaskCompletion).not.toHaveBeenCalled();
 
-    const completion = childTurnCompletedNotification({ status: "failed", error: "failed" });
+    const completion = childTurnCompletedNotification({
+      status: "failed",
+      error: "failed",
+      turnId: "resumed-turn",
+    });
     await client.notify(completion);
     await client.notify(completion);
     expect(releases[1]).toHaveBeenCalledOnce();
