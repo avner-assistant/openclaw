@@ -849,6 +849,35 @@ describe("shared Codex app-server client", () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
+  it("detaches instead of killing a shared client that a native child still owns during a wait-close", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const close = vi.spyOn(harness.client, "close");
+    const closeAndWait = vi.spyOn(harness.client, "closeAndWait");
+
+    const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leasedClient).resolves.toBe(harness.client);
+
+    const childOwner = retainSharedCodexAppServerClientForNativeChild(harness.client);
+    expect(childOwner.status).toBe("retained");
+    expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+
+    // A short-lived warm-up run (e.g. migration apply) tears its client down.
+    await expect(clearSharedCodexAppServerClientIfCurrentAndWait(harness.client)).resolves.toBe(
+      true,
+    );
+    expect(closeAndWait).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(harness.process.stdin.destroyed).toBe(false);
+
+    if (childOwner.status === "retained") {
+      childOwner.release();
+    }
+    expect(close).toHaveBeenCalledOnce();
+    expect(harness.process.stdin.destroyed).toBe(true);
+  });
+
   it("closes a retired shared client once when its last native child releases", async () => {
     const harness = createClientHarness();
     vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);

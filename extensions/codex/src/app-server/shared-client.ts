@@ -479,6 +479,12 @@ export async function clearSharedCodexAppServerClientIfCurrentAndWait(
   for (const [key, entry] of state.clients) {
     if (entry.client === client) {
       state.clients.delete(key);
+      if (entry.activeNativeChildOwners > 0) {
+        // A native child is still computing on this client. Detaching is enough to
+        // keep later runs off it; the last owner closes it instead of this caller.
+        entry.closeWhenIdle = true;
+        return true;
+      }
       await client.closeAndWait(options);
       return true;
     }
