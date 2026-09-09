@@ -960,6 +960,153 @@ describe("CodexNativeSubagentMonitor", () => {
     await client.notify(completion);
     await client.notify(completion);
     expect(releases[1]).toHaveBeenCalledOnce();
+    // Duplicate terminal delivery must not re-pin the client either.
+    expect(retainClientForNativeChild).toHaveBeenCalledTimes(3);
+  });
+
+  it("releases native-child compute once for empty-completion fallback and failure alerts", async () => {
+    const client = createClient();
+    const runtime = createRuntime();
+    const releases: Array<ReturnType<typeof vi.fn>> = [];
+    const retainClientForNativeChild = vi.fn(() => {
+      const release = vi.fn();
+      releases.push(release);
+      return { status: "retained" as const, release };
+    });
+    const monitor = new CodexNativeSubagentMonitor(client, runtime, {
+      retainClientForNativeChild,
+    });
+    monitor.registerParent({
+      parentThreadId: "parent-thread",
+      requesterSessionKey: "agent:main:discord:channel:C123",
+      taskRuntimeScope: createTaskScope(),
+      agentId: "main",
+    });
+
+    await notifyChildStarted(client, "parent-thread", "empty-child");
+    await notifyChildStarted(client, "parent-thread", "errored-child");
+    expect(retainClientForNativeChild).toHaveBeenCalledTimes(2);
+
+    await client.notify(
+      nativeCompletionNotification({
+        agentPath: "empty-child",
+        statusLabel: "completed",
+        result: null,
+      }),
+    );
+    // The empty-reporter fallback still delivers its typed no-final result.
+    expect(runtime.deliverAgentHarnessTaskCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        childSessionId: "empty-child",
+        status: "succeeded",
+        statusLabel: "completed_without_final_message",
+        result: "Codex native subagent completed without a final assistant message.",
+      }),
+    );
+    expect(releases[0]).toHaveBeenCalledOnce();
+    expect(releases[1]).not.toHaveBeenCalled();
+
+    await client.notify(
+      nativeCompletionNotification({
+        agentPath: "errored-child",
+        statusLabel: "errored",
+        result: "child failed",
+      }),
+    );
+    // The failure alert still fires, and the second child releases exactly once.
+    expect(runtime.deliverAgentHarnessTaskCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({
+        childSessionId: "errored-child",
+        announceId: "codex-native:parent-thread:errored-child:failed",
+        status: "failed",
+        statusLabel: "errored",
+        result: "child failed",
+      }),
+    );
+    expect(releases[1]).toHaveBeenCalledOnce();
+    expect(releases[0]).toHaveBeenCalledOnce();
+  });
+
+  it("retains and releases native-child compute for reconciled running task rows", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-codex-subagent-"));
+    const codexHome = path.join(tempDir, "codex-home");
+    const transcriptDir = path.join(codexHome, "sessions", "2026", "05", "17");
+    await fs.mkdir(transcriptDir, { recursive: true });
+    await fs.writeFile(
+      path.join(transcriptDir, "rollout-2026-05-17T17-14-08-reconciled-child.jsonl"),
+      [
+        JSON.stringify({
+          type: "session_meta",
+          payload: {
+            source: {
+              subagent: { thread_spawn: { parent_thread_id: "parent-thread" } },
+            },
+          },
+        }),
+        JSON.stringify({
+          timestamp: "2026-05-18T00:14:48.094Z",
+          type: "event_msg",
+          payload: {
+            type: "task_complete",
+            last_agent_message: "reconciled child final result",
+            completed_at: 1779063288,
+          },
+        }),
+        "",
+      ].join("\n"),
+    );
+    const client = createClient();
+    const runtime = createRuntime();
+    runtime.listTaskRecords.mockReturnValue([
+      {
+        taskId: "task-1",
+        runtime: "subagent",
+        taskKind: "codex-native",
+        requesterSessionKey: "agent:main:discord:channel:C123",
+        ownerKey: "agent:main:discord:channel:C123",
+        scopeKind: "session",
+        runId: "codex-thread:reconciled-child",
+        task: "check the weather",
+        status: "running",
+        deliveryStatus: "not_applicable",
+        notifyPolicy: "silent",
+        createdAt: 1,
+      },
+    ]);
+    const releases: Array<ReturnType<typeof vi.fn>> = [];
+    const retainClientForNativeChild = vi.fn(() => {
+      const release = vi.fn();
+      releases.push(release);
+      return { status: "retained" as const, release };
+    });
+    const monitor = new CodexNativeSubagentMonitor(client, runtime, {
+      codexHome,
+      transcriptPollDelaysMs: [60_000],
+      retainClientForNativeChild,
+    });
+
+    monitor.registerParent({
+      parentThreadId: "parent-thread",
+      requesterSessionKey: "agent:main:discord:channel:C123",
+      taskRuntimeScope: createTaskScope(),
+      agentId: "main",
+    });
+
+    // The child is known only from a reconciled running task row - it never sent
+    // thread/started - yet it must still pin the client while it is reconciled.
+    await vi.waitFor(() => expect(retainClientForNativeChild).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => {
+      expect(runtime.deliverAgentHarnessTaskCompletion).toHaveBeenCalledWith(
+        expect.objectContaining({
+          childSessionId: "reconciled-child",
+          result: "reconciled child final result",
+        }),
+      );
+    });
+    expect(releases[0]).toHaveBeenCalledOnce();
+
+    client.close();
+    expect(releases[0]).toHaveBeenCalledOnce();
   });
 
   it("runs deferred parent cleanup when a child ends in a system error", async () => {

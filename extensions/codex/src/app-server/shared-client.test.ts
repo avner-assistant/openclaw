@@ -481,6 +481,7 @@ describe("shared Codex app-server client", () => {
     );
     expect(retireSharedCodexAppServerClientIfCurrent(legacy.client)).toEqual({
       activeLeases: 1,
+      activeNativeChildOwners: 0,
       closed: false,
     });
     expect(legacy.process.stdin.destroyed).toBe(false);
@@ -795,6 +796,86 @@ describe("shared Codex app-server client", () => {
     expect(retainSharedCodexAppServerClientForNativeChild(harness.client)).toEqual({
       status: "closed",
     });
+  });
+
+  it("keeps an unrelated task's native child alive when another run clears the shared client", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const close = vi.spyOn(harness.client, "close");
+
+    const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leasedClient).resolves.toBe(harness.client);
+
+    // Task A's parent turn ends but its native child keeps computing.
+    const childOwner = retainSharedCodexAppServerClientForNativeChild(harness.client);
+    expect(childOwner.status).toBe("retained");
+    expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+    expect(harness.process.stdin.destroyed).toBe(false);
+
+    // An unrelated run (scheduled reporter / failed startup retry) clears the entry.
+    expect(clearSharedCodexAppServerClientIfCurrent(harness.client)).toBe(true);
+    expect(close).not.toHaveBeenCalled();
+    expect(harness.process.stdin.destroyed).toBe(false);
+
+    if (childOwner.status === "retained") {
+      childOwner.release();
+    }
+    expect(close).toHaveBeenCalledOnce();
+    expect(harness.process.stdin.destroyed).toBe(true);
+  });
+
+  it("closes a cleared shared client immediately when no native child owns it", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const close = vi.spyOn(harness.client, "close");
+
+    const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leasedClient).resolves.toBe(harness.client);
+    expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+
+    expect(clearSharedCodexAppServerClientIfCurrent(harness.client)).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+    expect(harness.process.stdin.destroyed).toBe(true);
+
+    // No stale ownership record survives the close, so nothing can be retained
+    // against a dead client and no second close is issued.
+    expect(retainSharedCodexAppServerClientForNativeChild(harness.client)).toEqual({
+      status: "closed",
+    });
+    expect(clearSharedCodexAppServerClientIfCurrent(harness.client)).toBe(false);
+    expect(retireSharedCodexAppServerClientIfCurrent(harness.client)).toBeUndefined();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("closes a retired shared client once when its last native child releases", async () => {
+    const harness = createClientHarness();
+    vi.spyOn(CodexAppServerClient, "start").mockReturnValueOnce(harness.client);
+    const close = vi.spyOn(harness.client, "close");
+
+    const leasedClient = getLeasedSharedCodexAppServerClient({ timeoutMs: 1000 });
+    await sendInitializeResult(harness, "openclaw/0.125.0 (macOS; test)");
+    await expect(leasedClient).resolves.toBe(harness.client);
+
+    const childOwner = retainSharedCodexAppServerClientForNativeChild(harness.client);
+    expect(childOwner.status).toBe("retained");
+    expect(releaseLeasedSharedCodexAppServerClient(harness.client)).toBe(true);
+    expect(retireSharedCodexAppServerClientIfCurrent(harness.client)).toEqual({
+      activeLeases: 0,
+      activeNativeChildOwners: 1,
+      closed: false,
+    });
+
+    if (childOwner.status === "retained") {
+      childOwner.release();
+      childOwner.release();
+      childOwner.release();
+    }
+    expect(close).toHaveBeenCalledOnce();
+    expect(harness.process.stdin.destroyed).toBe(true);
+    expect(retireSharedCodexAppServerClientIfCurrent(harness.client)).toBeUndefined();
+    expect(close).toHaveBeenCalledOnce();
   });
 
   it("leases shared app-server clients before returning concurrent acquirers", async () => {
