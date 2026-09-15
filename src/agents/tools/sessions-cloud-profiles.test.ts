@@ -1,3 +1,4 @@
+import { validateToolArguments } from "@openclaw/ai/validation";
 import { expect, it, vi } from "vitest";
 import { createSessionsTool } from "./sessions-tool.js";
 
@@ -31,4 +32,40 @@ it("pages cloud profile summaries and returns the selected OS/machine catalog", 
     profileId: "removed",
   });
   expect(missing.details).toMatchObject({ status: "error", profileId: "removed" });
+});
+
+it.each([129, 256])(
+  "round-trips a listed %i-character profile ID through argument validation",
+  async (length) => {
+    const profile = {
+      id: "p".repeat(length),
+      providerId: "fixture",
+      operatingSystems: [{ id: "linux", label: "Linux", default: true }],
+      machines: [{ id: "tiny", label: "Tiny", os: "linux", cpu: 2 }],
+    };
+    const callGateway = vi.fn().mockResolvedValue({ profiles: [profile] });
+    const tool = createSessionsTool({ callGateway });
+    const listed = await tool.execute("catalog", { action: "cloud_profiles" });
+    expect(listed.details).toMatchObject({ profiles: [{ id: profile.id }] });
+    const args = validateToolArguments(tool, {
+      type: "toolCall",
+      id: "selected-profile",
+      name: tool.name,
+      arguments: { action: "cloud_profiles", profileId: profile.id },
+    });
+    const selected = await tool.execute("selected-profile", args);
+    expect(selected.details).toEqual({ profile });
+  },
+);
+
+it("rejects profile IDs beyond the placement identifier limit", () => {
+  const tool = createSessionsTool({ callGateway: vi.fn() });
+  expect(() =>
+    validateToolArguments(tool, {
+      type: "toolCall",
+      id: "oversized-profile",
+      name: tool.name,
+      arguments: { action: "cloud_profiles", profileId: "p".repeat(257) },
+    }),
+  ).toThrow(/profileId/);
 });

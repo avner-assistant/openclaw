@@ -4,6 +4,7 @@ import type {
   SessionsAssignOwnerResult,
   SessionsPatchResult,
 } from "../../../packages/gateway-protocol/src/index.js";
+import { SessionMoveProfileTargetSchema } from "../../../packages/gateway-protocol/src/schema/session-placement.js";
 import { SESSIONS_PATCH_MANY_MAX_TARGETS } from "../../../packages/gateway-protocol/src/schema/sessions-patch.js";
 import {
   SESSION_AGENT_ATTENTION_ICON_IDS,
@@ -92,13 +93,10 @@ function withBoundedSessionsResolved(
 const SessionsToolSchema = Type.Object(
   {
     action: stringEnum(ACTIONS, { description: "Action" }),
-    profileId: Type.Optional(
-      Type.String({
-        minLength: 1,
-        maxLength: 128,
-        description: "cloud_profiles: return OS and machine choices for this configured profile.",
-      }),
-    ),
+    profileId: Type.Optional({
+      ...SessionMoveProfileTargetSchema.properties.profileId,
+      description: "cloud_profiles: return OS and machine choices for this configured profile.",
+    }),
     offset: Type.Optional(
       Type.Integer({
         minimum: 0,
