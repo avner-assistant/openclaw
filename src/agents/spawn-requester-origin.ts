@@ -4,9 +4,16 @@
  * Normalizes delivery targets and route bindings so spawned runs can attribute the requesting account/channel.
  */
 import type { ChatType } from "../channels/chat-type.js";
+import { resolveStorePath } from "../config/sessions/paths.js";
+import { loadSessionEntry } from "../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveFirstBoundAccountId } from "../routing/bound-account-read.js";
-import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
+import {
+  deliveryContextFromSession,
+  mergeDeliveryContext,
+  normalizeDeliveryContext,
+} from "../utils/delivery-context.shared.js";
+import type { DeliveryContext } from "../utils/delivery-context.types.js";
 
 // Delivery targets often carry a transport wrapper (e.g. Matrix `room:<id>` or
 // LINE `line:group:<id>`), while route bindings commonly store raw peer ids on
@@ -96,6 +103,24 @@ function extractRequesterPeer(
   return { peerId: value || undefined, peerKind: inferredKind };
 }
 
+function readRequesterSessionOrigin(params: {
+  cfg: OpenClawConfig;
+  requesterAgentId: string;
+  requesterSessionKey?: string;
+}): DeliveryContext | undefined {
+  const sessionKey = params.requesterSessionKey?.trim();
+  if (!sessionKey) {
+    return undefined;
+  }
+  return deliveryContextFromSession(
+    loadSessionEntry({
+      sessionKey,
+      storePath: resolveStorePath(params.cfg.session?.store, { agentId: params.requesterAgentId }),
+      clone: false,
+    }),
+  );
+}
+
 export function resolveRequesterOriginForChild(params: {
   cfg: OpenClawConfig;
   targetAgentId: string;
@@ -104,14 +129,36 @@ export function resolveRequesterOriginForChild(params: {
   requesterAccountId?: string;
   requesterTo?: string;
   requesterThreadId?: string | number;
+  requesterSessionKey?: string;
   requesterGroupSpace?: string | null;
   requesterMemberRoleIds?: string[];
 }) {
+  const turnOrigin = normalizeDeliveryContext({
+    channel: params.requesterChannel,
+    accountId: params.requesterAccountId,
+    to: params.requesterTo,
+    threadId: params.requesterThreadId,
+  });
+  // Turns that are not driven by an inbound channel message (heartbeat, cron,
+  // steer, agent-to-agent) carry a channel but no target. The requester session
+  // still records its own conversation, so recover the route from it; without
+  // this, thread-bound spawns cannot resolve a conversation to bind to.
+  const requesterOrigin =
+    turnOrigin?.channel && !turnOrigin.to
+      ? mergeDeliveryContext(
+          turnOrigin,
+          readRequesterSessionOrigin({
+            cfg: params.cfg,
+            requesterAgentId: params.requesterAgentId,
+            requesterSessionKey: params.requesterSessionKey,
+          }),
+        )
+      : turnOrigin;
   const { peerId: normalizedPeerId, peerKind: inferredPeerKind } = extractRequesterPeer(
     params.requesterChannel,
-    params.requesterTo,
+    requesterOrigin?.to,
   );
-  const rawPeerIdAlias = params.requesterTo?.trim();
+  const rawPeerIdAlias = requesterOrigin?.to?.trim();
   // Same-agent spawns must keep the caller's active inbound account, not
   // re-resolve via bindings that may select a different account for the same
   // agent/channel.
@@ -130,9 +177,8 @@ export function resolveRequesterOriginForChild(params: {
         })
       : undefined;
   return normalizeDeliveryContext({
+    ...requesterOrigin,
     channel: params.requesterChannel,
-    accountId: boundAccountId ?? params.requesterAccountId,
-    to: params.requesterTo,
-    threadId: params.requesterThreadId,
+    accountId: boundAccountId ?? requesterOrigin?.accountId,
   });
 }

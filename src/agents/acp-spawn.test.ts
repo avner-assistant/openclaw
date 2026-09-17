@@ -1782,6 +1782,64 @@ describe("spawnAcpDirect", () => {
     });
   });
 
+  it("binds Matrix ACP threads from the requester session when the turn has no target", async () => {
+    // Heartbeat, cron, steer, and agent-to-agent turns reach spawn with a
+    // channel but no delivery target; the requester session still records the
+    // conversation the thread must be bound to.
+    enableMatrixAcpThreadBindings();
+    const requesterSessionKey = "agent:main:matrix:channel:!room:example.org";
+    hoisted.loadSessionStoreMock.mockReturnValue({
+      [requesterSessionKey]: {
+        sessionId: "sess-requester",
+        updatedAt: Date.now(),
+        channel: "matrix",
+        lastChannel: "matrix",
+        lastTo: "room:!room:example.org",
+      } satisfies SessionEntry,
+    });
+    hoisted.sessionBindingBindMock.mockImplementationOnce(
+      async (input: {
+        targetSessionKey: string;
+        conversation: { accountId: string; conversationId: string; parentConversationId?: string };
+      }) =>
+        createSessionBinding({
+          targetSessionKey: input.targetSessionKey,
+          conversation: {
+            channel: "matrix",
+            accountId: input.conversation.accountId,
+            conversationId: "child-thread",
+            parentConversationId: input.conversation.parentConversationId ?? "!room:example.org",
+          },
+          metadata: { boundBy: "system", agentId: "codex", webhookId: "wh-1" },
+        }),
+    );
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "session",
+        thread: true,
+        cwd: os.tmpdir(),
+      },
+      {
+        agentSessionKey: requesterSessionKey,
+        agentChannel: "matrix",
+        agentAccountId: "default",
+      },
+    );
+
+    expect(result.status, JSON.stringify(result)).toBe("accepted");
+    expectBindingCallFields({
+      placement: "child",
+      conversation: {
+        channel: "matrix",
+        accountId: "default",
+        conversationId: "!room:example.org",
+      },
+    });
+  });
+
   it("keeps canonical Matrix room casing for ACP thread bindings", async () => {
     enableMatrixAcpThreadBindings();
     hoisted.sessionBindingBindMock.mockImplementationOnce(

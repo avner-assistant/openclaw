@@ -812,6 +812,7 @@ function resolveAcpSpawnRequesterState(params: {
       requesterAccountId: params.ctx.agentAccountId,
       requesterTo: params.ctx.agentTo,
       requesterThreadId: params.ctx.agentThreadId,
+      requesterSessionKey: params.parentSessionKey,
       requesterGroupSpace: params.ctx.agentGroupSpace,
       requesterMemberRoleIds: params.ctx.agentMemberRoleIds,
     }),
