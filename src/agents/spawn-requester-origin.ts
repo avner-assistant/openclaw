@@ -106,9 +106,16 @@ function extractRequesterPeer(
 function readRequesterSessionOrigin(params: {
   cfg: OpenClawConfig;
   requesterAgentId: string;
-  threadBindingRequesterSessionKey?: string;
+  requestThreadBinding: boolean;
+  requesterSessionKey?: string;
 }): DeliveryContext | undefined {
-  const sessionKey = params.threadBindingRequesterSessionKey?.trim();
+  // Single gate for the whole recovery. Callers always know their requester
+  // session key, so only the spawn's binding intent may unlock it; otherwise an
+  // unbound run adopts a delivery route its own turn never had.
+  if (!params.requestThreadBinding) {
+    return undefined;
+  }
+  const sessionKey = params.requesterSessionKey?.trim();
   if (!sessionKey) {
     return undefined;
   }
@@ -129,12 +136,14 @@ export function resolveRequesterOriginForChild(params: {
   requesterAccountId?: string;
   requesterTo?: string;
   requesterThreadId?: string | number;
+  /** Requester session whose recorded delivery context can be recovered from. */
+  requesterSessionKey?: string;
   /**
-   * Requester session key to recover a delivery target from, set only when the
-   * spawn requests a thread binding. Carrying the binding intent as the key's
-   * presence keeps unbound runs on the turn's own origin.
+   * Whether this spawn asks for a thread binding. Required so every caller
+   * states the intent explicitly: only a binding spawn may recover a
+   * conversation the turn itself does not carry.
    */
-  threadBindingRequesterSessionKey?: string;
+  requestThreadBinding: boolean;
   requesterGroupSpace?: string | null;
   requesterMemberRoleIds?: string[];
 }) {
@@ -147,8 +156,8 @@ export function resolveRequesterOriginForChild(params: {
   // Turns that are not driven by an inbound channel message (heartbeat, cron,
   // steer, agent-to-agent) carry a channel but no target. Thread-bound spawns
   // must still name a conversation to bind to, so recover the route from the
-  // requester session the caller opted in with. Unbound runs pass no key and
-  // keep the turn's target-less origin, which leaves their child route alone.
+  // requester session. A turn that already has a target owns the route: never
+  // let session state add a stale `to`/`threadId` on top of it.
   const requesterOrigin =
     turnOrigin?.channel && !turnOrigin.to
       ? mergeDeliveryContext(
@@ -156,7 +165,8 @@ export function resolveRequesterOriginForChild(params: {
           readRequesterSessionOrigin({
             cfg: params.cfg,
             requesterAgentId: params.requesterAgentId,
-            threadBindingRequesterSessionKey: params.threadBindingRequesterSessionKey,
+            requestThreadBinding: params.requestThreadBinding,
+            requesterSessionKey: params.requesterSessionKey,
           }),
         )
       : turnOrigin;

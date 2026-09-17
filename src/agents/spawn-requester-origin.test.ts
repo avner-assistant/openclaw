@@ -22,6 +22,7 @@ describe("resolveRequesterOriginForChild", () => {
   }) {
     return resolveRequesterOriginForChild({
       requesterAccountId: "bot-beta",
+      requestThreadBinding: false,
       ...params,
       targetAgentId: params.targetAgentId ?? "bot-alpha",
       requesterAgentId: params.requesterAgentId ?? "main",
@@ -65,6 +66,7 @@ describe("resolveRequesterOriginForChild", () => {
           requesterChannel: "qa-channel",
           requesterAccountId: "bot-beta",
           requesterTo: to,
+          requestThreadBinding: false,
         }),
         {
           channel: "qa-channel",
@@ -235,6 +237,7 @@ describe("resolveRequesterOriginForChild", () => {
         requesterChannel: "msteams",
         requesterAccountId: "bot-beta",
         requesterTo: to,
+        requestThreadBinding: false,
       }),
       {
         channel: "msteams",
@@ -267,6 +270,7 @@ describe("resolveRequesterOriginForChild", () => {
         requesterChannel: "qa-channel",
         requesterAccountId: "bot-beta",
         requesterTo: to,
+        requestThreadBinding: false,
       }),
       {
         channel: "qa-channel",
@@ -309,6 +313,7 @@ describe("resolveRequesterOriginForChild", () => {
         requesterChannel: "discord",
         requesterAccountId: "main-current-guild",
         requesterTo: to,
+        requestThreadBinding: false,
         requesterGroupSpace: "guild-current",
       }),
       {
@@ -344,6 +349,7 @@ describe("resolveRequesterOriginForChild", () => {
         requesterChannel: "line",
         requesterAccountId: "bot-beta",
         requesterTo: to,
+        requestThreadBinding: false,
       }),
       {
         channel: "line",

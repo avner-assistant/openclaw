@@ -72,6 +72,12 @@ describe("thread-bound subagent spawn without a turn delivery target", () => {
         listBySession: () => [],
       }),
     }));
+  });
+
+  // The shared runtime setup reinstalls the default plugin registry after every
+  // test, so this has to run per test: installing it once in `beforeAll` would
+  // silently drop every case after the first onto the generic fallback parser.
+  async function installThreadChatRegistry() {
     // Channels that model conversations as native threads reject inbound
     // resolution outright when no target is supplied, which is exactly the
     // spawn-time state this regression covers.
@@ -105,9 +111,10 @@ describe("thread-bound subagent spawn without a turn delivery target", () => {
         },
       ]),
     );
-  });
+  }
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await installThreadChatRegistry();
     bindCalls.length = 0;
     hoisted.callGatewayMock.mockReset();
     hoisted.updateSessionStoreMock.mockReset();
@@ -188,8 +195,42 @@ describe("thread-bound subagent spawn without a turn delivery target", () => {
     expect(bindCalls[0]?.conversation).toMatchObject({
       channel: "threadchat",
       conversationId: "1510164477642014740",
-      parentConversationId: "1510164477642014999",
+      parentConversationId: "channel:1510164477642014999",
     });
+  });
+
+  it("binds thread-bound run spawns to the recovered requester conversation", async () => {
+    // thread=true with mode="run" still asks for a binding, so recovery applies;
+    // only the inline-delivery decision differs from mode="session".
+    configureWith(
+      writeRequesterSessionStore({
+        [CHANNEL_SESSION_KEY]: {
+          channel: "threadchat",
+          lastChannel: "threadchat",
+          lastTo: CHANNEL_TARGET,
+        },
+      }),
+    );
+
+    const result = await spawnSubagentDirect(
+      { task: "reply with a marker", thread: true, mode: "run", context: "isolated" },
+      {
+        agentSessionKey: CHANNEL_SESSION_KEY,
+        agentChannel: "threadchat",
+        agentAccountId: "default",
+      },
+    );
+
+    expect(result.status).toBe("accepted");
+    expect(bindCalls).toHaveLength(1);
+    expect(bindCalls[0]?.conversation).toMatchObject({
+      channel: "threadchat",
+      accountId: "default",
+      conversationId: CHANNEL_TARGET,
+    });
+    // A run reports back through the completion envelope, so the initial child
+    // run must not deliver inline even though the thread is bound.
+    expect(readChildAgentGatewayParams()).toMatchObject({ deliver: false });
   });
 
   it("leaves unbound run spawns untouched when the turn has no delivery target", async () => {

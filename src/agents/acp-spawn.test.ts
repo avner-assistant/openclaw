@@ -1840,6 +1840,96 @@ describe("spawnAcpDirect", () => {
     });
   });
 
+  it("recovers the requester session under the global session scope alias", async () => {
+    // ACP must resolve the requester key exactly like the native spawn path:
+    // under session.scope="global" a "main" turn key aliases to "global", and
+    // looking the raw key up would miss the session that records the route.
+    enableMatrixAcpThreadBindings();
+    hoisted.state.cfg.session = { mainKey: "main", scope: "global" };
+    hoisted.loadSessionStoreMock.mockReturnValue({
+      global: {
+        sessionId: "sess-requester",
+        updatedAt: Date.now(),
+        channel: "matrix",
+        lastChannel: "matrix",
+        lastTo: "room:!room:example.org",
+      } satisfies SessionEntry,
+    });
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "session",
+        thread: true,
+        cwd: os.tmpdir(),
+      },
+      {
+        agentSessionKey: "main",
+        agentChannel: "matrix",
+        agentAccountId: "default",
+      },
+    );
+
+    expect(result.status, JSON.stringify(result)).toBe("accepted");
+    expectBindingCallFields({
+      placement: "child",
+      conversation: {
+        channel: "matrix",
+        accountId: "default",
+        conversationId: "!room:example.org",
+      },
+    });
+  });
+
+  it("binds thread-bound ACP run spawns to the recovered requester conversation", async () => {
+    // thread=true with mode="run" still requests a binding, so the recovery
+    // applies; the run just stays a background task instead of delivering
+    // inline into the bound thread.
+    enableMatrixAcpThreadBindings();
+    const requesterSessionKey = "agent:main:matrix:channel:!room:example.org";
+    hoisted.loadSessionStoreMock.mockReturnValue({
+      [requesterSessionKey]: {
+        sessionId: "sess-requester",
+        updatedAt: Date.now(),
+        channel: "matrix",
+        lastChannel: "matrix",
+        lastTo: "room:!room:example.org",
+      } satisfies SessionEntry,
+    });
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "run",
+        thread: true,
+        cwd: os.tmpdir(),
+      },
+      {
+        agentSessionKey: requesterSessionKey,
+        agentChannel: "matrix",
+        agentAccountId: "default",
+      },
+    );
+
+    expect(result.status, JSON.stringify(result)).toBe("accepted");
+    expectBindingCallFields({
+      placement: "child",
+      conversation: {
+        channel: "matrix",
+        accountId: "default",
+        conversationId: "!room:example.org",
+      },
+    });
+    expectAgentGatewayCall({
+      deliver: false,
+      channel: undefined,
+      to: undefined,
+      threadId: undefined,
+    });
+  });
+
   it("keeps unbound ACP run spawns off the requester session target", async () => {
     // Without a binding request there is nothing to bind, so an ACP run must
     // keep the turn's own (target-less) origin. Adopting the requester

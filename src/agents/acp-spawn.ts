@@ -768,6 +768,12 @@ function prepareAcpThreadBinding(params: {
 function resolveAcpSpawnRequesterState(params: {
   cfg: OpenClawConfig;
   parentSessionKey?: string;
+  /**
+   * Alias-resolved form of `parentSessionKey` (`main`/`current` mapped onto the
+   * configured scope). Session-store reads must use it, or a global-scope
+   * requester records its route under `global` while lookups miss on `main`.
+   */
+  requesterInternalKey: string;
   requesterAgentId: string;
   targetAgentId: string;
   requestThreadBinding: boolean;
@@ -813,9 +819,8 @@ function resolveAcpSpawnRequesterState(params: {
       requesterAccountId: params.ctx.agentAccountId,
       requesterTo: params.ctx.agentTo,
       requesterThreadId: params.ctx.agentThreadId,
-      threadBindingRequesterSessionKey: params.requestThreadBinding
-        ? params.parentSessionKey
-        : undefined,
+      requesterSessionKey: params.requesterInternalKey,
+      requestThreadBinding: params.requestThreadBinding,
       requesterGroupSpace: params.ctx.agentGroupSpace,
       requesterMemberRoleIds: params.ctx.agentMemberRoleIds,
     }),
@@ -1377,6 +1382,7 @@ export async function spawnAcpDirect(
   const requesterState = resolveAcpSpawnRequesterState({
     cfg,
     parentSessionKey,
+    requesterInternalKey,
     requesterAgentId,
     targetAgentId,
     requestThreadBinding,

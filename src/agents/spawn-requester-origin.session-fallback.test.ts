@@ -40,7 +40,8 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       requesterAgentId: "main",
       requesterChannel: "discord",
       requesterAccountId: "default",
-      threadBindingRequesterSessionKey: REQUESTER_SESSION_KEY,
+      requesterSessionKey: REQUESTER_SESSION_KEY,
+      requestThreadBinding: true,
     });
 
     expect(origin?.channel).toBe("discord");
@@ -64,7 +65,8 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       targetAgentId: "main",
       requesterAgentId: "main",
       requesterChannel: "discord",
-      threadBindingRequesterSessionKey: threadSessionKey,
+      requesterSessionKey: threadSessionKey,
+      requestThreadBinding: true,
     });
 
     expect(origin?.to).toBe("channel:1510164477642014999");
@@ -77,6 +79,7 @@ describe("resolveRequesterOriginForChild session fallback", () => {
         channel: "discord",
         lastChannel: "discord",
         lastTo: "channel:stale",
+        lastThreadId: "stale-thread",
       },
     });
 
@@ -86,10 +89,15 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       requesterAgentId: "main",
       requesterChannel: "discord",
       requesterTo: "channel:1484662120149684238",
-      threadBindingRequesterSessionKey: REQUESTER_SESSION_KEY,
+      requesterSessionKey: REQUESTER_SESSION_KEY,
+      requestThreadBinding: true,
     });
 
     expect(origin?.to).toBe("channel:1484662120149684238");
+    // The turn owns its route. Recovery must stay behind the `!turnOrigin.to`
+    // guard: merging session state onto a live target would graft the stale
+    // recorded thread onto a conversation the turn addressed at top level.
+    expect(origin?.threadId).toBeUndefined();
   });
 
   it("does not borrow a target recorded for a different channel", () => {
@@ -106,7 +114,8 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       targetAgentId: "main",
       requesterAgentId: "main",
       requesterChannel: "discord",
-      threadBindingRequesterSessionKey: REQUESTER_SESSION_KEY,
+      requesterSessionKey: REQUESTER_SESSION_KEY,
+      requestThreadBinding: true,
     });
 
     expect(origin?.channel).toBe("discord");
@@ -128,6 +137,10 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       requesterAgentId: "main",
       requesterChannel: "discord",
       requesterAccountId: "default",
+      // Callers pass their requester session key unconditionally; only the
+      // binding intent may unlock recovery, so the key alone must do nothing.
+      requesterSessionKey: REQUESTER_SESSION_KEY,
+      requestThreadBinding: false,
     });
 
     expect(origin?.channel).toBe("discord");

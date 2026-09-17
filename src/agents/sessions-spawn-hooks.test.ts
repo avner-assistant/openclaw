@@ -328,8 +328,10 @@ describe("sessions_spawn subagent lifecycle hooks", () => {
       {
         channel: "discord",
         accountId: "work",
+        // The bundled Discord thread-binding artifact now single-sources the
+        // canonical resolver, so parents keep their `channel:` prefixed id.
+        parentConversationId: "channel:123",
         conversationId: "456",
-        parentConversationId: "123",
       },
       "binding conversation",
     );
