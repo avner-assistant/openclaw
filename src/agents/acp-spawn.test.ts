@@ -1840,6 +1840,50 @@ describe("spawnAcpDirect", () => {
     });
   });
 
+  it("keeps unbound ACP run spawns off the requester session target", async () => {
+    // Without a binding request there is nothing to bind, so an ACP run must
+    // keep the turn's own (target-less) origin. Adopting the requester
+    // conversation would hand the background task run a delivery target the
+    // turn never had.
+    enableMatrixAcpThreadBindings();
+    const requesterSessionKey = "agent:main:matrix:channel:!room:example.org";
+    hoisted.loadSessionStoreMock.mockReturnValue({
+      [requesterSessionKey]: {
+        sessionId: "sess-requester",
+        updatedAt: Date.now(),
+        channel: "matrix",
+        lastChannel: "matrix",
+        lastTo: "room:!room:example.org",
+      } satisfies SessionEntry,
+    });
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "run",
+        cwd: os.tmpdir(),
+      },
+      {
+        agentSessionKey: requesterSessionKey,
+        agentChannel: "matrix",
+        agentAccountId: "default",
+      },
+    );
+
+    expect(result.status, JSON.stringify(result)).toBe("accepted");
+    expect(hoisted.sessionBindingBindMock).not.toHaveBeenCalled();
+    expectAgentGatewayCall({
+      deliver: false,
+      channel: undefined,
+      to: undefined,
+      threadId: undefined,
+    });
+    expect(
+      hoisted.createRunningTaskRunMock.mock.calls[0]?.[0]?.requesterOrigin?.to,
+    ).toBeUndefined();
+  });
+
   it("keeps canonical Matrix room casing for ACP thread bindings", async () => {
     enableMatrixAcpThreadBindings();
     hoisted.sessionBindingBindMock.mockImplementationOnce(

@@ -1,6 +1,7 @@
 // Spawn requester-origin session-fallback tests prove thread-bound spawns can
 // still resolve the requester conversation when the current turn carries no
-// inbound delivery target (heartbeat, cron, steer, or agent-to-agent runs).
+// inbound delivery target (heartbeat, cron, steer, or agent-to-agent runs), and
+// that spawns which request no binding never pick a target up this way.
 import { mkdtempSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,7 +40,7 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       requesterAgentId: "main",
       requesterChannel: "discord",
       requesterAccountId: "default",
-      requesterSessionKey: REQUESTER_SESSION_KEY,
+      threadBindingRequesterSessionKey: REQUESTER_SESSION_KEY,
     });
 
     expect(origin?.channel).toBe("discord");
@@ -63,7 +64,7 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       targetAgentId: "main",
       requesterAgentId: "main",
       requesterChannel: "discord",
-      requesterSessionKey: threadSessionKey,
+      threadBindingRequesterSessionKey: threadSessionKey,
     });
 
     expect(origin?.to).toBe("channel:1510164477642014999");
@@ -85,7 +86,7 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       requesterAgentId: "main",
       requesterChannel: "discord",
       requesterTo: "channel:1484662120149684238",
-      requesterSessionKey: REQUESTER_SESSION_KEY,
+      threadBindingRequesterSessionKey: REQUESTER_SESSION_KEY,
     });
 
     expect(origin?.to).toBe("channel:1484662120149684238");
@@ -105,7 +106,28 @@ describe("resolveRequesterOriginForChild session fallback", () => {
       targetAgentId: "main",
       requesterAgentId: "main",
       requesterChannel: "discord",
-      requesterSessionKey: REQUESTER_SESSION_KEY,
+      threadBindingRequesterSessionKey: REQUESTER_SESSION_KEY,
+    });
+
+    expect(origin?.channel).toBe("discord");
+    expect(origin?.to).toBeUndefined();
+  });
+
+  it("ignores the requester session when no thread binding is requested", () => {
+    const storePath = writeSessionStore({
+      [REQUESTER_SESSION_KEY]: {
+        channel: "discord",
+        lastChannel: "discord",
+        lastTo: "channel:1484662120149684238",
+      },
+    });
+
+    const origin = resolveRequesterOriginForChild({
+      cfg: { session: { store: storePath } } as OpenClawConfig,
+      targetAgentId: "main",
+      requesterAgentId: "main",
+      requesterChannel: "discord",
+      requesterAccountId: "default",
     });
 
     expect(origin?.channel).toBe("discord");

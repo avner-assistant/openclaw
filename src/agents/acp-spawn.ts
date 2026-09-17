@@ -770,6 +770,7 @@ function resolveAcpSpawnRequesterState(params: {
   parentSessionKey?: string;
   requesterAgentId: string;
   targetAgentId: string;
+  requestThreadBinding: boolean;
   ctx: SpawnAcpContext;
   subagentStore?: SessionCapabilityStore;
 }): AcpSpawnRequesterState {
@@ -812,7 +813,9 @@ function resolveAcpSpawnRequesterState(params: {
       requesterAccountId: params.ctx.agentAccountId,
       requesterTo: params.ctx.agentTo,
       requesterThreadId: params.ctx.agentThreadId,
-      requesterSessionKey: params.parentSessionKey,
+      threadBindingRequesterSessionKey: params.requestThreadBinding
+        ? params.parentSessionKey
+        : undefined,
       requesterGroupSpace: params.ctx.agentGroupSpace,
       requesterMemberRoleIds: params.ctx.agentMemberRoleIds,
     }),
@@ -1376,6 +1379,7 @@ export async function spawnAcpDirect(
     parentSessionKey,
     requesterAgentId,
     targetAgentId,
+    requestThreadBinding,
     ctx,
     subagentStore,
   });

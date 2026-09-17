@@ -30,6 +30,13 @@ function writeRequesterSessionStore(entries: Record<string, unknown>): string {
   return storePath;
 }
 
+function readChildAgentGatewayParams(): Record<string, unknown> {
+  const call = hoisted.callGatewayMock.mock.calls.find(
+    ([opts]) => (opts as { method?: string } | undefined)?.method === "agent",
+  );
+  return (call?.[0] as { params?: Record<string, unknown> } | undefined)?.params ?? {};
+}
+
 describe("thread-bound subagent spawn without a turn delivery target", () => {
   type SpawnModule = Awaited<ReturnType<typeof loadSubagentSpawnModuleForTest>>;
 
@@ -207,5 +214,15 @@ describe("thread-bound subagent spawn without a turn delivery target", () => {
 
     expect(result.status).toBe("accepted");
     expect(bindCalls).toHaveLength(0);
+    // An unbound run must not acquire a delivery target the turn never had:
+    // routing the child run at the requester conversation would make it post
+    // there instead of reporting back through the completion envelope.
+    expect(readChildAgentGatewayParams()).toMatchObject({
+      channel: "threadchat",
+      to: undefined,
+      threadId: undefined,
+      deliver: false,
+    });
+    expect(hoisted.registerSubagentRunMock.mock.calls[0]?.[0]?.requesterOrigin?.to).toBeUndefined();
   });
 });

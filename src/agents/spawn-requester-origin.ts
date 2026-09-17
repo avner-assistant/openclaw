@@ -106,9 +106,9 @@ function extractRequesterPeer(
 function readRequesterSessionOrigin(params: {
   cfg: OpenClawConfig;
   requesterAgentId: string;
-  requesterSessionKey?: string;
+  threadBindingRequesterSessionKey?: string;
 }): DeliveryContext | undefined {
-  const sessionKey = params.requesterSessionKey?.trim();
+  const sessionKey = params.threadBindingRequesterSessionKey?.trim();
   if (!sessionKey) {
     return undefined;
   }
@@ -129,7 +129,12 @@ export function resolveRequesterOriginForChild(params: {
   requesterAccountId?: string;
   requesterTo?: string;
   requesterThreadId?: string | number;
-  requesterSessionKey?: string;
+  /**
+   * Requester session key to recover a delivery target from, set only when the
+   * spawn requests a thread binding. Carrying the binding intent as the key's
+   * presence keeps unbound runs on the turn's own origin.
+   */
+  threadBindingRequesterSessionKey?: string;
   requesterGroupSpace?: string | null;
   requesterMemberRoleIds?: string[];
 }) {
@@ -140,9 +145,10 @@ export function resolveRequesterOriginForChild(params: {
     threadId: params.requesterThreadId,
   });
   // Turns that are not driven by an inbound channel message (heartbeat, cron,
-  // steer, agent-to-agent) carry a channel but no target. The requester session
-  // still records its own conversation, so recover the route from it; without
-  // this, thread-bound spawns cannot resolve a conversation to bind to.
+  // steer, agent-to-agent) carry a channel but no target. Thread-bound spawns
+  // must still name a conversation to bind to, so recover the route from the
+  // requester session the caller opted in with. Unbound runs pass no key and
+  // keep the turn's target-less origin, which leaves their child route alone.
   const requesterOrigin =
     turnOrigin?.channel && !turnOrigin.to
       ? mergeDeliveryContext(
@@ -150,7 +156,7 @@ export function resolveRequesterOriginForChild(params: {
           readRequesterSessionOrigin({
             cfg: params.cfg,
             requesterAgentId: params.requesterAgentId,
-            requesterSessionKey: params.requesterSessionKey,
+            threadBindingRequesterSessionKey: params.threadBindingRequesterSessionKey,
           }),
         )
       : turnOrigin;

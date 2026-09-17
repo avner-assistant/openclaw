@@ -1219,7 +1219,7 @@ export async function spawnSubagentDirect(
     requesterAccountId: ctx.agentAccountId,
     requesterTo: ctx.agentTo,
     requesterThreadId: ctx.agentThreadId,
-    requesterSessionKey: requesterInternalKey,
+    threadBindingRequesterSessionKey: requestThreadBinding ? requesterInternalKey : undefined,
     requesterGroupSpace: ctx.agentGroupSpace,
     requesterMemberRoleIds: ctx.agentMemberRoleIds,
   });
