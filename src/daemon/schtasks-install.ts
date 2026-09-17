@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
+import { hasErrnoCode } from "../infra/errno.js";
 import { resolveGatewayServiceDescription } from "./constants.js";
 import { formatLine, writeFormattedLines } from "./output.js";
 import {
@@ -10,6 +11,10 @@ import {
   type ScheduledTaskActivation,
 } from "./schtasks-control.js";
 import { execSchtasks } from "./schtasks-exec.js";
+import {
+  backupScheduledTaskDefinition,
+  publishScheduledTaskFiles,
+} from "./schtasks-install-files.js";
 import {
   buildHiddenLauncherScript,
   buildScheduledTaskXml,
@@ -33,7 +38,6 @@ import {
 } from "./schtasks-process.js";
 import {
   assertSchtasksAvailable,
-  isRegisteredScheduledTask,
   isStartupEntryInstalled,
   launchFallbackTaskScript,
   removeStartupEntries,
@@ -126,6 +130,7 @@ async function writeScheduledTaskScript({
   scriptPath: string;
   taskLaunchPath: string;
   taskDescription: string;
+  restore: () => Promise<void>;
 }> {
   const taskEnv = resolveScheduledTaskRenderEnv(env, environment);
   const scriptPath = resolveTaskScriptPath(taskEnv);
@@ -142,21 +147,22 @@ async function writeScheduledTaskScript({
     workingDirectory,
     environment: resolveScheduledTaskScriptEnvironment(taskEnv, environment),
   });
-  assertGatewayServiceUpdateCurrent();
-  await fs.writeFile(scriptPath, encodeWindowsLauncherScript({ format: "cmd", content: script }));
+  const files = [
+    { path: scriptPath, contents: encodeWindowsLauncherScript({ format: "cmd", content: script }) },
+  ];
   if (taskLaunchPath !== scriptPath) {
     const launcher = buildHiddenLauncherScript({
       description: taskDescription,
       scriptPath,
       taskSupervisor: environment?.OPENCLAW_SERVICE_KIND === "gateway",
     });
-    assertGatewayServiceUpdateCurrent();
-    await fs.writeFile(
-      taskLaunchPath,
-      encodeWindowsLauncherScript({ format: "vbs", content: launcher }),
-    );
+    files.push({
+      path: taskLaunchPath,
+      contents: encodeWindowsLauncherScript({ format: "vbs", content: launcher }),
+    });
   }
-  return { scriptPath, taskLaunchPath, taskDescription };
+  const { restore } = await publishScheduledTaskFiles(files);
+  return { scriptPath, taskLaunchPath, taskDescription, restore };
 }
 
 export async function stageScheduledTask({
@@ -170,75 +176,31 @@ export async function stageScheduledTask({
   return { scriptPath };
 }
 
-async function updateExistingScheduledTask(params: {
-  env: GatewayServiceEnv;
-  stdout: NodeJS.WritableStream;
-  taskName: string;
-  quotedLaunchPath: string;
-  scriptPath: string;
-  taskLaunchPath: string;
-  description?: string;
-}): Promise<ScheduledTaskActivation | null> {
-  if (!(await isRegisteredScheduledTask(params.env))) {
-    return null;
-  }
-  const change = await execSchtasks([
-    "/Change",
-    "/TN",
-    params.taskName,
-    "/TR",
-    params.quotedLaunchPath,
-  ]);
-  if (change.code !== 0) {
-    return null;
-  }
-  // Re-apply the full XML so older tasks inherit both false battery flags (#59299).
-  // Best effort: failure keeps the prior settings rather than losing the task.
-  const upgradeXmlPath = await writeTaskXmlTempFile(
-    buildScheduledTaskXml({
-      taskDescription: params.description ?? "OpenClaw Gateway",
-      taskUser: resolveTaskUser(params.env),
-      launchPath: params.taskLaunchPath,
-    }),
-  );
-  try {
-    await execSchtasks(["/Create", "/F", "/TN", params.taskName, "/XML", upgradeXmlPath]);
-  } finally {
-    await fs.rm(path.dirname(upgradeXmlPath), { recursive: true, force: true }).catch(() => {});
-  }
-  const activation = await runScheduledTaskOrThrow({
-    taskName: params.taskName,
-    env: params.env,
-    scriptPath: params.scriptPath,
-  });
-  writeFormattedLines(
-    params.stdout,
-    [
-      { label: "Updated Scheduled Task", value: params.taskName },
-      { label: "Task script", value: params.scriptPath },
-    ],
-    { leadingBlankLine: true },
-  );
-  return activation;
-}
-
 async function activateScheduledTask(params: {
   env: GatewayServiceEnv;
   stdout: NodeJS.WritableStream;
   scriptPath: string;
   taskLaunchPath: string;
   description?: string;
+  retainRecovery: () => void;
+  registered: boolean;
 }): Promise<ScheduledTaskActivation | "startup-fallback"> {
   const taskDescription = params.description ?? "OpenClaw Gateway";
   const taskName = resolveTaskName(params.env);
-  const quotedLaunchPath = quoteSchtasksArg(params.taskLaunchPath);
-  const existingActivation = await updateExistingScheduledTask({
-    ...params,
-    taskName,
-    quotedLaunchPath,
-  });
-  if (existingActivation) {
-    return existingActivation;
+  let updated = false;
+  if (params.registered) {
+    const change = await execSchtasks([
+      "/Change",
+      "/TN",
+      taskName,
+      "/TR",
+      quoteSchtasksArg(params.taskLaunchPath),
+    ]);
+    if (change.code === 124) {
+      params.retainRecovery();
+      throw new Error("Scheduled Task registration change did not confirm completion.");
+    }
+    updated = change.code === 0;
   }
 
   const taskUser = resolveTaskUser(params.env);
@@ -257,8 +219,12 @@ async function activateScheduledTask(params: {
     await fs.rm(path.dirname(xmlPath), { recursive: true, force: true }).catch(() => {});
   }
   if (create.code !== 0) {
+    if (create.code === 124) {
+      params.retainRecovery();
+      throw new Error("Scheduled Task registration did not confirm completion.");
+    }
     const detail = create.stderr || create.stdout;
-    if (shouldFallbackToStartupEntry({ code: create.code, detail })) {
+    if (!updated && shouldFallbackToStartupEntry({ code: create.code, detail })) {
       if (isUpdateOwnedGatewayServiceCommand()) {
         throw new Error(
           "UPDATE_NATIVE_AUTHORITY: update-owned native commands require Task Scheduler; startup fallback is unsupported.",
@@ -286,6 +252,7 @@ async function activateScheduledTask(params: {
           content: launcher,
         }),
       );
+      params.retainRecovery();
       await launchFallbackTaskScript(params.env);
       writeFormattedLines(
         params.stdout,
@@ -300,6 +267,7 @@ async function activateScheduledTask(params: {
     throw new Error(`schtasks create failed: ${detail}`.trim());
   }
 
+  params.retainRecovery();
   const activation = await runScheduledTaskOrThrow({
     taskName,
     env: params.env,
@@ -309,7 +277,7 @@ async function activateScheduledTask(params: {
   writeFormattedLines(
     params.stdout,
     [
-      { label: "Installed Scheduled Task", value: taskName },
+      { label: updated ? "Updated Scheduled Task" : "Installed Scheduled Task", value: taskName },
       { label: "Task script", value: params.scriptPath },
     ],
     { leadingBlankLine: true },
@@ -361,14 +329,48 @@ export async function installScheduledTask(
       ...(fallbackPid ? { fallbackPid } : {}),
     });
   }
+  const restoreTask = await backupScheduledTaskDefinition(
+    args.env,
+    resolveTaskScriptPath(resolveScheduledTaskRenderEnv(args.env, args.environment)),
+  );
   const staged = await writeScheduledTaskScript(args);
-  const activation = await activateScheduledTask({
-    env: activationEnv,
-    stdout: args.stdout,
-    scriptPath: staged.scriptPath,
-    taskLaunchPath: staged.taskLaunchPath,
-    description: staged.taskDescription,
-  });
+  let recoveryRetained = false;
+  let activation: ScheduledTaskActivation | "startup-fallback";
+  try {
+    activation = await activateScheduledTask({
+      env: activationEnv,
+      stdout: args.stdout,
+      scriptPath: staged.scriptPath,
+      taskLaunchPath: staged.taskLaunchPath,
+      description: staged.taskDescription,
+      registered: restoreTask !== null,
+      retainRecovery: () => {
+        recoveryRetained = true;
+      },
+    });
+  } catch (error) {
+    if (recoveryRetained) {
+      const warning =
+        "Scheduled Task activation did not confirm completion; a queued task may still start. Inspect Task Scheduler before restoring any .bak launcher or task XML files beside the task script.";
+      if (args.warn) {
+        args.warn(warning);
+      } else {
+        args.stdout.write(`${warning}\n`);
+      }
+    } else {
+      try {
+        await staged.restore();
+        await restoreTask?.();
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "Scheduled Task replacement failed and its previous definition could not be restored; inspect the backups beside the task script.",
+          { cause: rollbackError },
+        );
+      }
+    }
+    throw error;
+  }
   if (activation !== "scheduled-task") {
     return { scriptPath: staged.scriptPath };
   }
@@ -454,6 +456,17 @@ export async function uninstallScheduledTask({
         throw error;
       }
     }
+  }
+  for (const backupPath of uniqueStrings([
+    `${scriptPath}.bak`,
+    `${scriptPath}.task.xml.bak`,
+    ...launcherPaths.map((launcherPath) => `${launcherPath}.bak`),
+  ])) {
+    await fs.unlink(backupPath).catch((error: unknown) => {
+      if (!hasErrnoCode(error, "ENOENT")) {
+        throw error;
+      }
+    });
   }
   try {
     await fs.unlink(scriptPath);

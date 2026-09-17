@@ -39,6 +39,7 @@ import {
   readSystemctlDetail,
   reloadSystemdUserManager,
 } from "./systemd-exec.js";
+import { captureSystemdInstallRecovery } from "./systemd-install-recovery.js";
 import { assertNoSystemGatewayOwnership } from "./systemd-scope.js";
 import {
   isNodeSystemdEnvironment,
@@ -264,7 +265,7 @@ async function writeSystemdUnit(
     description,
     beforeLoad,
   }: Omit<GatewayServiceInstallArgs, "stdout">,
-  load?: () => Promise<void>,
+  load?: (beforeAction?: (action: string) => void) => Promise<void>,
 ): Promise<{ unitPath: string; backedUp: boolean }> {
   await assertSystemdAvailable(env);
   await assertNoSystemGatewayOwnership(env);
@@ -282,6 +283,8 @@ async function writeSystemdUnit(
     const existingUnit = mutation.snapshots.get(unitPath) ?? null;
     const backupPath = `${unitPath}.bak`;
     const existingBackup = mutation.snapshots.get(backupPath) ?? null;
+    const recovery =
+      load && !beforeLoad ? await captureSystemdInstallRecovery(env, existingUnit !== null) : null;
     const { entries: stateDirDotEnvEntries, skippedShellReferenceKeys } =
       readStateDirDotEnvFromStateDir(stateDir);
     const stateDirDotEnvVars = new Map(
@@ -408,7 +411,29 @@ async function writeSystemdUnit(
         await beforeLoad({ files: structuredClone(mutation.stagedFiles) });
         await mutation.assertCurrent();
       }
-      await load();
+      try {
+        await load(recovery?.beforeAction);
+      } catch (error) {
+        // A sealed update has its own recovery owner and must retain its staged identities.
+        if (recovery) {
+          try {
+            await mutation.assertCurrent();
+            await mutation.restore(unitPath, existingUnit);
+            if (environmentFileSnapshot !== undefined) {
+              await mutation.restore(environmentFilePath, environmentFileSnapshot);
+            }
+            await mutation.restore(backupPath, existingBackup);
+            await recovery.restore();
+          } catch (rollbackError) {
+            throw new AggregateError(
+              [error, rollbackError],
+              `${error instanceof Error ? error.message : "Systemd activation failed"}\nThe previous service could not be fully restored.`,
+              { cause: rollbackError },
+            );
+          }
+        }
+        throw error;
+      }
     }
     return { unitPath, backedUp: existingUnit !== null };
   });
@@ -501,7 +526,10 @@ export async function stageSystemdService({
   return { unitPath };
 }
 
-async function activateSystemdService(params: { env: GatewayServiceEnv }) {
+async function activateSystemdService(params: {
+  env: GatewayServiceEnv;
+  beforeAction?: (action: string) => void;
+}) {
   const unitName = `${resolveSystemdServiceName(params.env)}.service`;
   // A system unit may appear after publication. Refuse before the user manager
   // can load a second supervisor for the same gateway name.
@@ -511,6 +539,7 @@ async function activateSystemdService(params: { env: GatewayServiceEnv }) {
     retryMissing = true,
   ): Promise<void> => {
     const args = action === "daemon-reload" ? [action] : [action, unitName];
+    params.beforeAction?.(action);
     const result = await execSystemctlUser(params.env, args);
     if (result.code === 0) {
       return;
@@ -538,11 +567,9 @@ async function activateSystemdService(params: { env: GatewayServiceEnv }) {
 export async function installSystemdService(
   args: GatewayServiceInstallArgs,
 ): Promise<{ unitPath: string }> {
-  const load = () => activateSystemdService({ env: args.env });
-  const { unitPath, backedUp } = await writeSystemdUnit(args, args.beforeLoad ? load : undefined);
-  if (!args.beforeLoad) {
-    await load();
-  }
+  const load = (beforeAction?: (action: string) => void) =>
+    activateSystemdService({ env: args.env, beforeAction });
+  const { unitPath, backedUp } = await writeSystemdUnit(args, load);
   if (
     args.warn &&
     hasGatewayServiceLauncherOverride(await readSystemdServiceExecStart(args.env).catch(() => null))
