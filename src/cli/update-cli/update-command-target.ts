@@ -182,6 +182,7 @@ export async function resolveUpdateCommandTarget(
       let packageTargetSchemaVersions: OpenClawSchemaVersions | undefined;
       let packageRuntimeTarget: { version: string; nodeEngine: string | null } | undefined;
       let managedServiceRootRedirect: ManagedServiceRootRedirect | null = null;
+      let managedServiceRoot = prepared.servicePlan?.serviceRoot;
       // The service's Node can differ even when its package root matches the shell.
       let managedServiceNodeRunner: string | undefined;
       let packageUpdateNodeRunner: string | undefined;
@@ -192,6 +193,7 @@ export async function resolveUpdateCommandTarget(
           (await resolveManagedServicePackageUpdatePlan({ root, pkgOwnership }));
         await pkgOwnership.assertUnowned(servicePlan.rootRedirect?.root ?? root);
         managedServiceRootRedirect = servicePlan.rootRedirect;
+        managedServiceRoot = servicePlan.serviceRoot;
         managedServiceNodeRunner = servicePlan.nodeRunner;
         if (managedServiceRootRedirect) {
           root = managedServiceRootRedirect.root;
@@ -207,7 +209,7 @@ export async function resolveUpdateCommandTarget(
       // Read-only native/root admission is complete. Own interruption settlement
       // before metadata can block, but defer mutable housekeeping until target admission.
       if (updateInstallKind === "package" && !opts.dryRun) {
-        assertUpdatePackageActivationAdmission(root);
+        assertUpdatePackageActivationAdmission(root, { serviceRoot: managedServiceRoot });
         const fence = await executor.enter(root, { preflight: true });
         if (opts.run) {
           opts.run.executorFence = fence;
@@ -215,6 +217,7 @@ export async function resolveUpdateCommandTarget(
         fence.assertCurrent();
         assertUpdatePackageActivationAdmission(
           captureUpdateCommandExecutorAuthority(fence).installKey,
+          { serviceRoot: managedServiceRoot },
         );
       }
 
@@ -444,6 +447,7 @@ export async function resolveUpdateCommandTarget(
         packageTargetSchemaVersions,
         packageRuntimeTarget,
         managedServiceRootRedirect,
+        ...(managedServiceRoot ? { managedServiceRoot } : {}),
         managedServiceNodeRunner,
         packageUpdateNodeRunner,
         devTarget,
