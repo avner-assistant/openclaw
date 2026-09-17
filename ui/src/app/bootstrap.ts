@@ -7,11 +7,11 @@ import type { RouteLocation } from "@openclaw/uirouter";
 import { ConnectErrorDetailCodes } from "../../../packages/gateway-protocol/src/connect-error-details.js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import { isSettingsTakeover } from "../app-navigation.ts";
+import { sameRouteLocation } from "../app-route-paths.ts";
 import {
   createApplicationRouter,
   locationForRoute,
   routeIdFromPath,
-  sameRouteLocation,
   startApplicationRouter,
   warmApplicationRouteModule,
   type ApplicationRouter,
@@ -54,6 +54,7 @@ import {
   subscribeBootRecordPersistence,
   subscribeWarmBootConnection,
 } from "./bootstrap-warm-boot.ts";
+import { startBrowserAuthRecovery } from "./browser-auth-recovery.ts";
 import { createBrowserHistory, resolveControlUiPaths } from "./browser.ts";
 import { createChatAttachmentHandoff } from "./chat-attachment-handoff.ts";
 import { createChatSubmissions } from "./chat-submissions.ts";
@@ -180,8 +181,22 @@ export function bootstrapApplication(): ApplicationRuntime {
       ...(startup.nativeClient ? { clientOptions: startup.nativeClient } : {}),
     },
   );
+  const getGatewayAuth = () => ({
+    hello: gateway.snapshot.hello,
+    settings: { token: gateway.connection.token },
+    password: gateway.connection.password,
+  });
+  const documentGatewayScope = gatewayCredentialScope(
+    `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${resourceBasePath}`,
+  );
+  const stopBrowserAuthRecovery = startBrowserAuthRecovery(resourceBasePath, () =>
+    gatewayCredentialScope(gateway.connection.gatewayUrl) === documentGatewayScope
+      ? getGatewayAuth()
+      : {},
+  );
   const liveActivity = createLiveActivity(gateway);
   const connectionBootstrap = createConnectionBootstrapCoordinator();
+  const chatSubmissions = createChatSubmissions();
   const router = createApplicationRouter();
   const bootRecord = readBootRecord(gatewayCredentialScope(settings.gatewayUrl), (method) => {
     if (startup.pendingBootstrapToken || startup.password) {
@@ -267,9 +282,17 @@ export function bootstrapApplication(): ApplicationRuntime {
       patch: patchSettings,
     },
   );
+  const settingsAgentSelection = createAgentSelectionCapability(
+    gateway,
+    agents,
+    undefined,
+    undefined,
+    { requireConfiguredAgent: true },
+  );
   const channels = createChannelCapability(gateway);
   const stopForegroundBootstrap = subscribeForegroundChatBootstrap({
     router,
+    chatSubmissions,
     gateway,
     agents,
     agentSelection,
@@ -281,11 +304,7 @@ export function bootstrapApplication(): ApplicationRuntime {
   const scopeUpgrade = createScopeUpgradeCapability(gateway);
   const config = createApplicationConfigCapability({
     resourceBasePath,
-    getAuth: () => ({
-      hello: gateway.snapshot.hello,
-      settings: { token: gateway.connection.token },
-      password: gateway.connection.password,
-    }),
+    getAuth: getGatewayAuth,
   });
   const sessions = createSessionCapability(gateway, agentSelection, {
     bootRecord,
@@ -342,7 +361,6 @@ export function bootstrapApplication(): ApplicationRuntime {
   let nativeDeviceSettings: ApplicationContext["nativeDeviceSettings"] = null;
   let nativeNotifications: ApplicationContext["nativeNotifications"] = null;
   const webPush = createWebPushCapability(gateway, { connectionBootstrap });
-  const chatSubmissions = createChatSubmissions();
   const placementStartup = createApplicationPlacementStartup({
     gateway,
     sessions,
@@ -489,6 +507,7 @@ export function bootstrapApplication(): ApplicationRuntime {
     agents,
     agentIdentity,
     agentSelection,
+    settingsAgentSelection,
     channels,
     config,
     scopeUpgrade,
@@ -661,6 +680,7 @@ export function bootstrapApplication(): ApplicationRuntime {
       return startupLifecycle.run(steps);
     },
     stop: () => {
+      stopBrowserAuthRecovery();
       startupLifecycle.stop();
       stopWarmBootConnection();
       stopBootRecordPersistence();
@@ -669,6 +689,7 @@ export function bootstrapApplication(): ApplicationRuntime {
       connectionBootstrap.reset();
       agents.dispose();
       agentSelection.dispose();
+      settingsAgentSelection.dispose();
       channels.dispose();
       scopeUpgrade.dispose();
       sidebarAttention.dispose();

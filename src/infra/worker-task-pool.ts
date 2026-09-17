@@ -1,94 +1,36 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { channel as createDiagnosticsChannel } from "node:diagnostics_channel";
 import { availableParallelism } from "node:os";
-import { parentPort, Worker, type Transferable, type WorkerOptions } from "node:worker_threads";
+import { Worker, type WorkerOptions } from "node:worker_threads";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
-import { createDeferredCore, type Deferred } from "../shared/deferred.js";
+import { createDeferredCore } from "../shared/deferred.js";
 import { runBestEffortCleanup } from "./non-fatal-cleanup.js";
+import { resolveRuntimeWorkerThreadExecArgv } from "./runtime-worker-url.js";
 import {
   DEFAULT_WORKER_PENDING_BYTES,
   DEFAULT_WORKER_PENDING_TASKS,
   getWorkerComputeCapacity,
-  type WorkerComputePermit,
 } from "./worker-task-capacity.js";
+import {
+  cancelWorkerNativeSections,
+  createWorkerNativeSectionState,
+  releaseWorkerNativeSectionsOnExit,
+  waitForWorkerNativeSections,
+} from "./worker-task-native-sections.js";
+import type { Slot, Task, WorkerTaskInput, WorkerTaskOptions } from "./worker-task-pool.types.js";
+
+export type { WorkerTaskRequestContext, WorkerTaskResponse } from "./worker-task-pool.types.js";
+export type { WorkerTaskControl } from "./worker-task-native-sections.js";
+export { serveWorkerTasks } from "./worker-task-server.js";
+export type { WorkerTaskChannel } from "./worker-task-server.js";
 
 // Reusable workers must not retain the first submitting caller's async scope.
 const runInWorkerPoolContext = AsyncLocalStorage.snapshot();
 const taskDiagnostics = createDiagnosticsChannel("openclaw.worker.task");
 
-type WorkerTaskInput<Input> = Input | (() => Input | Promise<Input>);
-export type WorkerTaskResponse = {
-  input: unknown;
-  /** Move owned binary replies instead of copying large inventories back to the worker. */
-  transferList?: readonly Transferable[];
-  /** Remaining owner budget, plus its existing watchdog grace. */
-  timeoutMs: number;
-  /** Release input ownership only after worker consumption or confirmed termination. */
-  onConsumed?: () => void;
-};
-
-export type WorkerTaskRequestContext = {
-  /** Task lifetime: closes on completion/checkpoint as well as cancellation. */
-  signal: AbortSignal;
-  /** Queue pressure requests a checkpoint; it does not cancel underlying host work. */
-  yieldSignal: AbortSignal;
-};
-
-type WorkerTaskOptions<Input> = {
-  /** Known retained input bytes, including inputs captured by a factory. No serialization pass. */
-  inputBytes?: number;
-  /** When supplied, queueing and asynchronous preparation consume the execution deadline. */
-  timeoutMs?: number;
-  signal?: AbortSignal;
-  transferList?: (input: Input) => readonly Transferable[];
-  onRequest?: (value: unknown, context: WorkerTaskRequestContext) => Promise<WorkerTaskResponse>;
-  onInputConsumed?: () => void;
-};
 type WorkerReply<Output> = { status: "ok"; value: Output } | { status: "failed"; error: string };
-type WorkerHostExchange = {
-  id: number;
-  pressure: AbortController;
-  onConsumed?: () => void;
-  sent: boolean;
-};
-type WorkerChannelResponse = { input: unknown; consumed: () => void };
-type WorkerConversation = {
-  taskId: number;
-  responseId: number;
-  pending?: Deferred<WorkerChannelResponse>;
-};
-type Task<Input, Output> = Deferred<Output> & {
-  id: number;
-  runInContext: ReturnType<typeof AsyncLocalStorage.snapshot>;
-  controller: AbortController;
-  exchange?: WorkerHostExchange;
-  inputConsumed: boolean;
-  exchangeSequence: number;
-  input?: WorkerTaskInput<Input>;
-  options: WorkerTaskOptions<Input>;
-  timer?: NodeJS.Timeout;
-  abort: () => void;
-  done: boolean;
-  slot?: Slot<Input, Output>;
-  admitted: boolean;
-  preparing: boolean;
-  inputBytes: number;
-  computePermit?: WorkerComputePermit;
-  enqueuedAt: number;
-  startedAt?: number;
-  preparedAt?: number;
-  transferMs: number;
-};
-type Slot<Input, Output> = {
-  worker?: Worker;
-  temporaryDirectory?: string;
-  task?: Task<Input, Output>;
-  idleTimer?: NodeJS.Timeout;
-  retiring?: Promise<void>;
-};
-
 export class WorkerTaskError extends Error {
   constructor(
     message: string,
@@ -109,9 +51,14 @@ export class WorkerTaskPool<Input, Output> {
   private readonly maxPendingBytes: number;
   private pendingTasks = 0;
   private pendingBytes = 0;
+  private workers = 0;
+  private workersCreated = 0;
+  private activeTasks = 0;
   private readonly computeCapacity: ReturnType<typeof getWorkerComputeCapacity> | undefined;
   private readonly resumeCompute = () => this.dispatch();
   private closedError?: Error;
+  private rotation?: Promise<void>;
+  private rotationFailed = false;
   private nextTaskId = 0;
   // Idle retirement is armed from worker messages, outside any caller's turn.
   // Bind the clock at construction so a process-wide pool cannot land that timer
@@ -205,6 +152,49 @@ export class WorkerTaskPool<Input, Output> {
     return task.promise;
   }
 
+  get isClosed(): boolean {
+    return this.closedError !== undefined;
+  }
+
+  getSnapshot() {
+    return {
+      maxWorkers: this.maxWorkers,
+      workers: this.workers,
+      workersCreated: this.workersCreated,
+      activeTasks: this.activeTasks,
+      pendingTasks: this.pendingTasks,
+    };
+  }
+
+  /** Pause dispatch, settle current work and join native exit before restarting the queue. */
+  rotate(): Promise<void> {
+    if (this.rotation) {
+      return this.rotation;
+    }
+    const completion = createDeferredCore();
+    this.rotation = completion.promise;
+    this.rotationFailed = false;
+    this.computeCapacity?.remove(this.resumeCompute);
+    const slots = [...this.slots];
+    const tasks = slots.flatMap((slot) => (slot.task ? [slot.task] : []));
+    void Promise.allSettled(tasks.map((task) => task.promise))
+      .then(() => Promise.all(slots.map((slot) => this.retire(slot))))
+      .then(() => Promise.all(this.artifactCleanups))
+      .then(
+        () => {
+          this.rotation = undefined;
+          completion.resolve();
+          this.dispatch();
+        },
+        (error: unknown) => {
+          this.rotation = undefined;
+          this.rotationFailed = true;
+          completion.reject(error);
+        },
+      );
+    return completion.promise;
+  }
+
   close(
     error: Error = new WorkerTaskError("worker task pool closed", "unavailable"),
   ): Promise<void> {
@@ -224,11 +214,13 @@ export class WorkerTaskPool<Input, Output> {
   }
 
   private dispatch(): void {
-    if (!this.queue.length || this.closedError) {
+    if (!this.queue.length || this.closedError || this.rotation || this.rotationFailed) {
       this.computeCapacity?.remove(this.resumeCompute);
     }
-    while (!this.closedError && this.queue.length) {
-      let slot = [...this.slots].find((entry) => !entry.task && !entry.retiring);
+    while (!this.closedError && !this.rotation && !this.rotationFailed && this.queue.length) {
+      let slot = [...this.slots].find(
+        (entry) => !entry.task && !entry.retiring && !entry.retirementFailed,
+      );
       if (!slot) {
         if (this.slots.size >= this.maxWorkers) {
           // A host-waiting task can checkpoint rather than monopolize a worker.
@@ -262,12 +254,13 @@ export class WorkerTaskPool<Input, Output> {
         nextTask.computePermit = permit;
       }
       if (!slot) {
-        slot = {};
+        slot = { nativeSections: createWorkerNativeSectionState() };
         this.slots.add(slot);
       }
       this.clearTimeoutFn(slot.idleTimer);
       const task = this.queue.shift()!;
       slot.task = task;
+      this.activeTasks++;
       task.slot = slot;
       task.startedAt = performance.now();
       slot.worker?.ref();
@@ -283,7 +276,7 @@ export class WorkerTaskPool<Input, Output> {
       const workerUrl = this.options.workerUrl;
       const workerOptions = {
         // Preserve native require(ESM) and its transitive import-only exports.
-        execArgv: workerUrl.pathname.endsWith(".ts") ? ["--import", "tsx/esm"] : [],
+        execArgv: resolveRuntimeWorkerThreadExecArgv(workerUrl),
         ...this.options.workerOptions,
         ...prepared?.options,
       };
@@ -293,6 +286,8 @@ export class WorkerTaskPool<Input, Output> {
       }
       return new Worker(workerUrl, workerOptions);
     });
+    this.workers++;
+    this.workersCreated++;
     slot.worker = worker;
     worker.on("message", (message: unknown) => {
       const task = slot.task;
@@ -308,9 +303,11 @@ export class WorkerTaskPool<Input, Output> {
     worker.on("messageerror", (error) =>
       this.fail(slot, new WorkerTaskError(String(error), "unavailable")),
     );
-    worker.once("exit", (code) =>
-      this.fail(slot, new WorkerTaskError(`worker exited with code ${code}`, "unavailable")),
-    );
+    worker.once("exit", (code) => {
+      releaseWorkerNativeSectionsOnExit(slot.nativeSections);
+      this.workers--;
+      this.fail(slot, new WorkerTaskError(`worker exited with code ${code}`, "unavailable"));
+    });
     return worker;
   }
 
@@ -326,7 +323,8 @@ export class WorkerTaskPool<Input, Output> {
           ? await (taskInput as () => Input | Promise<Input>)() // SAFETY: Callable inputs are factories.
           : taskInput;
     } catch (error) {
-      this.fail(slot, toErrorObject(error, "worker task preparation failed"));
+      // No input reached the worker; a rejected owner must not retire its healthy siblings.
+      this.finish(task, toErrorObject(error, "worker task preparation failed"));
       return;
     } finally {
       task.preparing = false;
@@ -345,7 +343,12 @@ export class WorkerTaskPool<Input, Output> {
       if (!task.done) {
         const transferStartedAt = performance.now();
         worker.postMessage(
-          { input, taskId: task.id, interactive: Boolean(task.options.onRequest) },
+          {
+            input,
+            taskId: task.id,
+            interactive: Boolean(task.options.onRequest),
+            nativeSections: slot.nativeSections.buffer,
+          },
           transferList,
         );
         task.transferMs += performance.now() - transferStartedAt;
@@ -451,7 +454,7 @@ export class WorkerTaskPool<Input, Output> {
     }
     // The owner, not a second pool clock, budgets host waits and pauses approvals.
     clearTimeout(task.timer);
-    const exchange: WorkerHostExchange = {
+    const exchange: Task<Input, Output>["exchange"] = {
       id: ++task.exchangeSequence,
       pressure: new AbortController(),
       sent: false,
@@ -563,13 +566,13 @@ export class WorkerTaskPool<Input, Output> {
           const now = performance.now();
           taskDiagnostics.publish({
             worker: this.options.workerUrl.pathname.split("/").at(-1),
+            ...this.getSnapshot(),
             outcome: completionError ? "failed" : "ok",
             queueMs: (task.startedAt ?? now) - task.enqueuedAt,
             preparationMs:
               task.startedAt === undefined ? 0 : (task.preparedAt ?? now) - task.startedAt,
             runMs: task.preparedAt === undefined ? 0 : now - task.preparedAt,
             transferMs: task.transferMs,
-            pendingTasks: this.pendingTasks,
             pendingBytes: this.pendingBytes,
           });
         }
@@ -583,9 +586,21 @@ export class WorkerTaskPool<Input, Output> {
     const slot = task.slot;
     if (slot) {
       slot.task = undefined;
+      this.activeTasks--;
       if (retire) {
         // Keep the slot reserved and the caller pending until its execution actually stops.
-        void this.retire(slot).then(complete);
+        (slot.completions ??= []).push(complete);
+        void this.retire(slot).catch((failure: unknown) => {
+          task.reject(
+            error
+              ? new AggregateError(
+                  [error, failure],
+                  `Worker retirement failed: ${toErrorObject(failure, "worker retirement failed").message}; task failed: ${error.message}`,
+                  { cause: failure },
+                )
+              : failure,
+          );
+        });
         return;
       }
     }
@@ -619,10 +634,21 @@ export class WorkerTaskPool<Input, Output> {
 
   private retire(slot: Slot<Input, Output>): Promise<void> {
     this.clearTimeoutFn(slot.idleTimer);
+    cancelWorkerNativeSections(slot.nativeSections);
     // Retain error listeners until exit: termination can race a worker startup error.
     // Constructor observers can retire this slot before its Worker is assigned.
     return (slot.retiring ??= Promise.resolve()
-      .then(() => slot.worker?.terminate())
+      .then(async () => {
+        if (slot.worker) {
+          // Node can abort if termination interrupts zlib between allocation and initialization.
+          // Keep custody until the current bounded native operation settles, including on timeout.
+          const settlement = waitForWorkerNativeSections(slot.nativeSections);
+          if (settlement) {
+            await settlement;
+          }
+          await slot.worker.terminate();
+        }
+      })
       .then(() => {
         const directory = slot.temporaryDirectory;
         if (directory) {
@@ -644,103 +670,17 @@ export class WorkerTaskPool<Input, Output> {
         }
         slot.worker?.removeAllListeners();
         this.slots.delete(slot);
+        for (const complete of slot.completions ?? []) {
+          complete();
+        }
+        slot.completions = undefined;
         this.dispatch();
+      })
+      .catch((error: unknown) => {
+        // Keep native custody and queued input charges until a later close/rotation joins exit.
+        slot.retirementFailed = true;
+        slot.retiring = undefined;
+        throw error;
       }));
   }
-}
-
-/** A conversation never outlives the pool task or crosses worker generations. */
-export type WorkerTaskChannel = {
-  consumeInput: () => void;
-  request: (
-    value: unknown,
-    transferList?: readonly Transferable[],
-  ) => Promise<{ input: unknown; consumed: () => void }>;
-};
-
-/** Pool dispatch is serial per worker; handlers finish cleanup before returning their result. */
-export function serveWorkerTasks<Output>(
-  handler: (input: unknown, channel?: WorkerTaskChannel) => Output | Promise<Output>,
-  options: { transferList?: (value: Output) => Transferable[] } = {},
-): void {
-  const port = parentPort;
-  if (!port) {
-    return;
-  }
-  let active: WorkerConversation | undefined;
-  port.on(
-    "message",
-    (message: { input: unknown; taskId: number; interactive?: boolean; responseId?: number }) => {
-      if (message.responseId !== undefined) {
-        if (
-          !active ||
-          message.taskId !== active.taskId ||
-          message.responseId !== active.responseId ||
-          !active.pending
-        ) {
-          throw new Error("stale worker task response");
-        }
-        const pending = active.pending;
-        active.pending = undefined;
-        let consumed = false;
-        const taskId = message.taskId;
-        const id = message.responseId;
-        pending.resolve({
-          input: message.input,
-          consumed: () => {
-            if (consumed) {
-              return;
-            }
-            consumed = true;
-            port.postMessage({ status: "consumed", taskId, id });
-          },
-        });
-        return;
-      }
-      if (active) {
-        throw new Error("overlapping worker tasks");
-      }
-      const task: WorkerConversation = { taskId: message.taskId, responseId: 0 };
-      active = task;
-      const channel: WorkerTaskChannel | undefined = message.interactive
-        ? {
-            consumeInput: () =>
-              port.postMessage({ status: "consumed", taskId: task.taskId, id: 0 }),
-            request: (value, transferList) => {
-              if (active !== task || task.pending) {
-                throw new Error("closed or busy worker channel");
-              }
-              task.pending = createDeferredCore();
-              port.postMessage(
-                {
-                  status: "request",
-                  taskId: task.taskId,
-                  id: ++task.responseId,
-                  value,
-                },
-                transferList ? [...transferList] : [],
-              );
-              return task.pending.promise;
-            },
-          }
-        : undefined;
-      void Promise.resolve()
-        .then(() => handler(message.input, channel))
-        .then((value) => {
-          active = undefined;
-          port.postMessage(
-            { status: "ok", value, taskId: task.taskId },
-            options.transferList?.(value) ?? [],
-          );
-        })
-        .catch((error: unknown) => {
-          active = undefined;
-          port.postMessage({
-            status: "failed",
-            taskId: task.taskId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-    },
-  );
 }

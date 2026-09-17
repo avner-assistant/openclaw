@@ -79,6 +79,10 @@ value without wrapping it in a guessed answer shape.
 agent run, and `results.delete(id)` frees capacity. Read `results.d.ts` through
 `API.read` for types, limits, and lifetime, or see
 [Reuse data across cells](/tools/code-mode/quickstart#reuse-data-across-cells).
+Oversized final objects and arrays may return an automatic `value.reference`
+instead of an unrecoverable display prefix; use its `id` with `results.load`.
+Larger previews show explicitly sampled paths, counts, and observed shapes.
+These samples are not schemas; load the original value before processing full data.
 
 ```typescript
 type ToolCatalogMetadata = {
@@ -168,6 +172,10 @@ array when no tools match. If the matching callable names exceed the available p
 inbox capacity, search rejects with guidance to narrow the request.
 It never silently substitutes an empty or partial match list. A narrower search
 remains available after the error.
+
+Exact callable spelling takes precedence over case-insensitive matching. Use a
+handle's `callableName` to find that same tool when enabled names differ only in
+capitalization.
 
 Paired Gateway nodes are available through the `nodes` global:
 

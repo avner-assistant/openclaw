@@ -11,10 +11,15 @@ import {
 import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-test-runtime";
 import * as processRuntime from "openclaw/plugin-sdk/process-runtime";
 import type { SpawnResult } from "openclaw/plugin-sdk/process-runtime";
-import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
+import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
+import {
+  resolveTestNodeExecPath,
+  useAutoCleanupTempDirTracker,
+} from "openclaw/plugin-sdk/test-env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { findCrabboxBinary, resolveCrabboxBinary } from "./crabbox-binary.js";
 import { ensureManagedCrabboxBinary, type CrabboxBinary } from "./crabbox-managed-binary.js";
+import { crabboxState } from "./crabbox-state.test-support.js";
 import { createNodeBootstrapFixture } from "./crabbox-worker-node-enrollment.test-support.js";
 import { operationLeaseId, parseCrabboxProfile } from "./crabbox-worker-profile.js";
 import { createCrabboxWorkerProvider, resolveOpenClawRoot } from "./crabbox-worker-provider.js";
@@ -66,6 +71,7 @@ const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
       await Promise.all([...providers].map((provider) => provider.dispose()));
     } finally {
       providers.clear();
+      await closeOpenClawStateDatabaseAsync();
       resetPluginStateStoreForTests();
       vi.unstubAllEnvs();
       cleanup();
@@ -150,6 +156,7 @@ function providerWithRawRunner(
   sleep: (milliseconds: number) => Promise<void> = async () => {},
 ): WorkerProvider {
   const provider = createCrabboxWorkerProvider({
+    state: crabboxState,
     runCommand,
     openclawRoot: OPENCLAW_ROOT,
     pathEnv: "",
@@ -1128,7 +1135,9 @@ describe("Crabbox worker provider", () => {
     const tempDir = tempDirs.make("openclaw-crabbox-wallpaper-");
     const wallpaperPath = path.join(tempDir, "wallpaper.png");
     fs.writeFileSync(wallpaperPath, bytes);
-    expect(() => createCrabboxWorkerProvider({ wallpaperPath })).toThrow(message);
+    expect(() => createCrabboxWorkerProvider({ state: crabboxState, wallpaperPath })).toThrow(
+      message,
+    );
   });
 
   it.each([
@@ -1230,7 +1239,9 @@ describe("Crabbox worker provider", () => {
       (call) =>
         call.argv[1] === "run" && String(call.options.input).includes("openclaw-worker-browser"),
     )?.options.input;
-    const desktopSetupText = String(desktopSetup);
+    const desktopSetupText: string = JSON.parse(
+      String(desktopSetup).match(/^const desktopSetup = (.+);$/m)![1]!,
+    );
     expect(desktopSetupText).toContain("worker_user=$(id -un)");
     expect(desktopSetupText).toContain('worker_home=$(getent passwd "$worker_uid"');
     expect(desktopSetupText).toContain(`worker-browser/${LEASE_ID}`);
@@ -1765,8 +1776,7 @@ describe("Crabbox worker provider", () => {
 
   it.each([
     { phase: "profile setup", setupAttempt: 1 },
-    { phase: "desktop setup", setupAttempt: 2 },
-    { phase: "node enrollment setup", setupAttempt: 3 },
+    { phase: "node enrollment setup", setupAttempt: 2 },
   ])("identifies the failed $phase phase", async ({ phase, setupAttempt }) => {
     let attempts = 0;
     const provider = providerWithRunner(async (argv) => {
@@ -1794,7 +1804,7 @@ describe("Crabbox worker provider", () => {
       const home = tempDirs.make("crabbox-enrollment-");
       const bin = path.join(home, "bin");
       fs.mkdirSync(bin);
-      fs.symlinkSync(process.execPath, path.join(bin, "node"));
+      fs.symlinkSync(resolveTestNodeExecPath(), path.join(bin, "node"));
       const calls: string[][] = [];
       const provider = providerWithRunner(async (argv, options) => {
         calls.push(argv);
@@ -1894,6 +1904,7 @@ describe("Crabbox worker provider", () => {
     const calls: string[][] = [];
     let warmed = false;
     const provider = createCrabboxWorkerProvider({
+      state: crabboxState,
       runCommand: async (argv) => {
         calls.push(argv);
         if (argv[1] === "config") {
@@ -2202,6 +2213,8 @@ describe("Crabbox worker provider", () => {
   ])("provisions a node-carried desktop through $name", async ({ config, providerId }) => {
     const calls: Array<{ argv: string[]; options: Parameters<CrabboxCommandRunner>[1] }> = [];
     const setupOrder: string[] = [];
+    const setupStarted = createDeferred<void>();
+    const setupComplete = createDeferred<void>();
     const provider = providerWithRawRunner(async (argv, options) => {
       calls.push({ argv, options });
       if (argv[1] === "config" && argv[2] === "show") {
@@ -2212,12 +2225,15 @@ describe("Crabbox worker provider", () => {
       }
       if (argv[1] === "run" && String(options.input).includes("openclaw-worker-browser")) {
         setupOrder.push("desktop");
+        setupStarted.resolve();
+        await setupComplete.promise;
       }
       return commandResult();
     });
 
-    await expect(
-      provider.provision({ ...PROFILE, provider: providerId, desktop: true }, OPERATION_ID, {
+    let completed = false;
+    const provision = provider
+      .provision({ ...PROFILE, provider: providerId, desktop: true }, OPERATION_ID, {
         beginNodeEnrollment: async () => {
           setupOrder.push("enrollment");
           return {
@@ -2230,8 +2246,18 @@ describe("Crabbox worker provider", () => {
             waitForDeviceId: async () => "device-1",
           };
         },
-      }),
-    ).resolves.toEqual({
+      })
+      .finally(() => {
+        completed = true;
+      });
+    await setupStarted.promise;
+    try {
+      expect(completed).toBe(false);
+      expect(calls.some(({ argv }) => argv[1] === "heartbeat")).toBe(false);
+    } finally {
+      setupComplete.resolve();
+    }
+    await expect(provision).resolves.toEqual({
       leaseId: LEASE_ID,
       node: { deviceId: "device-1" },
       sharedHost: false,
@@ -2271,7 +2297,9 @@ describe("Crabbox worker provider", () => {
         desktop: true,
       }),
     ).toBe(149 * 60_000 + 15_000);
-    expect(setupOrder).toEqual(["desktop", "enrollment"]);
+    expect(calls.filter(({ argv }) => argv[1] === "run")).toHaveLength(1);
+    expect(calls.find(({ argv }) => argv[1] === "run")?.options.timeoutMs).toBe(30 * 60_000);
+    expect(setupOrder).toEqual(["enrollment", "desktop"]);
     expect(calls.filter(({ argv }) => argv[1] === "inspect")).toHaveLength(1);
   });
 
@@ -2330,6 +2358,7 @@ describe("Crabbox worker provider", () => {
       expect(failure.cause).toBe(failure.provisionError);
       expect(WorkerProviderError.isCleanupIndeterminate(failure)).toBe(false);
       expect(calls.at(-1)).toEqual([SIBLING_BINARY, "stop", "--provider", "aws", "--id", LEASE_ID]);
+      expect(calls.filter((argv) => argv[1] === "stop")).toHaveLength(1);
     },
   );
 
@@ -3062,6 +3091,7 @@ describe("Crabbox worker provider", () => {
     let inspections = 0;
     const now = vi.spyOn(Date, "now").mockImplementation(() => nowMs);
     const provider = createCrabboxWorkerProvider({
+      state: crabboxState,
       runCommand: async (argv) => {
         calls.push(argv);
         if (argv[1] === "config") {
@@ -3178,6 +3208,7 @@ describe("Crabbox worker provider", () => {
     const binary = path.resolve(path.sep, "custom", "crabbox");
     const calls: string[][] = [];
     const provider = createCrabboxWorkerProvider({
+      state: crabboxState,
       runCommand: async (argv) => {
         calls.push(argv);
         return argv[1] === "inspect" ? commandResult({ stdout: inspectJson() }) : commandResult();

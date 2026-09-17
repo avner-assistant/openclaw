@@ -47,6 +47,7 @@ export type ChatPageHost = ChatHost &
   PullRequestRefreshHost &
   SessionWorkspaceHost &
   BackgroundTasksHost & {
+    reviewQueuedMessageEdit?: () => void;
     chatMetadataIsPresented?: () => boolean;
     chatSubmissions: ApplicationContext["chatSubmissions"];
     password: string;
@@ -117,6 +118,7 @@ export type ChatPageHost = ChatHost &
     chatHasAutoScrolled: boolean;
     chatUserNearBottom: boolean;
     chatFollowLocked: boolean;
+    chatReadingHistory: boolean;
     chatIsProgrammaticScroll?: () => boolean;
     chatScrollElement?: () => HTMLElement | null;
     chatScrollToEnd?: (options: ChatScrollToEndOptions) => boolean;
@@ -153,7 +155,10 @@ export type ChatPageHost = ChatHost &
     submitQueuedChatMessageEdit: () => void;
     cancelQueuedChatMessageEdit: () => void;
     handleCloseSidebar: (slot: "detail" | "workspace") => void;
-    updateSidebarLayout: (layout: SidebarLayout) => void;
+    updateSidebarLayout: (
+      layout: SidebarLayout,
+      options?: { persist?: boolean; dashboardPresentation?: "personal"; geometryOnly?: boolean },
+    ) => void;
     beginImageOpen: () => number;
     handleOpenImage: (item: ImageLightboxItem, requestVersion?: number) => void;
     handleCloseImage: () => void;

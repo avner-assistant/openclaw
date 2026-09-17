@@ -232,6 +232,10 @@ export interface SchemaMeta {
   updated_at: number;
 }
 
+export interface SessionCanonicalValidationPending {
+  session_key: string;
+}
+
 export interface SessionConversations {
   conversation_id: string;
   first_seen_at: number;
@@ -248,6 +252,17 @@ export interface SessionGoalOperations {
   result_json: string;
   session_id: string;
   session_key: string;
+}
+
+export interface SessionInputCompletions {
+  completed_at: number;
+  idempotency_key: string;
+  outcome_json: string;
+  request_hash: string;
+  run_id: string;
+  session_id: string;
+  session_key: string;
+  succeeded: number;
 }
 
 export interface SessionKeyContract {
@@ -282,6 +297,7 @@ export interface SessionNodes {
   last_activity_at: number | null;
   last_interaction_at: number | null;
   last_read_at: number | null;
+  legacy_acp_migration_json: string | null;
   owner_actor_id: string | null;
   owner_actor_type: string | null;
   owner_assigned_at: number | null;
@@ -554,8 +570,10 @@ export interface DB {
   memory_session_tombstones: MemorySessionTombstones;
   message_tool_run_outcomes: MessageToolRunOutcomes;
   schema_meta: SchemaMeta;
+  session_canonical_validation_pending: SessionCanonicalValidationPending;
   session_conversations: SessionConversations;
   session_goal_operations: SessionGoalOperations;
+  session_input_completions: SessionInputCompletions;
   session_key_contract: SessionKeyContract;
   session_members: SessionMembers;
   session_nodes: SessionNodes;

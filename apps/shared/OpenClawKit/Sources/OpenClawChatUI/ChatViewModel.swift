@@ -10,12 +10,14 @@ let chatUILogger = Logger(subsystem: "ai.openclaw", category: "OpenClawChatUI")
 @MainActor
 @Observable
 public final class OpenClawChatViewModel {
-    public nonisolated static let defaultModelSelectionID = "__default__"
-    public nonisolated static let inheritedThinkingSelectionID = "__inherited__"
     static let maxAttachmentBytes = 5_000_000
     static let sessionListFetchLimit = 200
 
-    public internal(set) var messages: [OpenClawChatMessage] = []
+    public internal(set) var messages: [OpenClawChatMessage] = [] {
+        didSet { self.sourcePreviewState.update(self.messages) }
+    }
+
+    let sourcePreviewState = ChatSourcePreviewState()
 
     public var input: String = "" {
         didSet {
@@ -104,6 +106,8 @@ public final class OpenClawChatViewModel {
 
     public private(set) var pendingRunCount: Int = 0
     public internal(set) var questionCards: [OpenClawQuestionCardModel] = []
+    var questionAttentionOwnerID = UUID()
+    public internal(set) var isQuestionAuthorityRetired = false
     var questionRefreshGeneration: UInt64 = 0
     var questionStateRevision: UInt64 = 0
     var questionExpiryTasks: [String: Task<Void, Never>] = [:]
@@ -595,7 +599,9 @@ public final class OpenClawChatViewModel {
     /// Permanently retires a replaced presentation without aborting its gateway run.
     public func detachTransport() {
         guard !self.isTransportDetached else { return }
+        self.retireQuestionAuthority()
         self.isTransportDetached = true
+        self.invalidateSourceContext()
         self.endPendingToolActivities()
         self.eventTask?.cancel()
         self.bootstrapTask?.cancel()
@@ -608,10 +614,6 @@ public final class OpenClawChatViewModel {
         self.outboxChangesTask?.cancel()
         self.activeSessionRunIndicatorTimeoutTask?.cancel()
         self.subagentActivityCleanupTask?.cancel()
-        self.questionRefreshRetryTask?.cancel()
-        for (_, task) in self.questionExpiryTasks {
-            task.cancel()
-        }
         for (_, task) in self.pendingRunOwnerTasks {
             task.cancel()
         }

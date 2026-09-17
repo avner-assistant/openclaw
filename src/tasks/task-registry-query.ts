@@ -2,12 +2,15 @@ import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { err, ok, type Result } from "@openclaw/normalization-core/result";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { filterCurrentTaskRunBackings } from "./task-backing-records.js";
+import { getTaskMirroredFlowIds } from "./task-flow-runtime-internal.js";
 import { clearTaskActivity } from "./task-registry-activity.js";
 import { isActiveTaskStatus } from "./task-registry-common.js";
 import type { TaskRegistryControlRuntime } from "./task-registry-control.types.js";
 import { ensureLinkedTaskFlowRegistryReady } from "./task-registry-flow-link.js";
 import {
   cloneTaskRecord,
+  listTasksFromIndex,
   cloneTaskRecordForObserver,
   normalizeTaskTimestamps,
   compareTasksNewestFirst,
@@ -327,29 +330,20 @@ export function getTaskById(taskId: string): TaskRecord | undefined {
 
 export function findTaskByRunId(runId: string): TaskRecord | undefined {
   ensureTaskRegistryReady();
-  const task = pickPreferredRunIdTask(getTasksByRunId(runId));
+  const matches = getTasksByRunId(runId);
+  let mirroredFlowIds: ReadonlySet<string> | undefined;
+  const task = pickPreferredRunIdTask(
+    filterCurrentTaskRunBackings(matches, (flowId) => {
+      // Admit flows only when a candidate needs them, once for this synchronous lookup.
+      mirroredFlowIds ??= getTaskMirroredFlowIds(
+        matches.flatMap((candidate) =>
+          candidate.parentFlowId ? [candidate.parentFlowId.trim()] : [],
+        ),
+      );
+      return mirroredFlowIds.has(flowId);
+    }),
+  );
   return task ? cloneTaskRecord(task) : undefined;
-}
-
-function listTasksFromIndex(index: Map<string, Set<string>>, key: string): TaskRecord[] {
-  const ids = index.get(key);
-  if (!ids || ids.size === 0) {
-    return [];
-  }
-  return [...ids]
-    .map((taskId, insertionIndex) => {
-      const task = tasks.get(taskId);
-      return task ? Object.assign({}, cloneTaskRecord(task), { insertionIndex }) : null;
-    })
-    .filter(
-      (
-        task,
-      ): task is TaskRecord & {
-        insertionIndex: number;
-      } => Boolean(task),
-    )
-    .toSorted(compareTasksNewestFirst)
-    .map(({ insertionIndex: _insertionIndex, ...task }) => task);
 }
 
 export function listTasksForAgentId(agentId: string): TaskRecord[] {
@@ -363,18 +357,13 @@ export function listTasksForAgentId(agentId: string): TaskRecord[] {
     .toSorted(compareTasksNewestFirst);
 }
 
-export function findLatestTaskForFlowId(flowId: string): TaskRecord | undefined {
-  const task = listTasksForFlowId(flowId)[0];
-  return task ? cloneTaskRecord(task) : undefined;
-}
-
 export function listTasksForOwnerKey(ownerKey: string): TaskRecord[] {
   ensureTaskRegistryReady();
   const key = normalizeOptionalString(ownerKey);
   if (!key) {
     return [];
   }
-  return listTasksFromIndex(taskIdsByOwnerKey, key);
+  return listTasksFromIndex(tasks, taskIdsByOwnerKey, key);
 }
 
 export async function listFreshTasksForOwnerKey(ownerKey: string): Promise<TaskRecord[]> {
@@ -402,7 +391,7 @@ export async function listFreshTasksForOwnerKey(ownerKey: string): Promise<TaskR
     }
   }
 
-  return listTasksFromIndex(taskIdsByOwnerKey, key);
+  return listTasksFromIndex(tasks, taskIdsByOwnerKey, key);
 }
 
 export function listTasksForFlowId(flowId: string): TaskRecord[] {
@@ -411,7 +400,7 @@ export function listTasksForFlowId(flowId: string): TaskRecord[] {
   if (!key) {
     return [];
   }
-  return listTasksFromIndex(taskIdsByParentFlowId, key);
+  return listTasksFromIndex(tasks, taskIdsByParentFlowId, key);
 }
 
 function findLatestTaskForRelatedSessionKey(sessionKey: string): TaskRecord | undefined {
@@ -428,7 +417,7 @@ export function listTasksForRelatedSessionKey(
   if (!key) {
     return [];
   }
-  return listTasksFromIndex(taskIdsByRelatedSessionKey, key).filter((task) =>
+  return listTasksFromIndex(tasks, taskIdsByRelatedSessionKey, key).filter((task) =>
     taskMatchesRelatedSession(task, key, sessionAgentId),
   );
 }

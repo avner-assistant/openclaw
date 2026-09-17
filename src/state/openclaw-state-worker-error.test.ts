@@ -8,6 +8,10 @@ import {
 import { OpenClawAgentDatabaseMediaMigrationRequiredError } from "./openclaw-agent-db-migration-required.js";
 import { OpenClawStateDatabaseSchemaMigrationRequiredError } from "./openclaw-state-db-schema-migration-required.js";
 import {
+  OpenClawStateLeaseError,
+  toOpenClawStateLeaseVerificationError,
+} from "./openclaw-state-lease-error.js";
+import {
   OpenClawStateExternalOwnershipError,
   OpenClawStateOwnershipError,
   OpenClawStateOwnershipMetadataError,
@@ -33,6 +37,38 @@ function roundTrip(error: Error): Error {
 }
 
 describe("shared-state worker error transport", () => {
+  it.each([
+    "OPENCLAW_STATE_LEASE_INVALID_INPUT",
+    "OPENCLAW_STATE_LEASE_TIMEOUT",
+    "OPENCLAW_STATE_LEASE_ABORTED",
+    "OPENCLAW_STATE_LEASE_LOST",
+    "OPENCLAW_STATE_LEASE_STORAGE_FAILED",
+  ] as const)("preserves lease classification and cause for %s", (code) => {
+    const error = new OpenClawStateLeaseError("Synthetic lease refusal", {
+      code,
+      cause: new Error("Synthetic verification cause"),
+    });
+    const decoded = roundTrip(error);
+    expect(decoded).toBeInstanceOf(OpenClawStateLeaseError);
+    expect(decoded).toMatchObject({ name: error.name, message: error.message, code });
+    expect(decoded.cause).toBeInstanceOf(Error);
+    expect(decoded.cause).toMatchObject({ message: "Synthetic verification cause" });
+  });
+  it("preserves canonical verification wrapping through worker transport", () => {
+    const cause = new Error("Synthetic read failure");
+    const identity = { scope: "test", key: "read", leaseLabel: "test lease" };
+    const wrapped = toOpenClawStateLeaseVerificationError(identity, cause);
+    expect(wrapped.cause).toBe(cause);
+    expect(toOpenClawStateLeaseVerificationError(identity, wrapped)).toBe(wrapped);
+    const decoded = roundTrip(wrapped);
+    expect(decoded).toBeInstanceOf(OpenClawStateLeaseError);
+    expect(decoded).toMatchObject({
+      code: "OPENCLAW_STATE_LEASE_STORAGE_FAILED",
+      message: "failed to verify test lease test/read",
+      cause: { message: cause.message },
+    });
+  });
+
   it("uses the validated wire root when retaining an unopened error graph", () => {
     const retained = new Error("remote aggregate");
     retainOpenClawStateWorkerErrorPayload(retained, {
@@ -157,6 +193,26 @@ describe("shared-state worker error transport", () => {
       expect(cause.cause).toBe(graph);
     }
     expect(combined.errors).toEqual([first, second]);
+  });
+
+  it("encodes and hydrates ordinary error graphs only with an explicit opt-in", () => {
+    const cause = Object.assign(new Error("native failure"), { code: "SQLITE_BUSY" });
+    const original = new AggregateError([cause], "load and cleanup", { cause });
+    cause.cause = original;
+    expect(encodeOpenClawStateWorkerError(original)).toBeUndefined();
+    const payload = encodeOpenClawStateWorkerError(original, { includeOrdinary: true });
+    expect(payload).toBeDefined();
+    const retained = new Error("remote failure");
+    retainOpenClawStateWorkerErrorPayload(retained, structuredClone(payload));
+    expect(hydrateOpenClawStateWorkerError(retained)).toBe(retained);
+    const decoded = hydrateOpenClawStateWorkerError(retained, { includeOrdinary: true });
+    expect(decoded).toBeInstanceOf(AggregateError);
+    expect(decoded.cause).toMatchObject({ message: "native failure", code: "SQLITE_BUSY" });
+    if (!(decoded instanceof AggregateError) || !(decoded.cause instanceof Error)) {
+      throw new Error("Expected the constructed aggregate and its cause");
+    }
+    expect(decoded.errors[0]).toBe(decoded.cause);
+    expect(decoded.cause.cause).toBe(decoded);
   });
 
   it("leaves ordinary and already-current error graphs identical", () => {
@@ -331,6 +387,19 @@ describe("shared-state worker error transport", () => {
     { version: 1, root: 0, nodes: [{ ...validNode, cause: { ref: 1 } }] },
     { version: 1, root: 0, nodes: [{ ...validNode, cause: { value: {} } }] },
     { version: 1, root: 0, nodes: [{ ...validNode, code: {} }] },
+    {
+      version: 1,
+      root: 0,
+      nodes: [
+        {
+          type: "state-lease",
+          leaseCode: "OPENCLAW_STATE_LEASE_LOST",
+          code: "OPENCLAW_STATE_LEASE_TIMEOUT",
+          name: "OpenClawStateLeaseError",
+          message: "mismatched lease classification",
+        },
+      ],
+    },
     { version: 1, root: 0, nodes: [{ ...validNode, stack: "not transported" }] },
     {
       version: 1,

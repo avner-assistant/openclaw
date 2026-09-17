@@ -46,6 +46,59 @@ Tideclaw alpha builds are a separate internal prerelease track (npm dist-tag `al
 - If a beta tag has been pushed or published and needs a fix, maintainers cut the next `-beta.N` tag instead of deleting or recreating the old one
 - Detailed release procedure, approvals, credentials, and recovery notes are maintainer-only
 
+## Linux companion publication
+
+Regular stable publication requests Linux bundles automatically after GitHub
+activation. A successful request is not completed Linux publication. Verify the
+versioned AppImage, Debian package, signatures, and checksums independently;
+pending Linux work does not block npm, Docker, GitHub finalization, or stable
+main closeout.
+
+The Linux publisher writes immutable `OpenClaw-<version>-linux.json` evidence
+beside the bundles. It binds the source tag/SHA, original release ID, trusted
+tooling SHA, updater key, and exact asset identities. Complete public bundles
+are verified and reused rather than rebuilt. Asset completeness is separate
+from unfinished channel publication.
+
+One post-build publisher advances the fixed `linux-stable` control release's
+`latest.json` only forward, then mirrors those exact bytes onto the latest
+Gateway release. An authorized Linux publication creates the control release
+as prerelease/non-latest when absent; ordinary PR validation never creates it.
+Conflicting state, or missing canonical metadata on an existing channel, fails
+closed; it never grants permission to overwrite arbitrary metadata.
+
+Before activating a new Gateway release, the existing carry step preserves the
+previous usable Linux manifest's original version, signature, and download URL.
+After finalization and readback, a bounded detached mirror-only request catches
+up that legacy endpoint without keeping the core release waiting for the
+metadata queue. Dispatch acceptance is not mirror success. Cancellation, queue
+overflow, timeout, and readback failures are visible degraded outcomes requiring
+reconciliation, not reasons to roll back core publication.
+
+Every asset or release-note mutation revalidates the live executing writer and
+its original validated publication request after preparatory reads. A canceled
+or superseded attempt stops before its next write, including between deletion
+and replacement. Partial state remains available for investigation.
+
+An interrupted deletion of canonical `latest.json` requires explicit
+release-owner reconciliation; normal publication refuses to guess a version
+floor. Retain the last verified canonical manifest and all intervening
+publication evidence. Under exclusive metadata-writer ownership, reread the
+channel release ID, tag/SHA, inventory, and canonical absence, then prove that
+the selected immutable manifest is not older than any intervening valid
+publication. Verify its source and asset identities, restore those exact bytes,
+and read back both canonical and legacy endpoints. Stop on ambiguity; a supplied
+version/hash or current Gateway `latest` alone is not Linux forward-order proof.
+
+This tooling does not activate a new shipped endpoint or download link.
+Existing clients retain `releases/latest/download/latest.json`. A later
+`linux-stable` client cutover requires separate release approval, qualified
+signed artifacts, and an installed-old-client migration proof. An old client
+cannot acquire a corrected version comparator before its current comparator
+offers the update; verify the chosen version is newer under that shipped
+comparator. Local tests, unsigned packaging, and metadata readback do not prove
+that migration.
+
 ## Release changelog artifacts
 
 `CHANGELOG.md` is the generated release index. Each release has one complete
@@ -350,6 +403,15 @@ For beta, stable, and full profiles, Linux (`ubuntu`) cross-OS lanes gate npm pu
 6. If the qualified Code SHA already contains fully final notes, use that same commit as **Release SHA**. One successful fresh full qualification can supply both lifecycle roles and their exact publication bytes; do not create another commit or run solely to separate the labels. If notes change after qualification, commit the selected release entry and any matching record/index updates as a new Release SHA. Changes outside the [changelog-only delta](#changelog-only-evidence-reuse) return the release to step 2.
 7. When Code SHA equals Release SHA, retain its successful full validation parent and exact prepared npm/OCI descriptors. Only for a later genuine changelog-only descendant, optionally run SHA-pinned Full Release Validation with evidence reuse: the complete delta must satisfy `split-changelog-release-v1`, point at green Code evidence, and dispatch no product child lanes. That path still prepares and qualifies new Release SHA package/image bytes. Either path must satisfy every required profile gate. Regular final artifacts include SDK reports for both npm `beta` and `latest`; review the report and 8-character acknowledgement for the channel you will publish.
 8. Save that successful Full Release Validation run as both the validation run and `preflight_run_id`. Its read-only npm workflow builds and packs the root/core packages once, checks source in parallel, and qualifies the exact bytes with the final changelog. Docker images build in parallel and are preserved for later promotion. Review the **Plugin SDK API diff** summary. If it reports changes, inspect the readable diff (also uploaded as `plugin-sdk-api-release-diff-<run-id>-<run-attempt>`) and record the 8-character acknowledgement digest printed by the report; omit the acknowledgement when it reports no Plugin SDK API changes. Standalone `OpenClaw NPM Release` with `preflight_only=true` remains available for focused preflight and recovery.
+
+   Regular beta/latest SDK reports pool identical comparisons by their full diff digest.
+   The diff artifact (`openclaw.plugin-sdk-api-diff-set/v1`) maps each selector to
+   its complete entry in `diffs`. Evidence sets use `openclaw.plugin-sdk-api-release-evidence-set/v2`;
+   each selector retains its own predecessor, release, and tooling identity, with
+   `diff` referencing that same pool. The validator expands the selected receipt
+   and verifies the unchanged logical digest and acknowledgement. Historical v1
+   receipts remain readable; artifact hashes cover the new stored bytes. This
+   representation does not qualify or replace an earlier failed artifact.
 
    Prepared packing reuses the exact preflight build while retaining package smoke checks, inventory generation, docs and changelog preparation, and source restoration. It also runs `pnpm update:compat:check` against npm's current `latest` and `beta` tags before packing. Ordinary source packing still performs a clean package build without that registry freshness check.
 

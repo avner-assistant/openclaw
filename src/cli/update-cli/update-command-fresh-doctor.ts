@@ -13,6 +13,7 @@ import { resolveGatewayInstallEntrypoint } from "../../daemon/gateway-entrypoint
 import { resolveAggregateSqliteInspectionTimeoutMs } from "../../infra/sqlite-readonly-worker.js";
 import { collectStateDatabasePaths } from "../../infra/update-candidate-state.js";
 import { readUpdateStateDatabaseSizes } from "../../infra/update-candidate-state.sizes.js";
+import { UPDATE_RUN_ID_ENV } from "../../infra/update-control-plane-sentinel.js";
 import { hasDeferredUpdateModelRetirement } from "../../infra/update-deferred-model-retirement.js";
 import {
   consumeUpdatePostInstallDoctorResult,
@@ -109,6 +110,7 @@ function createPostPluginDoctorExecutionFailure(
 export async function runUpdateFinalizationDoctorInFreshProcess(params: {
   phase: UpdateDoctorPhase;
   root: string;
+  runId?: string;
   yes: boolean;
   json: boolean;
   workspaceSuggestions?: boolean;
@@ -144,11 +146,13 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       baseEnv,
       env: {
         [UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV]: doctorResultPath,
+        ...(params.runId ? { [UPDATE_RUN_ID_ENV]: params.runId } : {}),
         // The outer updater owns service refresh and activation after every
         // migration finishes; a fresh Doctor must not resume its parked service.
         ...buildUpdateDoctorEnv({
           allowGatewayServiceRepair: false,
           allowGatewayActivation: false,
+          serviceRepairPolicy: "external",
           deferConfiguredPluginInstallRepair: true,
         }),
         ...(params.phase === "post-plugin" ? { [UPDATE_POST_CORE_CONVERGENCE_ENV]: "1" } : {}),
@@ -168,6 +172,7 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
         return;
       }
     }
+    const exitCode = isRecord(error) && typeof error.exitCode === "number" ? error.exitCode : null;
     const redaction = { env: process.env, stateDir: resolveStateDir() };
     const failureFacts = doctorResult?.failureFacts?.length
       ? doctorResult.failureFacts
@@ -205,13 +210,13 @@ export async function runUpdateFinalizationDoctorInFreshProcess(params: {
       throw new UpdateDoctorError(
         `Updated ${params.phase} Doctor failed:\n${details.join("\n")}`,
         failureFacts,
-        { cause: error },
+        { cause: error, exitCode },
       );
     }
     throw new UpdateDoctorError(
       error instanceof Error ? error.message : String(error),
       failureFacts,
-      { cause: error },
+      { cause: error, exitCode },
     );
   } finally {
     doctorResult ??= await consumeUpdatePostInstallDoctorResult(doctorResultPath);
@@ -256,6 +261,7 @@ async function validatePostPluginConfigInFreshProcess(params: {
 
 export async function completePostCorePluginUpdate(params: {
   root: string;
+  runId?: string;
   pluginUpdate: PostCorePluginUpdateResult;
   freshDoctorRequired: boolean;
   yes: boolean;

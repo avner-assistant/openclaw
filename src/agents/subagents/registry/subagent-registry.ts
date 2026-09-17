@@ -154,6 +154,7 @@ const subagentLifecycleController = new SubagentLifecycleController({
   // Lifecycle wiring precedes publicApi construction; inject this read query
   // as a late-bound callback instead of threading a partially built API object.
   countPendingDescendantRuns: (rootSessionKey) => countPendingDescendantRuns(rootSessionKey),
+  getLatestRunForChildSession: getLatestLiveSubagentRunByChildSessionKey,
   suppressAnnounceForSteerRestart: contextCleanup.suppressAnnounceForSteerRestart,
   resolveSubagentTask: findSubagentTaskForRun,
   shouldEmitEndedHookForRun: contextCleanup.shouldEmitEndedHookForRun,
@@ -569,6 +570,8 @@ export function adoptPausedSubagentRunForFollowUp(params: {
   childSessionKey: string;
   runId: string;
   task: string;
+  /** Exact paused owner captured by explicit task-resume admission. */
+  expected?: SubagentRunRecord;
   gatewayContextResolver?: GatewayContextResolver;
 }): boolean {
   const childSessionKey = params.childSessionKey.trim();
@@ -584,7 +587,7 @@ export function adoptPausedSubagentRunForFollowUp(params: {
     childSessionKey,
     (entry) => entry.pauseReason === "sessions_yield",
   );
-  if (!paused) {
+  if (!paused || (params.expected && paused !== params.expected)) {
     return false;
   }
   return subagentRunManager.replaceSubagentRunAfterSteer({

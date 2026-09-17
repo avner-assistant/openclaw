@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { createDeferredCore } from "../shared/deferred.js";
-import { inspectAgentDatabaseSchemaInWorker } from "../state/openclaw-agent-schema-inspection-worker.js";
+import { createAgentSchemaInspectionWorker } from "../state/openclaw-agent-schema-inspection-worker.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
 import { inspectSqliteSchemaHeader } from "./sqlite-snapshot-source.js";
 import { sqliteWorkerPreloadEnv } from "./sqlite-worker-preload.test-support.js";
@@ -176,6 +176,14 @@ describe("schema-header native reader lifetime", () => {
       const before = [pathname, pathname + "-journal"].map((file) => fs.readFileSync(file));
       const cacheRoot = dirs.make("sqlite-header-journal-cache-");
       vi.stubEnv("XDG_CACHE_HOME", cacheRoot);
+      await using schemaReader = createAgentSchemaInspectionWorker();
+      await expect(
+        schemaReader.inspect({
+          pathname,
+          supportedVersion: 7,
+          requireStartupMigrationReadiness: true,
+        }),
+      ).resolves.toBeNull();
       expect(await inspectSqliteSchemaHeader(pathname)).toEqual({
         userVersion: 7,
         writerAppVersion: "committed",
@@ -206,6 +214,16 @@ describe("schema-header native reader lifetime", () => {
         writer.close();
       }
       const before = [pathname, pathname + "-wal"].map((file) => fs.readFileSync(file));
+      if (!includeShm) {
+        await using schemaReader = createAgentSchemaInspectionWorker();
+        await expect(
+          schemaReader.inspect({
+            pathname,
+            supportedVersion: 9,
+            requireStartupMigrationReadiness: true,
+          }),
+        ).resolves.toBeNull();
+      }
       expect(await inspectSqliteSchemaHeader(pathname)).toEqual({
         userVersion: 9,
         writerAppVersion: "from-wal",
@@ -306,13 +324,14 @@ describe("schema-header native reader lifetime", () => {
       const controller = new AbortController();
       const cancellation = new Error("header inspection cancelled");
       let settled = false;
+      await using schemaReader = createAgentSchemaInspectionWorker();
       const operation =
         reader === "header"
           ? inspectSqliteSchemaHeader(pathname, {
               signal: controller.signal,
               agentSchemaVersionForOwnership: 8,
             })
-          : inspectAgentDatabaseSchemaInWorker(
+          : schemaReader.inspect(
               { pathname, supportedVersion: 8, inspectOwnership: true },
               controller.signal,
             );

@@ -15,6 +15,7 @@ import type { InternalSessionEntry as SessionEntry } from "../../config/sessions
 import { resolveSessionStorePathCore } from "../../config/sessions/paths.js";
 import { replaceSessionEntry } from "../../config/sessions/session-accessor.js";
 import { runExclusiveSessionLifecycleMutation } from "../../sessions/session-lifecycle-admission.js";
+import * as agentHandlerHelpers from "../agent-turn/agent-handler-helpers.js";
 import { setGatewayDedupeEntry } from "../agent-turn/agent-job.js";
 import { prepareAgentRunDispatch } from "../agent-turn/agent-run-admission-phase.js";
 import { createAgentTurnIo } from "../agent-turn/io.js";
@@ -117,17 +118,17 @@ describe("gateway agent handler chat.abort integration", () => {
       },
       canonicalKey: "global",
     });
-    mocks.loadGatewaySessionRow.mockReturnValue({
+    const sessionRow = {
       key: "global",
       sessionId: "global-session-id",
       kind: "global",
       updatedAt: Date.now(),
       goal,
-    });
+    } satisfies GatewaySessionRow;
     mocks.updateSessionStore.mockResolvedValue(undefined);
     mocks.agentCommand.mockReturnValue(new Promise(() => {}));
 
-    const context = makeContext();
+    const context = makeContext({ agentId: "work", row: sessionRow });
     context.getSessionEventSubscriberConnIds = () => new Set(["conn-1"]);
     const runId = "idem-agent-global-goal-event";
     await invokeAgent(
@@ -140,7 +141,6 @@ describe("gateway agent handler chat.abort integration", () => {
     );
 
     await waitForAssertion(() => {
-      expect(mocks.loadGatewaySessionRow).toHaveBeenCalledWith("global", { agentId: "work" });
       expect(context.addChatRun).toHaveBeenCalledWith(
         runId,
         expect.objectContaining({ sessionKey: "global", agentId: "work" }),
@@ -152,6 +152,7 @@ describe("gateway agent handler chat.abort integration", () => {
           sessionKey: "global",
           agentId: "work",
           goal: expect.objectContaining({ id: "goal-work-global" }),
+          session: expect.objectContaining({ key: "global", sessionId: "global-session-id", goal }),
         }),
         new Set(["conn-1"]),
         { agentId: "work", dropIfSlow: true, sessionKeys: ["global"] },
@@ -2140,6 +2141,10 @@ describe("gateway agent handler chat.abort integration", () => {
     },
   );
 
+  it("starts the next abort fixture without previously registered child runs", () => {
+    expect(getSubagentRunByChildSessionKey("agent:main:subagent:owned-by-other-turn")).toBeNull();
+  });
+
   it("chat.abort by runId allows the owner connection to use a stale session key", async () => {
     prime();
     const pending = new Promise(() => {});
@@ -2715,52 +2720,56 @@ describe("gateway agent handler chat.abort integration", () => {
 
   it("returns in_flight instead of replaying cached accepted agent replies", async () => {
     prime();
-    mocks.agentCommand.mockImplementationOnce(
-      () =>
-        new Promise(() => {
-          // Keep the first run pending so the dedupe entry remains accepted.
-        }),
-    );
-
+    const dispatchGate = createDeferred();
+    const dispatchYield = vi
+      .spyOn(agentHandlerHelpers, "yieldAfterAgentAcceptedAck")
+      .mockReturnValue(dispatchGate.promise);
+    mocks.agentCommand.mockResolvedValueOnce({
+      payloads: [{ text: "ok" }],
+      meta: { durationMs: 1 },
+    });
     const context = makeContext();
     const runId = "idem-cached-accepted";
-    await invokeAgent(
-      {
-        message: "hi",
-        agentId: "main",
-        sessionKey: "agent:main:main",
-        idempotencyKey: runId,
-      },
-      { context, reqId: runId, flushDispatch: false },
-    );
-
-    expectRecordFields(context.dedupe.get(`agent:${runId}`)?.payload, {
-      runId,
-      status: "accepted",
-      sessionKey: "agent:main:main",
-    });
-
-    const duplicateRespond = vi.fn();
-    await invokeAgent(
-      {
-        message: "hi again",
-        agentId: "main",
-        sessionKey: "agent:main:main",
-        idempotencyKey: runId,
-      },
-      { context, reqId: `${runId}-duplicate`, respond: duplicateRespond },
-    );
-
-    expect(mocks.agentCommand).not.toHaveBeenCalled();
-    expect(duplicateRespond).toHaveBeenCalledWith(
-      true,
-      { runId, status: "in_flight", sessionKey: "agent:main:main", agentId: "main" },
-      undefined,
-      {
-        cached: true,
+    try {
+      await invokeAgent(
+        {
+          message: "hi",
+          agentId: "main",
+          sessionKey: "agent:main:main",
+          idempotencyKey: runId,
+        },
+        { context, reqId: runId, flushDispatch: false },
+      );
+      expectRecordFields(context.dedupe.get(`agent:${runId}`)?.payload, {
         runId,
-      },
-    );
+        status: "accepted",
+        sessionKey: "agent:main:main",
+      });
+      const duplicateRespond = vi.fn();
+      await invokeAgent(
+        {
+          message: "hi again",
+          agentId: "main",
+          sessionKey: "agent:main:main",
+          idempotencyKey: runId,
+        },
+        { context, reqId: `${runId}-duplicate`, respond: duplicateRespond },
+      );
+      expect(mocks.agentCommand.mock.calls.length).toBe(0);
+      expect(duplicateRespond).toHaveBeenCalledWith(
+        true,
+        { runId, status: "in_flight", sessionKey: "agent:main:main", agentId: "main" },
+        undefined,
+        { cached: true, runId },
+      );
+    } finally {
+      dispatchGate.resolve();
+      try {
+        await waitForAssertion(() => expect(context.chatAbortControllers.has(runId)).toBe(false));
+      } finally {
+        dispatchYield.mockRestore();
+      }
+    }
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

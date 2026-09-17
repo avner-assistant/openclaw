@@ -11,7 +11,7 @@ import {
 import * as transcriptTail from "../config/sessions/session-accessor.sqlite-active-events.js";
 import { SessionTranscriptProjectionUnavailableError } from "../config/sessions/session-transcript-projection-error.js";
 import type { InternalSessionEntry, SessionContextBudgetStatus } from "../config/sessions/types.js";
-import * as transcriptUsage from "../gateway/session-transcript-readers.js";
+import * as transcriptUsage from "../gateway/session-transcript-usage.js";
 import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
 import { withPluginRuntimeGenerationScope } from "../plugins/runtime/generation-scope.js";
 import { attachSessionTranscriptRunId } from "../sessions/transcript-events.js";
@@ -74,6 +74,37 @@ describe("buildStatusText prepared context windows", () => {
       ...overrides,
     });
   }
+
+  it.each([
+    { agentThinking: undefined, agentDefault: undefined, expected: "high" },
+    { agentThinking: false, agentDefault: undefined, expected: "off" },
+    { agentThinking: "high", agentDefault: "minimal", expected: "minimal" },
+  ] as const)(
+    "renders configured thinking precedence (model=$agentThinking, agent=$agentDefault)",
+    async ({ agentThinking, agentDefault, expected }) => {
+      const parts = await renderPreparedStatus({
+        cfg: {
+          agents: {
+            defaults: {
+              thinkingDefault: "low",
+              models: { "fixture/reasoning-model": { params: { thinking: "high" } } },
+            },
+            entries: {
+              main: {
+                thinkingDefault: agentDefault,
+                models: { "fixture/reasoning-model": { params: { thinking: agentThinking } } },
+              },
+            },
+          },
+        },
+        provider: "fixture",
+        model: "reasoning-model",
+        thinkingCatalog: [{ provider: "fixture", id: "reasoning-model", reasoning: true }],
+      });
+
+      expect(parts.text).toContain(`think ${expected}`);
+    },
+  );
 
   async function renderTerminalFallback(
     params: {

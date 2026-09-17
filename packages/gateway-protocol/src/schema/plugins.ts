@@ -2,6 +2,7 @@
 import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { closedObject } from "./closed-object.js";
+import { PluginCredentialDescriptorSchema } from "./plugin-credentials.js";
 import type { PluginDeclaredSurfaceGroup } from "./plugin-declared-surface-groups.js";
 import { NonEmptyString } from "./primitives.js";
 
@@ -205,6 +206,19 @@ export const PluginCatalogEntrySchema = closedObject({
   order: Type.Optional(Type.Number()),
   /** True when the gateway can resolve a manifest or catalog icon for this plugin identity. */
   hasIcon: Type.Optional(Type.Boolean()),
+  /** True when the installed package supplies a default compact activity glyph. */
+  hasActivityIcon: Type.Optional(Type.Boolean()),
+  /** Exact effective tool IDs with package-owned activity glyph overrides. */
+  activityIconTools: Type.Optional(
+    Type.Array(
+      Type.String({
+        minLength: 1,
+        maxLength: 128,
+        pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]*$",
+      }),
+      { maxItems: 128 },
+    ),
+  ),
   /** Channel identities declared by this installed plugin. */
   channelIds: Type.Optional(Type.Array(NonEmptyString)),
   install: Type.Optional(PluginCatalogInstallActionSchema),
@@ -442,6 +456,7 @@ export const PluginDiscoveryEntrySchema = closedObject({
 
 export const PluginsCatalogBrowseParamsSchema = closedObject({
   query: Type.Optional(Type.String({ maxLength: 200 })),
+  searchSource: Type.Optional(Type.Literal("openclaw-control-ui")),
   intent: Type.Optional(PluginDiscoveryIntentSchema),
   category: Type.Optional(
     Type.String({ minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9-]*$" }),
@@ -497,12 +512,15 @@ export const PluginDiscoveryDetailSchema = closedObject({
       handle: Type.Optional(NonEmptyString),
       displayName: Type.Optional(NonEmptyString),
       imageUrl: Type.Optional(NonEmptyString),
+      official: Type.Optional(Type.Boolean()),
     }),
   ),
   topics: Type.Array(NonEmptyString),
   createdAt: Type.Optional(Type.Integer({ minimum: 0 })),
   updatedAt: Type.Optional(Type.Integer({ minimum: 0 })),
   readme: Type.Optional(Type.String({ maxLength: 524_288 })),
+  repositoryUrl: Type.Optional(NonEmptyString),
+  documentationUrl: Type.Optional(NonEmptyString),
   compatibility: Type.Optional(PluginDiscoveryCompatibilitySchema),
   configuration: Type.Array(PluginDiscoveryConfigFieldSchema),
   mcpServers: Type.Array(NonEmptyString),
@@ -545,6 +563,14 @@ export const PluginInstalledComponentsSchema = closedObject({
   /** Runtime-supported capability families; item arrays may be empty when names are unavailable. */
   mapped: Type.Array(NonEmptyString),
   skills: Type.Array(NonEmptyString),
+  skillDetails: Type.Optional(
+    Type.Array(
+      closedObject({
+        name: NonEmptyString,
+        description: Type.Optional(Type.String()),
+      }),
+    ),
+  ),
   mcpServers: Type.Array(NonEmptyString),
   commands: Type.Array(NonEmptyString),
   hooks: Type.Array(NonEmptyString),
@@ -559,6 +585,15 @@ export const PluginInstalledComponentsSchema = closedObject({
 /** Consent snapshot plus the installed-version presentation projection used by Control UI. */
 export const PluginsInspectResultSchema = closedObject({
   ok: Type.Literal(true),
+  overview: Type.Optional(
+    closedObject({
+      readme: Type.Optional(Type.String({ maxLength: 524_288 })),
+      repositoryUrl: Type.Optional(NonEmptyString),
+      documentationUrl: Type.Optional(NonEmptyString),
+      publisherName: Type.Optional(NonEmptyString),
+    }),
+  ),
+  credentials: Type.Optional(Type.Array(PluginCredentialDescriptorSchema)),
   plugin: closedObject({
     id: NonEmptyString,
     name: NonEmptyString,

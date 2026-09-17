@@ -11,7 +11,9 @@ import type {
   SessionListOptions,
   SessionListSnapshot,
 } from "../../lib/sessions/index.ts";
+import { createSessionArchiveState } from "../../lib/sessions/session-archive-state.ts";
 import type { SessionRefreshOptions } from "../../lib/sessions/session-capability.ts";
+import { createSessionRowProvenance } from "../../lib/sessions/session-row-provenance.ts";
 import { sessionMutationGatewayHello } from "../../test-helpers/gateway-methods.ts";
 import { buildSessionsListQuery } from "./list-query.ts";
 import type { SessionsRouteData } from "./route.ts";
@@ -131,6 +133,11 @@ const managedListPublishers = new WeakMap<
 
 export function createManagedSessions(overrides: Partial<SessionCapability> = {}) {
   const subscribe = () => () => undefined;
+  const archiveState = createSessionArchiveState(
+    (key) => overrides.state?.result?.sessions.find((row) => row.key === key),
+    () => {},
+    createSessionRowProvenance(),
+  );
   const snapshots = new Map<string, SessionListSnapshot>();
   const listeners = new Map<string, Set<(snapshot: SessionListSnapshot) => void>>();
   const emptySnapshot = (): SessionListSnapshot => ({
@@ -182,6 +189,8 @@ export function createManagedSessions(overrides: Partial<SessionCapability> = {}
     listCheckpoints: vi.fn(async () => []),
     deleteMany: vi.fn(async () => ({ deleted: [], errors: [], preservedWorktrees: [] })),
     patch: vi.fn(async () => null),
+    archiveVisibility: archiveState.visibility,
+    beginArchive: archiveState.beginPending,
     create: vi.fn(async () => null),
     branchCheckpoint: vi.fn(async () => ({ key: "branch" })),
     restoreCheckpoint: vi.fn(async () => ({ ok: true })),

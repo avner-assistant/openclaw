@@ -1,4 +1,5 @@
 import { PassThrough } from "node:stream";
+import { setImmediate } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GATEWAY_CLIENT_IDS } from "../../../packages/gateway-protocol/src/client-info.js";
 import { NODE_WORKER_SUPERVISOR_PROTOCOL_FEATURE } from "../../infra/node-runner-inventory.js";
@@ -107,6 +108,147 @@ function pendingTransport(params: {
 describe("worker node desktop carrier", () => {
   support.setupWorkerEnvironmentServiceSuite();
   afterEach(() => vi.restoreAllMocks());
+
+  it("releases abandoned observer slots when requesting connections close", async () => {
+    const record = support.seedReadyNodeDesktop("worker-desktop-cancel-churn");
+    const proof = nodeProof(record.nodeDeviceId!);
+    const transport = pendingTransport({ proof, isProofCurrent: () => true });
+    const streamed = fakeBroker();
+    const registry = createDesktopSessionRegistry();
+    const carrier = createWorkerNodeDesktopCarrier({
+      store: { get: () => record },
+      desktopRegistry: registry,
+    });
+    carrier.bindRuntime({ transport: transport.transport, streamBroker: streamed.broker });
+    try {
+      for (let index = 0; index < 8; index += 1) {
+        const controller = new AbortController();
+        const observing = carrier.observe({
+          record,
+          control: false,
+          requester: {
+            signal: controller.signal,
+            isCurrent: () => !controller.signal.aborted,
+          },
+        });
+        await support.waitForFast(() => expect(transport.invoke).toHaveBeenCalledTimes(index + 1));
+        streamed.attachNext();
+        await observing;
+        controller.abort();
+      }
+      await support.waitForFast(() =>
+        expect(streamed.streams.filter((stream) => !stream.destroyed)).toHaveLength(0),
+      );
+      const reopened = carrier.observe({ record, control: false });
+      await support.waitForFast(() => expect(transport.invoke).toHaveBeenCalledTimes(9));
+      streamed.attachNext();
+      await expect(reopened).resolves.toMatchObject({ transport: "rfb" });
+    } finally {
+      await carrier.stopAll();
+    }
+  });
+
+  it("releases abandoned observations without disconnecting the requester or taking control", async () => {
+    const record = support.seedReadyNodeDesktop("worker-desktop-abandon");
+    const proof = nodeProof(record.nodeDeviceId!);
+    const transport = pendingTransport({ proof, isProofCurrent: () => true });
+    const streamed = fakeBroker();
+    const registry = createDesktopSessionRegistry();
+    const carrier = createWorkerNodeDesktopCarrier({
+      store: { get: () => record },
+      desktopRegistry: registry,
+    });
+    const controller = new AbortController();
+    const requester = {
+      connId: "desktop-panel-client",
+      signal: controller.signal,
+      isCurrent: () => !controller.signal.aborted,
+    };
+    carrier.bindRuntime({ transport: transport.transport, streamBroker: streamed.broker });
+    await registry.activate({ sourceKey: record.environmentId, ownerEpoch: record.ownerEpoch });
+    const closeKeeper = vi.fn();
+    const keeper = registry.attachObserver(record.environmentId, {
+      ownerEpoch: record.ownerEpoch,
+      control: true,
+      close: closeKeeper,
+    });
+    expect(keeper).toBeDefined();
+    try {
+      for (let index = 0; index < 20; index += 1) {
+        const pending = carrier.observe({ record, control: true, requester });
+        await support.waitForFast(() => expect(transport.invoke).toHaveBeenCalledTimes(index + 1));
+        const stream = streamed.attachNext();
+        const observed = await pending;
+        expect(await observeBridge.releaseDesktopObserverToken(observed.wsPath, requester)).toBe(
+          true,
+        );
+        expect(stream.destroyed).toBe(true);
+        expect(await observeBridge.releaseDesktopObserverToken(observed.wsPath, requester)).toBe(
+          false,
+        );
+        expect(closeKeeper).not.toHaveBeenCalled();
+      }
+      expect(controller.signal.aborted).toBe(false);
+      expect(streamed.streams.every((stream) => stream.destroyed)).toBe(true);
+    } finally {
+      controller.abort();
+      keeper?.release();
+      await carrier.stopAll();
+      await registry.stopAll();
+    }
+  });
+
+  it("joins invocation settlement when owner stop overlaps observation release", async () => {
+    const record = support.seedReadyNodeDesktop("worker-desktop-release-stop");
+    const proof = nodeProof(record.nodeDeviceId!);
+    const transport = pendingTransport({ proof, isProofCurrent: () => true });
+    const invocation = deferred<Awaited<ReturnType<NodeWorkerSupervisorTransport["invoke"]>>>();
+    const completionOrder: string[] = [];
+    transport.invoke.mockImplementation(async () => {
+      const result = await invocation.promise;
+      completionOrder.push("invocation");
+      return result;
+    });
+    const streamed = fakeBroker();
+    const carrier = createWorkerNodeDesktopCarrier({
+      store: { get: () => record },
+      desktopRegistry: createDesktopSessionRegistry(),
+    });
+    const controller = new AbortController();
+    const requester = {
+      connId: "desktop-panel-client",
+      signal: controller.signal,
+      isCurrent: () => !controller.signal.aborted,
+    };
+    const canceledResult = { ok: false, error: { code: "ABORTED", message: "invoke aborted" } };
+    carrier.bindRuntime({ transport: transport.transport, streamBroker: streamed.broker });
+    try {
+      const observing = carrier.observe({ record, control: false, requester });
+      await support.waitForFast(() => expect(transport.invoke).toHaveBeenCalledOnce());
+      const stream = streamed.attachNext();
+      const observed = await observing;
+      const releasing = observeBridge
+        .releaseDesktopObserverToken(observed.wsPath, requester)
+        .then((released) => {
+          completionOrder.push("release");
+          return released;
+        });
+      expect(transport.invoke.mock.calls[0]?.[0].signal?.aborted).toBe(true);
+      expect(stream.destroyed).toBe(true);
+      const stopping = carrier.stop(record.environmentId, record.ownerEpoch).then(() => {
+        completionOrder.push("stop");
+      });
+      await setImmediate();
+      invocation.resolve(canceledResult);
+      expect(await releasing).toBe(true);
+      await stopping;
+      expect(completionOrder[0]).toBe("invocation");
+    } finally {
+      invocation.resolve(canceledResult);
+      controller.abort();
+      await carrier.stopAll();
+    }
+  });
 
   it("observes an exact durable node desktop without SSH and preauthenticates it", async () => {
     const mint = vi.spyOn(observeBridge, "mintDesktopObserverToken");

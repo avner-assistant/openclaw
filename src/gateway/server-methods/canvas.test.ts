@@ -5,7 +5,7 @@ import {
   markGatewayRestartDraining,
   resetGatewayWorkAdmission,
 } from "../../process/gateway-work-admission.js";
-import { createCoreGatewayMethodDescriptors } from "../methods/core-descriptors.js";
+import { createCoreGatewayMethodDescriptors } from "../methods/core-method-policy.js";
 import { createGatewayMethodRegistry } from "../methods/registry.js";
 import { canvasHandlers } from "./canvas.js";
 import type {
@@ -72,6 +72,18 @@ describe("canvas.document.view", () => {
         sandboxOrigin: "https://sandbox.example",
       },
     ]);
+    const result = respond.mock.calls[0]![1];
+    const url = new URL(result.sandboxUrl, "https://sandbox.example");
+    const policy = decodeSandboxHostCsp(url.searchParams.get("csp"));
+    expect(policy).toMatchObject({
+      blockDescendantFrames: true,
+      resourceDomains: expect.arrayContaining([
+        "https://cdn.jsdelivr.net",
+        "https://fonts.googleapis.com",
+        "https://fonts.gstatic.com",
+      ]),
+    });
+    expect(policy?.connectDomains).toBeUndefined();
     expect(context.ensureSandboxHostPort).not.toHaveBeenCalled();
   });
 

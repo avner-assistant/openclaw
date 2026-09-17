@@ -7,6 +7,7 @@ import type {
   SessionListScope,
   SessionListSnapshot,
   SessionRefreshOptions,
+  SessionRefreshOutcome,
 } from "./session-capability.ts";
 import {
   normalizeAgentId,
@@ -77,20 +78,53 @@ export function sessionListEventMatcher(payload: unknown) {
   };
 }
 
+export type SessionRefreshAttempt = {
+  options: SessionRefreshOptions;
+  matchesRequestedQuery: boolean;
+  result: SessionsListResult | null;
+  outcome: SessionRefreshOutcome;
+};
+
+/** Return only outcomes whose accepted request reconciled this mutation's scope. */
+export function sessionMutationRefreshOutcome(
+  attempt: SessionRefreshAttempt | null,
+  agentId: string | null | undefined,
+): SessionRefreshOutcome | null {
+  if (!attempt) {
+    return null;
+  }
+  if (attempt.outcome.status === "failed" || !agentId?.trim()) {
+    return attempt.matchesRequestedQuery ? attempt.outcome : null;
+  }
+  const result = attempt.result;
+  const complete =
+    result &&
+    !result.hasMore &&
+    (result.totalCount ?? result.sessions.length) <= result.sessions.length;
+  return !attempt.options.append &&
+    sessionListAgentMatcher(agentId)(attempt.options.agentId) &&
+    (attempt.options.agentId?.trim() || complete)
+    ? attempt.outcome
+    : null;
+}
+
 export type QueuedSessionRefresh = {
   options: SessionRefreshOptions;
-  intent: "explicit" | "automatic" | (() => string | null);
+  intent: "explicit" | "automatic" | "reconcile" | (() => string | null);
+  foreground?: boolean;
   bootstrap?: boolean;
-  isErrorCurrent?: () => boolean;
+  errorOwner: { options: SessionRefreshOptions; isCurrent?: () => boolean };
   completions: Array<{
     options: SessionRefreshOptions;
-    complete: (refresh: Promise<SessionsListResult | null> | null) => void;
+    reconcile: boolean;
+    complete: (refresh: Promise<SessionRefreshAttempt | null> | null) => void;
   }>;
 };
 
 export function coalesceSessionRefresh(
   current: QueuedSessionRefresh | null,
   next: QueuedSessionRefresh,
+  snapshot: SessionGateway["snapshot"],
 ): QueuedSessionRefresh {
   if (!current) {
     return next;
@@ -98,12 +132,26 @@ export function coalesceSessionRefresh(
   // Explicit intent remains authoritative over automatic hydration and weaker queries.
   if (
     (next.intent !== "automatic" || current.intent === "automatic") &&
+    (next.intent !== "reconcile" ||
+      current.intent === "automatic" ||
+      current.intent === "reconcile") &&
     (isForegroundReplacement(next.options) || !isForegroundReplacement(current.options))
   ) {
     current.options = next.options;
     current.intent = next.intent;
+    current.foreground = next.foreground;
     current.bootstrap = next.bootstrap;
-    current.isErrorCurrent = next.isErrorCurrent;
+    current.errorOwner = next.errorOwner;
+  } else if (
+    next.intent === "reconcile" &&
+    isSameSessionListQuery(
+      prepareSessionRefreshOptions(current.options, snapshot),
+      prepareSessionRefreshOptions(next.options, snapshot),
+      false,
+    )
+  ) {
+    // Reconciliation may own a matching query's error without replacing selection.
+    current.errorOwner = next.errorOwner;
   }
   current.completions.push(...next.completions);
   return current;
@@ -124,6 +172,8 @@ export type ObservedSessionList = {
 };
 
 export type ManagedSessionList = ObservedSessionList & {
+  /** A live primary window may be reused for selection until its next invalidation. */
+  warmPrimary?: boolean;
   key: string;
   query: ReturnType<typeof normalizeManagedSessionListQuery>;
   retainedLimit: number;
@@ -189,20 +239,36 @@ export function prepareSessionRefreshOptions(
   return { ...prepared, ownerFirst: true };
 }
 
+export function queuedSessionRefreshCompletion(
+  queued: QueuedSessionRefresh | null,
+  options: SessionRefreshOptions,
+): Promise<SessionRefreshAttempt | null> | null {
+  return queued
+    ? new Promise((resolve) => {
+        queued.completions.push({ options, reconcile: false, complete: resolve });
+      })
+    : null;
+}
+
 export function completeSessionRefreshWaiters(
   queued: QueuedSessionRefresh,
-  nextOptions: SessionRefreshOptions,
-  next: Promise<SessionsListResult | null> | null,
+  next: Promise<SessionRefreshAttempt | null>,
+  reconciled: Promise<SessionRefreshAttempt | null>,
   snapshot: SessionGateway["snapshot"],
 ): void {
-  // Coalescing shares completion timing, but only equivalent queries share the result.
-  queued.completions.forEach(({ options, complete }) => {
-    const sameQuery = isSameSessionListQuery(
-      prepareSessionRefreshOptions(options, snapshot),
-      nextOptions,
-      false,
+  queued.completions.forEach(({ options, reconcile, complete }) => {
+    const requested = prepareSessionRefreshOptions(options, snapshot);
+    // Public results match their own query; reconciliation also needs the accepted scope.
+    complete(
+      (reconcile ? reconciled : next).then((attempt) =>
+        attempt
+          ? {
+              ...attempt,
+              matchesRequestedQuery: isSameSessionListQuery(requested, attempt.options, false),
+            }
+          : null,
+      ),
     );
-    complete(sameQuery ? next : (next?.then(() => null) ?? null));
   });
 }
 

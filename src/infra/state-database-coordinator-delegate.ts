@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { MessageChannel, receiveMessageOnPort, type MessagePort } from "node:worker_threads";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { SqliteCoordinatorError } from "./sqlite-coordinator.js";
 
 type DelegateIdentity = { actorId: string; coordinatorPath: string };
@@ -93,9 +94,10 @@ export async function attachCoordinatorDelegate(
   };
 }
 
-const lifecycleScopes = new AsyncLocalStorage<
-  ReadonlyMap<string, { active: boolean; assertCurrent(): void }>
->();
+const lifecycleScopes = resolveGlobalSingleton(
+  Symbol.for("openclaw.stateDatabaseLifecycleDelegateScopes"),
+  () => new AsyncLocalStorage<ReadonlyMap<string, { active: boolean; assertCurrent(): void }>>(),
+);
 
 export function acquireDelegatedLifecycleCoordinator(coordinatorPath: string) {
   const delegate = lifecycleScopes.getStore()?.get(coordinatorPath);
@@ -128,10 +130,20 @@ export async function attachLifecycleCoordinatorDelegate(
       const scope = { active: true, assertCurrent: delegate.assertCurrent };
       const scopes = new Map(lifecycleScopes.getStore());
       scopes.set(identity.coordinatorPath, scope);
-      try {
-        return lifecycleScopes.run(scopes, operation);
-      } finally {
+      const settled = () => {
         scope.active = false;
+      };
+      try {
+        const result = lifecycleScopes.run(scopes, operation);
+        if (result instanceof Promise) {
+          void result.then(settled, settled);
+        } else {
+          settled();
+        }
+        return result;
+      } catch (error) {
+        settled();
+        throw error;
       }
     },
     close: delegate.close,

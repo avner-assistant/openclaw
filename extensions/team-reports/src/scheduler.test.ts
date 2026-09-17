@@ -2,14 +2,39 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import { resolveRuntimeWorkerUrl } from "openclaw/plugin-sdk/process-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseTeamReportsConfig, type TeamReportsConfig } from "./config.js";
 import { describePeriod } from "./periods.js";
 import { completion, type Complete } from "./reports.fixtures.js";
 import type { ReportSourceFactory, ResolvedTeamReportsConfig } from "./run.js";
 import { TeamReportsScheduler } from "./scheduler.js";
+import { teamReportsSqliteBackendEntrypoint } from "./sqlite-backend-entrypoint.test-support.js";
 import { createTeamReportsStore, type TeamReportsStore } from "./store.js";
 import type { DiscordSource, GithubSource, SourceRuntime, SourceStatus } from "./types.js";
+
+const workerReads = vi.hoisted(() => ({ enabled: false, calls: 0, bytes: 0 }));
+vi.mock("openclaw/plugin-sdk/sqlite-runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("openclaw/plugin-sdk/sqlite-runtime")>();
+  return {
+    ...actual,
+    openSqliteWorkerStore: async (...args: Parameters<typeof actual.openSqliteWorkerStore>) => {
+      const worker = await actual.openSqliteWorkerStore(...args);
+      if (worker) {
+        const execute = worker.execute.bind(worker);
+        vi.spyOn(worker, "execute").mockImplementation(async (command, options) => {
+          const result = await execute(command, options);
+          if (workerReads.enabled) {
+            workerReads.calls += 1;
+            workerReads.bytes += Buffer.byteLength(JSON.stringify(result) ?? "");
+          }
+          return result;
+        });
+      }
+      return worker;
+    },
+  };
+});
 
 const resources: Array<{
   scheduler: TeamReportsScheduler;
@@ -67,7 +92,7 @@ async function setup(
     options.stateDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "team-reports-scheduler-"));
   const store = await createTeamReportsStore({
     stateDir: directory,
-    workerModuleUrl: new URL("./store.worker.ts", import.meta.url),
+    workerModuleUrl: resolveRuntimeWorkerUrl(teamReportsSqliteBackendEntrypoint),
   });
   if (options.caughtUp !== false) {
     const yesterday = describePeriod("day", Date.now() - 86_400_000);
@@ -313,7 +338,7 @@ describe("Team Reports scheduler lifecycle", () => {
     expect(close).toHaveBeenCalledOnce();
     const reopened = await createTeamReportsStore({
       stateDir: directory,
-      workerModuleUrl: new URL("./store.worker.ts", import.meta.url),
+      workerModuleUrl: resolveRuntimeWorkerUrl(teamReportsSqliteBackendEntrypoint),
     });
     try {
       expect((await reopened.getPeriod("day", "2026-08-19"))?.report.totals.github.total).toBe(1);
@@ -551,7 +576,7 @@ describe("Team Reports scheduler lifecycle", () => {
     expect(finished).toBe(true);
     const reopened = await createTeamReportsStore({
       stateDir: directory,
-      workerModuleUrl: new URL("./store.worker.ts", import.meta.url),
+      workerModuleUrl: resolveRuntimeWorkerUrl(teamReportsSqliteBackendEntrypoint),
     });
     try {
       expect((await reopened.listRuns()).find((run) => run.id === id)?.status).toBe("ok");
@@ -578,7 +603,7 @@ describe("Team Reports scheduler lifecycle", () => {
     await vi.advanceTimersByTimeAsync(0);
     const reopened = await createTeamReportsStore({
       stateDir: directory,
-      workerModuleUrl: new URL("./store.worker.ts", import.meta.url),
+      workerModuleUrl: resolveRuntimeWorkerUrl(teamReportsSqliteBackendEntrypoint),
     });
     try {
       expect((await reopened.listRuns()).find((run) => run.id === id)).toMatchObject({
@@ -650,7 +675,21 @@ describe("Team Reports scheduler lifecycle", () => {
     expect(stored?.summary?.warnings).toEqual([reason]);
     expect(stored?.markdown).toContain(`> ${reason}`);
     expect((await scheduler.status()).sourceWarnings).toEqual(["Roster coverage warning", reason]);
-    expect((await scheduler.health()).warnings).toBe(2);
+    if (!stored) {
+      throw new Error("Generated report is missing");
+    }
+    await store.upsertPeriod({ ...stored, markdown: stored.markdown + "x".repeat(256 * 1024) });
+    workerReads.calls = 0;
+    workerReads.bytes = 0;
+    workerReads.enabled = true;
+    try {
+      expect((await scheduler.health()).warnings).toBe(2);
+    } finally {
+      workerReads.enabled = false;
+    }
+    expect(workerReads.calls).toBeGreaterThan(0);
+    expect(workerReads.calls).toBeLessThanOrEqual(3);
+    expect(workerReads.bytes).toBeLessThan(16 * 1024);
     expect(context.logger.warn.mock.calls).toEqual([[reason]]);
     complete.mockResolvedValue(modelResponse());
     await scheduler.generate({ intraday: true });

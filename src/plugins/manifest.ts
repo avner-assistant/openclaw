@@ -9,6 +9,7 @@ import { isRecord } from "../utils.js";
 import { coerceDoctorSessionRouteStateOwners } from "./doctor-session-route-state-owner-types.js";
 import * as capabilityNormalizers from "./manifest-capability-normalizers.js";
 import { normalizeManifestCommandAliases } from "./manifest-command-aliases.js";
+import { normalizeConfigGroups } from "./manifest-config-groups.js";
 import * as modelProviderNormalizers from "./manifest-model-provider-normalizers.js";
 import * as setupNormalizers from "./manifest-setup-normalizers.js";
 import type {
@@ -144,7 +145,6 @@ export function loadPluginManifest(
   rejectHardlinks = true,
   rootRealPath?: string,
 ): PluginManifestLoadResult {
-  const manifestPath = path.join(rootDir, PLUGIN_MANIFEST_FILENAME);
   const file = readPluginCacheFile({
     rootDir,
     relativePath: PLUGIN_MANIFEST_FILENAME,
@@ -152,6 +152,9 @@ export function loadPluginManifest(
     maxBytes: MAX_PLUGIN_MANIFEST_BYTES,
     rejectHardlinks,
   });
+  // Aliased roots share this cached result, so retain the checked file's identity
+  // rather than the first caller's path for canonical-root registry/hash reads.
+  const manifestPath = file.ok ? file.path : path.join(rootDir, PLUGIN_MANIFEST_FILENAME);
   if (!file.ok) {
     return matchRootFileOpenFailure(file.failure, {
       path: () => ({
@@ -218,7 +221,7 @@ export function loadPluginManifest(
   }
 
   const requiresPlugins = normalizeTrimmedStringList(raw.requiresPlugins);
-  const enabledByDefaultOnPlatforms = setupNormalizers.normalizeManifestDefaultPlatforms(
+  const enabledByDefaultOnPlatforms = setupNormalizers.normalizeManifestPlatforms(
     raw.enabledByDefaultOnPlatforms,
   );
   const legacyPluginIds = normalizeTrimmedStringList(raw.legacyPluginIds);
@@ -340,6 +343,7 @@ export function loadPluginManifest(
       catalog: capabilityNormalizers.normalizeManifestCatalog(raw.catalog),
       version: normalizeOptionalString(raw.version),
       uiHints: setupNormalizers.normalizeConfigUiHints(raw.uiHints),
+      configGroups: normalizeConfigGroups(raw.configGroups, configSchema),
       contracts,
       transcriptSources: capabilityNormalizers.normalizeManifestTranscriptSources(
         raw.transcriptSources,

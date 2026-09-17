@@ -125,6 +125,7 @@ export const agentVitestProjectOwners = {
     dir: agentsRoot,
     include: [`${agentsRoot}/*/**/*.test.ts`],
     exclude: [
+      ...databaseWorkerCoreTestFiles,
       ...spawnProductionBoundaryFiles,
       ...coreIsolatedFiles,
       `${embeddedRoot}/**`,
@@ -138,7 +139,7 @@ export const agentVitestProjectOwners = {
     root: `${agentsRoot}/tools`,
     dir: agentsRoot,
     include: [`${agentsRoot}/tools/**/*.test.ts`],
-    exclude: [],
+    exclude: databaseWorkerCoreTestFiles,
   },
 };
 

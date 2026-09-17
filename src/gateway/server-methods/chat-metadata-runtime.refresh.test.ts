@@ -1,12 +1,161 @@
-import { describe, expect, test, vi } from "vitest";
+import { createServer, get } from "node:http";
+import { setImmediate as nextEventLoopTurn } from "node:timers/promises";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import type { AuthProfileStore } from "../../agents/auth-profiles.js";
+import { handleGatewayProbeRequest } from "../server-http-probes.js";
 import {
   createChatMetadataHarness,
   createChatMetadataOwner,
 } from "./chat-metadata-runtime.test-support.js";
 
 describe("gateway chat metadata runtime", () => {
+  const server = createServer((req, res) => {
+    void handleGatewayProbeRequest(
+      req,
+      res,
+      "/health",
+      { mode: "none", allowTailscale: false },
+      [],
+      false,
+    );
+  });
+  beforeAll(async () => {
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+  });
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  });
+
+  test.each(["commands", "projection"] as const)(
+    "publishes without fleet preparation and serves health and another agent during slow %s",
+    async (phase) => {
+      const config = { agents: { list: [{ id: "main", default: true }, { id: "second" }] } };
+      const harness = createChatMetadataHarness(config);
+      const mainOwner = createChatMetadataOwner(config, "main-model");
+      let secondOwner = createChatMetadataOwner(config, "second-model");
+      harness.getPreparedOwner.mockImplementation((params) =>
+        params?.agentId === "second" ? secondOwner : mainOwner,
+      );
+      await harness.runtime.refresh();
+      expect(harness.buildCommands).not.toHaveBeenCalled();
+      expect(harness.buildProjection).not.toHaveBeenCalled();
+      const entered = createDeferred();
+      const release = createDeferred();
+      secondOwner = createChatMetadataOwner(config, "replacement-model");
+      if (phase === "commands") {
+        harness.buildCommands.mockImplementation(async ({ agentId }) => {
+          if (agentId === "second") {
+            entered.resolve();
+            await release.promise;
+          }
+          return { commands: [] };
+        });
+      } else {
+        harness.buildProjection.mockImplementation(async ({ facts }) => {
+          if (facts.owner === secondOwner) {
+            entered.resolve();
+            await release.promise;
+          }
+          return { models: facts.modelCatalog.entries, modelCatalog: facts.modelCatalog.entries };
+        });
+      }
+      const refresh = harness.runtime.refresh();
+      let mainSettled = false;
+      let secondSettled = false;
+      const mainRead = harness.runtime.read({ agentId: "main" }).then((result) => {
+        mainSettled = true;
+        return result;
+      });
+      const secondRead = harness.runtime.read({ agentId: "second" }).then((result) => {
+        secondSettled = true;
+        return result;
+      });
+      try {
+        await entered.promise;
+        await nextEventLoopTurn();
+        expect(mainSettled).toBe(true);
+        expect(secondSettled).toBe(false);
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          throw new Error("health server did not bind a TCP port");
+        }
+        const health = await new Promise<number | undefined>((resolve, reject) => {
+          get(`http://127.0.0.1:${address.port}/health`, (response) => {
+            response.resume();
+            response.on("end", () => resolve(response.statusCode));
+          }).on("error", reject);
+        });
+        expect(health).toBe(200);
+        expect(secondSettled).toBe(false);
+        await expect(mainRead).resolves.toMatchObject({
+          models: [expect.objectContaining({ id: "main-model" })],
+        });
+        release.resolve();
+        await refresh;
+        await expect(secondRead).resolves.toMatchObject({
+          models: [expect.objectContaining({ id: "replacement-model" })],
+        });
+      } finally {
+        release.resolve();
+        await Promise.allSettled([refresh, mainRead, secondRead, harness.runtime.stop()]);
+      }
+    },
+  );
+
+  test.each(["skills", "plugins"] as const)(
+    "rechecks %s publication before returning a suspended agent projection",
+    async (changed) => {
+      const harness = createChatMetadataHarness({
+        agents: { list: [{ id: "main", default: true }, { id: "second" }] },
+      });
+      const mainEntered = createDeferred();
+      const releaseMain = createDeferred();
+      const releaseSecond = createDeferred();
+      harness.buildProjection.mockImplementationOnce(async ({ facts }) => {
+        mainEntered.resolve();
+        await releaseMain.promise;
+        return { models: facts.modelCatalog.entries, modelCatalog: facts.modelCatalog.entries };
+      });
+      harness.buildProjection.mockImplementationOnce(async ({ facts }) => {
+        await releaseSecond.promise;
+        return { models: facts.modelCatalog.entries, modelCatalog: facts.modelCatalog.entries };
+      });
+      const refresh = harness.runtime.refresh();
+      let replacement: Promise<void> | undefined;
+      let settled = false;
+      const reading = harness.runtime.read({ agentId: "main" }).then((result) => {
+        settled = true;
+        return result;
+      });
+      try {
+        await mainEntered.promise;
+        if (changed === "skills") {
+          harness.setSkillsVersion(2);
+        } else {
+          harness.setPluginRegistryVersion(2);
+        }
+        replacement = harness.runtime.refresh();
+        releaseMain.resolve();
+        await nextEventLoopTurn();
+        expect(settled).toBe(false);
+        releaseSecond.resolve();
+        await Promise.all([refresh, replacement]);
+        await expect(reading).resolves.toMatchObject({
+          commands: [{ name: changed === "skills" ? "command-2-1" : "command-1-2" }],
+        });
+      } finally {
+        releaseMain.resolve();
+        releaseSecond.resolve();
+        await Promise.allSettled([refresh, replacement, reading, harness.runtime.stop()]);
+      }
+    },
+  );
+
   test("publishes mutable catalog progress and failure changes once each", async () => {
     const onChanged = vi.fn();
     const harness = createChatMetadataHarness(undefined, { onChanged });
@@ -46,6 +195,7 @@ describe("gateway chat metadata runtime", () => {
     async ({ settlement, explicitInvalidation }) => {
       const harness = createChatMetadataHarness();
       await harness.runtime.refresh();
+      await harness.runtime.read({ agentId: "main" });
       const releaseProjection = createDeferred();
       harness.buildProjection.mockImplementationOnce(async ({ facts }) => {
         await releaseProjection.promise;
@@ -90,9 +240,7 @@ describe("gateway chat metadata runtime", () => {
       void read.catch(() => {});
       try {
         releaseProjection.resolve();
-        await new Promise<void>((resolve) => {
-          setImmediate(resolve);
-        });
+        await nextEventLoopTurn();
         expect(settled).toBe(false);
         releaseCommands.resolve();
         await refresh;

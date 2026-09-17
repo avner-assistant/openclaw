@@ -9,7 +9,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { closeOpenClawAgentDatabasesForTest } from "../../state/openclaw-agent-db.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
-import * as transcriptReaders from "../session-transcript-readers.js";
+import * as transcriptPreview from "../session-transcript-preview.js";
 import {
   directSessionReq,
   seedLinearSessionTranscript,
@@ -71,9 +71,24 @@ async function seedMetadataReads() {
   };
 }
 
-test.each(["sessions.search", "sessions.preview"] as const)(
-  "%s retains visible results without decoding saved prompts",
-  async (method) => {
+test.each([
+  { method: "sessions.search", scope: "unfiltered", sessionKeys: undefined },
+  {
+    method: "sessions.search",
+    scope: "explicit keys",
+    sessionKeys: [
+      "agent:main:first",
+      "agent:main:second",
+      "agent:main:draft",
+      "agent:main:private",
+      "agent:main:missing",
+      "agent:main:first",
+    ],
+  },
+  { method: "sessions.preview", scope: "explicit keys", sessionKeys: undefined },
+] as const)(
+  "$method ($scope) retains visible results without decoding saved prompts",
+  async ({ method, sessionKeys }) => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
       const { opts, storePath } = await seedMetadataReads();
       const parse = JSON.parse;
@@ -88,7 +103,7 @@ test.each(["sessions.search", "sessions.preview"] as const)(
         if (method === "sessions.search") {
           const all = await directSessionReq<{ results: Array<{ sessionKey: string }> }>(
             method,
-            { query: "needle" },
+            { query: "needle", ...(sessionKeys ? { sessionKeys } : {}) },
             opts,
           );
           expect(all.ok, all.error?.message).toBe(true);
@@ -96,12 +111,16 @@ test.each(["sessions.search", "sessions.preview"] as const)(
             "agent:main:first",
             "agent:main:second",
           ]);
-          expect(await directSessionReq(method, { query: "needle", limit: 1 }, opts)).toMatchObject(
-            {
-              ok: true,
-              payload: { results: [all.payload?.results[0]], truncated: true },
-            },
-          );
+          expect(
+            await directSessionReq(
+              method,
+              { query: "needle", limit: 1, ...(sessionKeys ? { sessionKeys } : {}) },
+              opts,
+            ),
+          ).toMatchObject({
+            ok: true,
+            payload: { results: [all.payload?.results[0]], truncated: true },
+          });
         } else {
           expect(
             await directSessionReq(
@@ -134,7 +153,9 @@ test.each(["sessions.search", "sessions.preview"] as const)(
       );
       const after = await directSessionReq(
         method,
-        method === "sessions.search" ? { query: "needle" } : { keys: ["agent:main:first"] },
+        method === "sessions.search"
+          ? { query: "needle", ...(sessionKeys ? { sessionKeys } : {}) }
+          : { keys: ["agent:main:first"] },
         opts,
       );
       expect(after).toMatchObject({
@@ -152,8 +173,8 @@ test("sessions.preview rechecks visibility after yielding between keys", async (
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
     const { opts, storePath } = await seedMetadataReads();
     const firstRead = createDeferred();
-    const read = transcriptReaders.readSessionPreviewItemsFromTranscript;
-    vi.spyOn(transcriptReaders, "readSessionPreviewItemsFromTranscript").mockImplementation(
+    const read = transcriptPreview.readSessionPreviewItemsFromTranscript;
+    vi.spyOn(transcriptPreview, "readSessionPreviewItemsFromTranscript").mockImplementation(
       (...args) => {
         const result = read(...args);
         if (args[0].sessionKey === "agent:main:first") {

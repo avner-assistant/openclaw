@@ -77,6 +77,13 @@ native tool surface is disabled, OpenClaw supplies `view_image` with its
 `path`/`paths` schema and delegated vision route. Callers must use the schema
 advertised for the active run.
 
+When OpenClaw restores conversation history into a Codex thread, saved images
+stay beside their original messages inside the quoted history. The current
+request and its attachments follow that history, so a later text or voice turn
+does not present old screenshots as newly attached images. If context limits
+remove an image's original message, its image input is omitted too; the saved
+transcript and attachment remain unchanged.
+
 ## Turn liveness and timeouts
 
 Codex owns provider-stream liveness and native turn completion. OpenClaw waits
@@ -87,6 +94,12 @@ attempt: progress does not reset it, and `0` means unlimited execution.
 OpenClaw still bounds its own requests, dynamic tools, cancellation, and local
 settlement. See [Timeouts](/plugins/codex-harness-reference#timeouts) for those
 budgets, Stop and replay behavior, and Doctor migration of retired idle settings.
+
+OpenClaw preserves assistant text supplied with the initial native item and
+reasoning supplied with a completed item, even when Codex sends no text deltas.
+Completed items reconcile the transcript with Codex's final content. Messages
+marked for asynchronous delivery remain separate from the final reply when
+Codex repeats them in the turn-completion summary.
 
 ## Cyber safety notices
 

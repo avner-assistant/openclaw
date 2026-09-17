@@ -2,7 +2,6 @@
 
 import { nothing } from "lit";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
-import type { PreservedSessionWorktree } from "../../../../packages/gateway-protocol/src/index.js";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../../api/gateway.ts";
 import type {
@@ -130,80 +129,6 @@ describe("sessions page lifecycle", () => {
     ).toBe(true);
   });
 
-  it("offers undo after archiving from the Sessions page", async () => {
-    const key = "agent:main:pinned";
-    const patch = vi.fn(async () => ({
-      ok: true as const,
-      path: "",
-      key,
-      entry: { sessionId: key },
-    }));
-    const sessions = createSessions({ patch });
-    const mutableGateway = createGateway({} as GatewayBrowserClient);
-    mutableGateway.emit({ sessionKey: key });
-    const page = await createPage(createContext(mutableGateway.gateway, sessions));
-    const toast = document.createElement("openclaw-toast-host");
-    document.body.append(toast);
-    await toast.updateComplete;
-
-    await page.archiveSessionWithUndo({
-      key,
-      sessionId: "session-pinned",
-      pinned: true,
-    } as GatewaySessionRow);
-    await toast.updateComplete;
-    toast.querySelector<HTMLButtonElement>(".app-toast__action")?.click();
-    await vi.waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-    expect(mutableGateway.setSessionKey).not.toHaveBeenCalled();
-
-    expect(patch).toHaveBeenNthCalledWith(
-      1,
-      key,
-      { archived: true },
-      { agentId: undefined, expectedSessionId: "session-pinned" },
-    );
-    expect(patch).toHaveBeenNthCalledWith(
-      2,
-      key,
-      { archived: false, pinned: true },
-      { agentId: undefined, expectedSessionId: "session-pinned" },
-    );
-  });
-
-  it("keeps the archive Undo working after navigating off the Sessions page", async () => {
-    const key = "agent:main:navigated";
-    const patch = vi.fn(async () => ({
-      ok: true as const,
-      path: "",
-      key,
-      entry: { sessionId: key },
-    }));
-    const sessions = createSessions({ patch });
-    const mutableGateway = createGateway({} as GatewayBrowserClient);
-    mutableGateway.emit({ sessionKey: key });
-    const page = await createPage(createContext(mutableGateway.gateway, sessions));
-    const toast = document.createElement("openclaw-toast-host");
-    document.body.append(toast);
-    await toast.updateComplete;
-
-    await page.archiveSessionWithUndo({
-      key,
-      sessionId: "session-nav",
-      pinned: false,
-    } as GatewaySessionRow);
-    await toast.updateComplete;
-    // The toast host outlives the page; navigation unmounts the page element.
-    page.remove();
-    toast.querySelector<HTMLButtonElement>(".app-toast__action")?.click();
-    await vi.waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-    expect(patch).toHaveBeenNthCalledWith(
-      2,
-      key,
-      { archived: false },
-      { agentId: undefined, expectedSessionId: "session-nav" },
-    );
-  });
-
   it("reports a connection error instead of silently dropping a patch", async () => {
     const patch = vi.fn();
     const sessions = createSessions({ patch });
@@ -258,7 +183,7 @@ describe("sessions page lifecycle", () => {
 
   it.each([
     ["green", "Green"],
-    [null, "Default"],
+    [null, "No color"],
   ] as const)("patches color %s from the sessions page menu", async (color, label) => {
     const row = {
       key: "agent:main:color",
@@ -740,11 +665,7 @@ describe("sessions page lifecycle", () => {
   });
 
   it("drops stale mutation state, errors, and navigation after disconnect", async () => {
-    const deleted = createDeferred<{
-      deleted: string[];
-      errors: string[];
-      preservedWorktrees: PreservedSessionWorktree[];
-    }>();
+    const deleted = createDeferred<Awaited<ReturnType<SessionCapability["deleteMany"]>>>();
     const patched = createDeferred<unknown>();
     const forked = createDeferred<string | null>();
     const branched = createDeferred<{ key: string }>();
@@ -786,7 +707,11 @@ describe("sessions page lifecycle", () => {
     await vi.waitFor(() => expect(sessions.deleteMany).toHaveBeenCalledOnce());
 
     mutableGateway.emit({ phase: "reconnecting", client });
-    deleted.resolve({ deleted: ["main"], errors: ["stale delete error"], preservedWorktrees: [] });
+    deleted.resolve({
+      deleted: ["main"],
+      errors: [{ target: { key: "main" }, error: new Error("stale delete error") }],
+      preservedWorktrees: [],
+    });
     patched.resolve({ ok: true });
     forked.resolve("forked");
     branched.resolve({ key: "branched" });

@@ -9,6 +9,7 @@ import { closePreparedModelRuntimeSnapshots } from "../agents/prepared-model-run
 import { fenceSessionSuspensionWritesForGatewayShutdown } from "../agents/session-suspension.js";
 import { closeSwarmScheduler } from "../agents/subagents/swarm/swarm-scheduler.js";
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
+import { closeSessionTranscriptReconcileWorkerPool } from "../config/sessions/session-transcript-reconcile-pool.js";
 import { createInternalHookEvent, triggerInternalHook } from "../hooks/internal-hooks.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import type { HeartbeatRunner } from "../infra/heartbeat-runner.js";
@@ -480,6 +481,7 @@ export async function completeGatewayClose(
       clearInterval(params.maintenance.worktreeCleanup);
       params.maintenance.skillUsageCleanup();
     }
+    await shutdownStep("telemetry", () => params.maintenance?.stopTelemetryChecks(), warnings);
     await shutdownStep(
       "session-cold-storage",
       () => params.maintenance?.stopSessionColdStorageMaintenance(),
@@ -645,12 +647,13 @@ export async function completeGatewayClose(
     // A sibling Gateway retains metadata before its registry exists. Only the
     // final owner may retire shared state and process-wide plugin caches.
     try {
-      const { memoryErrors } = await params.closePluginRegistry(async (retireRegistry) => {
+      const registryClose = await params.closePluginRegistry(async (retireRegistry) => {
         // SDK cleanup can use prepared donors; release its claims before model or registry disposal.
         await params.closeSdkResources?.().catch(recordResourceCleanupFailure);
-        await params.pluginMetadata.close(async (retire) => {
+        return params.pluginMetadata.close(async (retire) => {
           await closeSwarmScheduler().catch(recordResourceCleanupFailure);
           await closePreparedModelRuntimeSnapshots();
+          await closeSessionTranscriptReconcileWorkerPool();
           await retire();
           if (mediaCleanupStopResult !== undefined) {
             await closePluginStateDatabaseAsync();
@@ -668,14 +671,38 @@ export async function completeGatewayClose(
           }
         }, retireRegistry);
       });
-      for (const error of memoryErrors) {
+      for (const error of registryClose.memoryErrors) {
         shutdownLog.warn(`memory-managers: ${formatErrorMessage(error)}`);
         recordShutdownWarning(warnings, "memory-managers");
+      }
+      for (const { pluginId, hookId, error } of registryClose.pluginFailures) {
+        recordShutdownWarning(warnings, `plugin/${pluginId}`);
+        resourceCleanupErrors.push(
+          new Error(`Plugin ${pluginId} cleanup failed (${hookId}): ${formatErrorMessage(error)}`, {
+            cause: error,
+          }),
+        );
       }
     } catch (error) {
       resourceCleanupErrors.push(error);
     }
   }
+  const durationMs = Date.now() - start;
+  if (resourceCleanupErrors.length > 0 || closeFailure) {
+    shutdownLog.warn(
+      `shutdown failed in ${durationMs}ms${warnings.length ? `: ${warnings.join(", ")}` : ""}`,
+    );
+  } else if (warnings.length > 0) {
+    shutdownLog.warn(`shutdown completed in ${durationMs}ms with warnings: ${warnings.join(", ")}`);
+  } else {
+    shutdownLog.info(`shutdown completed cleanly in ${durationMs}ms`);
+  }
+
+  recordGatewayRestartTrace("restart.close.total", durationMs, [
+    ["reason", reason],
+    ["restartExpectedMs", restartExpectedMs ?? "none"],
+    ...collectGatewayProcessMemoryUsageMb(),
+  ]);
   if (resourceCleanupErrors.length === 1) {
     throw resourceCleanupErrors[0];
   }
@@ -687,18 +714,5 @@ export async function completeGatewayClose(
   if (closeFailure) {
     throw closeFailure.error;
   }
-
-  const durationMs = Date.now() - start;
-  if (warnings.length > 0) {
-    shutdownLog.warn(`shutdown completed in ${durationMs}ms with warnings: ${warnings.join(", ")}`);
-  } else {
-    shutdownLog.info(`shutdown completed cleanly in ${durationMs}ms`);
-  }
-
-  recordGatewayRestartTrace("restart.close.total", durationMs, [
-    ["reason", reason],
-    ["restartExpectedMs", restartExpectedMs ?? "none"],
-    ...collectGatewayProcessMemoryUsageMb(),
-  ]);
   return { durationMs, warnings };
 }

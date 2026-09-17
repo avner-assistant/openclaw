@@ -60,7 +60,7 @@ function createIssueLink(response: Record<string, unknown> = issuePreviewRespons
 }
 
 function titleLinkInCard(): HTMLAnchorElement | null {
-  return document.querySelector<HTMLAnchorElement>(".github-link-hovercard__title");
+  return document.querySelector<HTMLAnchorElement>("a.github-link-hovercard__title");
 }
 
 function cardLinks(): HTMLAnchorElement[] {
@@ -664,7 +664,7 @@ describe("openclaw-github-link-hovercard-provider", () => {
   });
 
   it.each(["client", "agent", "agent round trip", "connection", "principal"])(
-    "resets the shared success gate and cached previews after a %s change",
+    "retires cached details and requests current metadata after a %s change",
     async (change) => {
       const pending = createDeferred<ReturnType<typeof issuePreviewResponse>>();
       const request = vi
@@ -693,17 +693,31 @@ describe("openclaw-github-link-hovercard-provider", () => {
       const mounted = observeHovercardMounts();
       await hover(anchor);
       expect(request).toHaveBeenCalledTimes(2);
-      expect(hovercard()).toBeNull();
-      expect(mounted).toEqual([]);
-      pending.resolve(issuePreviewResponse());
+      expect(request.mock.calls[1]?.[1]).toMatchObject({
+        ...(change === "agent" ? { agentId: "other" } : {}),
+        number: 99815,
+      });
+      expect(titleLinkInCard()).toBeNull();
+      if (change === "agent round trip") {
+        expect(hovercard()?.dataset.loading).toBe("true");
+      } else {
+        expect(hovercard()).toBeNull();
+        expect(mounted).toEqual([]);
+      }
+      pending.resolve(issuePreviewResponse({ title: "Current identity details" }));
       await vi.advanceTimersByTimeAsync(0);
-      expect(titleLinkInCard()).not.toBeNull();
+      expect(titleLinkInCard()?.textContent).toBe("Current identity details");
     },
   );
 
-  it.each(["agent", "client"])(
-    "preserves other agents when a peer changes its %s",
-    async (change) => {
+  it.each([
+    ["agent", "agent-a"],
+    ["client", "agent-a"],
+    ["agent", "agent-b"],
+    ["client", "agent-b"],
+  ])(
+    "preserves the unchanged provider when a peer changes its %s from %s",
+    async (change, peerAgentId) => {
       const pending = createDeferred<ReturnType<typeof issuePreviewResponse>>();
       const next = createDeferred<ReturnType<typeof issuePreviewResponse>>();
       const request = vi
@@ -726,7 +740,7 @@ describe("openclaw-github-link-hovercard-provider", () => {
       await vi.advanceTimersByTimeAsync(120);
       const two = createLink("https://github.com/openclaw/openclaw/issues/99816");
       two.provider.client = client;
-      two.provider.agentId = "agent-b";
+      two.provider.agentId = peerAgentId;
       await hover(two.anchor);
       leave(two.anchor);
       await vi.advanceTimersByTimeAsync(120);
@@ -1019,19 +1033,34 @@ describe("openclaw-github-link-hovercard-provider", () => {
     expect(request).not.toHaveBeenCalled();
   });
 
+  it.each(["pending", "held"])(
+    "retires a %s GitHub preview when its pane becomes inert",
+    async (phase) => {
+      const { anchor, provider, request } = createIssueLink();
+      const pane = document.createElement("section");
+      provider.append(pane);
+      pane.append(anchor);
+      anchor.dispatchEvent(new MouseEvent("pointerover", { bubbles: true, composed: true }));
+      if (phase === "held") {
+        await vi.advanceTimersByTimeAsync(250);
+        expect(hovercard()).not.toBeNull();
+        hovercard()!.dispatchEvent(new MouseEvent("pointerenter"));
+      }
+      pane.setAttribute("inert", "");
+      await vi.advanceTimersByTimeAsync(250);
+      expect(hovercard()).toBeNull();
+      expect(anchor.hasAttribute("aria-expanded")).toBe(false);
+      if (phase === "pending") {
+        expect(request).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it("closes when route replacement removes its active link", async () => {
-    const provider = document.createElement(
-      GITHUB_LINK_HOVERCARD_ELEMENT_NAME,
-    ) as GitHubLinkHovercardProviderElement;
-    provider.client = {
-      request: vi.fn().mockResolvedValue(issuePreviewResponse({ comments: 1 })),
-    } as unknown as GatewayBrowserClient;
+    const { provider, anchor } = createIssueLink(issuePreviewResponse({ comments: 1 }));
     const route = document.createElement("main");
-    const anchor = document.createElement("a");
-    anchor.href = ISSUE_HREF;
     route.append(anchor);
     provider.append(route);
-    document.body.append(provider);
 
     await hover(anchor);
     expect(document.querySelector(".github-link-hovercard")).not.toBeNull();

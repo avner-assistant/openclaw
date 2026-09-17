@@ -2,6 +2,7 @@ import path from "node:path";
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
 import { hashRuntimeConfigValue } from "../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { PluginInstanceUnavailableError } from "../plugins/plugin-instance-error.js";
 import { isReservedSystemAgentId } from "../system-agent/agent-id.js";
 import {
   resolveSelectedAgentHarnessRuntime,
@@ -282,6 +283,51 @@ export function ownerKey(input: PreparedModelRuntimeInput): string {
   });
 }
 
+type PreparedModelRuntimeReadBatch = WeakMap<
+  Map<string, PreparedModelRuntimeOwner>,
+  Map<string, PreparedModelRuntimeOwner[]>
+>;
+
+let activePreparedModelRuntimeReadBatch: PreparedModelRuntimeReadBatch | undefined;
+
+/** Reuse configured candidates only during synchronous reads; never publish or yield here. */
+export function withPreparedModelRuntimeReadBatch<T>(read: () => T): T {
+  const parent = activePreparedModelRuntimeReadBatch;
+  activePreparedModelRuntimeReadBatch = new WeakMap();
+  try {
+    return read();
+  } finally {
+    activePreparedModelRuntimeReadBatch = parent;
+  }
+}
+
+function configuredOwnerCandidates(
+  owners: Map<string, PreparedModelRuntimeOwner>,
+  agentId: string | undefined,
+): Iterable<PreparedModelRuntimeOwner> {
+  const batch = activePreparedModelRuntimeReadBatch;
+  if (!batch || agentId === undefined) {
+    return owners.values();
+  }
+  let byAgent = batch.get(owners);
+  if (!byAgent) {
+    byAgent = new Map();
+    for (const owner of owners.values()) {
+      if (owner.provenance !== "configured" || owner.input.agentId === undefined) {
+        continue;
+      }
+      const matches = byAgent.get(owner.input.agentId);
+      if (matches) {
+        matches.push(owner);
+      } else {
+        byAgent.set(owner.input.agentId, [owner]);
+      }
+    }
+    batch.set(owners, byAgent);
+  }
+  return byAgent.get(agentId) ?? [];
+}
+
 export function resolvePublishedOwner(
   owners: Map<string, PreparedModelRuntimeOwner>,
   input: PreparedModelRuntimeInput,
@@ -296,7 +342,7 @@ export function resolvePublishedOwner(
   }
   // Gateway launch may supply an authoritative workspace outside config. Request readers still
   // resolve the one configured lifecycle owner by agent; standalone/explicit owners remain exact.
-  const candidates = [...owners.values()].filter(
+  const candidates = [...configuredOwnerCandidates(owners, input.agentId)].filter(
     (owner) =>
       owner.provenance === "configured" &&
       (input.agentId === undefined || owner.input.agentId === input.agentId) &&
@@ -395,6 +441,7 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
     const input = owner.input;
     owner.environmentFingerprint = effectiveEnvironmentFingerprint(input);
     owner.generation += 1;
+    owner.authCaptureStarted = false;
     owner.needsRefresh = true;
     owner.refreshError = undefined;
     owner.pendingPluginGeneration = params.reusePluginGenerations
@@ -419,7 +466,11 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
         owner.provenance === "run" || (owner.provenance === "ephemeral" && input.readOnly === true),
       isGenerationCurrent,
       isBuildCurrent: params.isBuildCurrent ?? isCurrent,
-      isPreparationCurrent: params.isBuildCurrent,
+      onBeforeAuthCapture: () => {
+        if (owner.generation === generation) {
+          owner.authCaptureStarted = true;
+        }
+      },
       isEligible: () =>
         (params.isPublicationCurrent?.() ?? true) &&
         owner.generation === generation &&
@@ -490,8 +541,8 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
             );
             for (const candidate of currentGroup) {
               if (params.registerEntriesAfterBuildStart === true) {
-                // First-build hooks may emit auth mutations. Publish the owner only after those
-                // hooks start so an event cannot refresh a generation that was not visible yet.
+                // Pending owners become visible before awaited preparation; auth replay follows
+                // the explicit credential-capture boundary rather than promise scheduling.
                 const previous = params.owners.get(candidate.key);
                 params.owners.set(candidate.key, candidate.owner);
                 if (previous && previous !== candidate.owner) {
@@ -578,6 +629,7 @@ export async function publishModelRuntimeSnapshot(
   const key = ownerKey(input);
   const owner = prepareModelRuntimeOwner(input, provenance, catalogMode, existing);
   owner.generation += 1;
+  owner.authCaptureStarted = false;
   owner.needsRefresh = true;
   owner.refreshError = undefined;
   owner.pluginGeneration = undefined;
@@ -592,6 +644,11 @@ export async function publishModelRuntimeSnapshot(
         inventoryOwner: owner,
         isGenerationCurrent,
         isBuildCurrent: isGenerationCurrent,
+        onBeforeAuthCapture: () => {
+          if (owner.generation === generation) {
+            owner.authCaptureStarted = true;
+          }
+        },
         prepareInboundPluginRegistry: provenance === "configured",
         ownsRegistryResources:
           provenance === "run" || (provenance === "ephemeral" && input.readOnly === true),
@@ -650,6 +707,12 @@ export async function publishModelRuntimeSnapshot(
         if (!owner.snapshot) {
           retirePreparedModelRuntimeOwnerIfUnused(owners, key, owner);
         }
+      } else if (refreshError instanceof PluginInstanceUnavailableError) {
+        // A reload can revoke a plugin during awaited preparation, before the next build guard.
+        throw new PreparedModelRuntimePublicationSupersededError(
+          `prepared model runtime publication was superseded for ${input.agentDir}`,
+          { cause: refreshError },
+        );
       }
       throw refreshError;
     }

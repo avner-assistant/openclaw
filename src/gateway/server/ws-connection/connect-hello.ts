@@ -74,6 +74,7 @@ export async function sendGatewayHello(
     frame,
     connectParams,
     sendFrame,
+    onHelloDelivered,
     pendingNodePairingCleanup,
     releasePendingNodePairingCleanup,
   } = context;
@@ -158,6 +159,7 @@ export async function sendGatewayHello(
         GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_STATUS,
         GATEWAY_SERVER_CAPS.NODE_WORKER_ENVIRONMENT_SESSION,
         GATEWAY_SERVER_CAPS.NODE_WORKER_PORTAL_STREAM,
+        GATEWAY_SERVER_CAPS.PROFILE_BINDING,
         GATEWAY_SERVER_CAPS.PUBLISHED_MODEL_CATALOG,
         GATEWAY_SERVER_CAPS.PROGRESS_CARD_AGENT_SCOPE,
         GATEWAY_SERVER_CAPS.SESSION_SCOPED_CHAT_METADATA,
@@ -260,6 +262,7 @@ export async function sendGatewayHello(
     }
     snapshot.suspension = { phase: getGatewaySuspendAdmissionPhase() };
     await sendFrame({ type: "res", id: frame.id, ok: true, payload: helloOk });
+    onHelloDelivered();
   } catch (err) {
     if (bootstrapHandoff) {
       if (bootstrapHandoff.completion) {

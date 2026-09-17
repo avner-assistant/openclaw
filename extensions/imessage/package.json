@@ -8,7 +8,7 @@
   },
   "type": "module",
   "dependencies": {
-    "typebox": "1.3.27",
+    "typebox": "1.3.30",
     "zod": "4.5.4"
   },
   "devDependencies": {
@@ -100,7 +100,10 @@
     },
     "build": {
       "openclawVersion": "2026.9.4",
-      "bundledDist": false
+      "bundledDist": false,
+      "workerEntries": [
+        "./src/send-receipt-db.worker.ts"
+      ]
     },
     "release": {
       "publishToClawHub": true,

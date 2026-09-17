@@ -7,6 +7,7 @@ import type {
   ModelsProbeResult,
 } from "../../api/types.ts";
 import type { ApplicationContext, ApplicationGatewaySnapshot } from "../../app/context.ts";
+import { createGatewayMetadataObserver } from "../../app/gateway-observers.ts";
 import type { SelectPicker } from "../../components/select-picker.ts";
 import { invalidateChatMetadataStore } from "../../lib/chat/chat-metadata-cache.ts";
 import type {
@@ -64,10 +65,6 @@ export type ModelProvidersPageTestElement = HTMLElement & {
   requestUpdate: () => void;
   saveDefaults: () => Promise<void>;
   selectedAgentId: string;
-};
-
-export type AgentSelectElement = HTMLElement & {
-  onSelect: (value: string) => void;
 };
 
 export function modelPickers(page: Element): SelectPicker[] {
@@ -234,8 +231,18 @@ export function createHarness(initialScopeId: string) {
     lastErrorCode: null,
   };
   const gatewaySource = createApplicationGateway(snapshot);
+  const metadata = createGatewayMetadataObserver(
+    (current) => current === gatewaySource.gateway.snapshot,
+  );
+  let previousSnapshot = { ...snapshot };
+  gatewaySource.gateway.subscribe((next) => {
+    const previous = previousSnapshot;
+    previousSnapshot = { ...next };
+    metadata.synchronize(previous, next);
+  });
   let selectionListener: (() => void) | undefined;
-  const agentSelection = {
+  const settingsAgentSelection = {
+    intentRevision: 0,
     state: {
       selectedId: initialScopeId as string | null,
       scopeId: initialScopeId as string | null,
@@ -253,7 +260,7 @@ export function createHarness(initialScopeId: string) {
   const subscribe = () => () => undefined;
   const owner = createRuntimeConfigCapability(gatewaySource.gateway);
   configOwners.add(owner);
-  const subscribeConfig = owner.subscribe;
+  const subscribeConfig = owner.subscribe.bind(owner);
   const runExternalMutation = owner.runExternalMutation;
   const runtimeConfig = Object.assign(owner, {
     ensureLoaded: vi.fn(owner.ensureLoaded),
@@ -303,7 +310,11 @@ export function createHarness(initialScopeId: string) {
       refreshList: vi.fn(),
       subscribe,
     },
-    agentSelection,
+    settingsAgentSelection,
+    agentSelection: {
+      state: { selectedId: "main", scopeId: "main" },
+      subscribe: () => () => undefined,
+    },
     runtimeConfig,
     overlays: {
       snapshot: { updateRunning: false, updateReconciliationPending: false },
@@ -312,7 +323,7 @@ export function createHarness(initialScopeId: string) {
     navigate: vi.fn(),
   } as unknown as ApplicationContext;
   return {
-    agentSelection,
+    settingsAgentSelection,
     context,
     gatewaySource,
     deferNextAuthStatus,
@@ -390,7 +401,8 @@ export function createEmptyModelProvidersRouteData(
     gatewaySnapshot: { ...context.gateway.snapshot, phase: "stopped", client: null },
     data: EMPTY_MODEL_PROVIDERS_DATA,
     client: null,
-    agentId: context.agentSelection.state.selectedId,
+    agentId: context.settingsAgentSelection.state.selectedId,
+    selectionIntentRevision: context.settingsAgentSelection.intentRevision,
   };
 }
 

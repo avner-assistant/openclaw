@@ -38,16 +38,20 @@ import {
   resolveGitInstallDir,
   UpdatePreMutationError,
 } from "./shared.js";
-import { readUpdateCandidateSource } from "./update-command-config-snapshot.js";
 import { inspectUpdateDatabaseContexts } from "./update-command-database-context.js";
 import type { MutableUpdateExecutionParams } from "./update-command-execution.types.js";
-import { createBeforeGitMutation, updateGitInstall } from "./update-command-git.js";
+import {
+  createBeforeGitMutation,
+  recordInspectedGitTarget,
+} from "./update-command-git-admission.js";
+import { updateGitInstall } from "./update-command-git.js";
 import {
   formatUpdateAncestryBlockMessage,
   handoffUpdateFromGateway,
 } from "./update-command-handoff.js";
 import {
   captureOwnedManagedUpdateContext,
+  readUpdateCandidateSource,
   revalidateUpdateDatabaseContext,
   type OwnedManagedUpdateContext,
 } from "./update-command-managed-context.js";
@@ -86,11 +90,14 @@ export async function executeMutableUpdate(
   const { opts, updateStepTimeoutMs } = params;
   const originalRun = opts.run;
   const requesterAuthority = originalRun?.requesterAuthority;
-  const assertExecutionCurrent = () => {
-    assertUpdateCommandRecovery(opts);
+  const assertRequesterCurrent = () => {
     if (opts.run !== originalRun || requesterAuthority?.isCurrent() === false) {
       throw new UpdateRequesterRevokedError();
     }
+  };
+  const assertExecutionCurrent = () => {
+    assertUpdateCommandRecovery(opts);
+    assertRequesterCurrent();
   };
   const mode: UpdateRunResult["mode"] =
     params.updateInstallKind === "git"
@@ -180,6 +187,7 @@ export async function executeMutableUpdate(
       inputHash: validatedConfigSnapshot?.hash,
       changes: doctorConfigChanges,
       assertCurrent: assertExecutionCurrent,
+      assertRequesterCurrent,
     });
   const originalRecovery = () =>
     params.installKind === "git"
@@ -379,7 +387,7 @@ export async function executeMutableUpdate(
         if (!executor) {
           throw new UpdatePreMutationError(
             "target-native-unsupported",
-            "Native candidate admission requires its original update executor.",
+            "Starting the update requires its original update process.",
           );
         }
         const supported = await isUpdatedInstallGatewayExecutorSupported({
@@ -425,7 +433,7 @@ export async function executeMutableUpdate(
         candidateSchemaVersions = validation.candidateSchemaVersions;
         doctorConfigWrites = validation.doctorConfigWrites === true;
         observedGatewayStartupMs = validation.steps.find(
-          (step) => step.name === "candidate gateway canary" && step.exitCode === 0,
+          (step) => step.name === "Checking Gateway startup" && step.exitCode === 0,
         )?.durationMs;
       }
       return validation;
@@ -457,7 +465,7 @@ export async function executeMutableUpdate(
             score: repairValidation.steps.filter((step) => step.exitCode === 0).length,
             summary:
               repairValidation.status === "ok"
-                ? "Candidate validation passed."
+                ? "Update checks passed."
                 : repairValidation.logTail.join("\n"),
           };
         },
@@ -490,7 +498,7 @@ export async function executeMutableUpdate(
     ) {
       throw new UpdatePreMutationError(
         "invalid-config",
-        "Config changed during candidate validation; rerun the update before activating.",
+        "Config changed during update checks; rerun the update before activating.",
       );
     }
     const config = snapshot.config;
@@ -579,7 +587,6 @@ export async function executeMutableUpdate(
         timeoutMs: updateStepTimeoutMs,
         startedAt: params.startedAt,
         progress: params.progress,
-        jsonMode: Boolean(opts.json),
         invocationCwd: params.invocationCwd,
         honorPackageRoot:
           params.managedServiceRootRedirect !== null ||
@@ -589,6 +596,7 @@ export async function executeMutableUpdate(
         installTarget: params.packageInstallTarget,
         validateCandidate,
         beforeActivate,
+        assertCurrent: assertExecutionCurrent,
         managedServiceEnv: preManagedServiceStop?.serviceEnv,
         onTransaction: (transaction) => {
           packageTransaction = transaction;
@@ -611,13 +619,9 @@ export async function executeMutableUpdate(
         channel: params.channel,
         tag: params.tag,
         devTarget: params.devTarget,
+        assertCurrent: assertExecutionCurrent,
         inspectGitTarget: async (target) => {
-          if (target.metadataUnreadable) {
-            throw new UpdatePreMutationError(
-              "target-metadata-preflight",
-              `Update refused: could not inspect the target's schema support (${target.metadataUnreadable}).`,
-            );
-          }
+          recordInspectedGitTarget(opts.run, target, assertExecutionCurrent);
           await recheckSchemas(target.schemaVersions);
           if (!gitContextPrepared) {
             await stopManagedServiceBeforeMutableUpdate(gitMutationRoots ?? undefined, "inspect");
@@ -633,6 +637,13 @@ export async function executeMutableUpdate(
         getDoctorContext,
         // Foreign inspection metadata cannot authorize backup or Doctor writes.
         getManagedServiceEnv: () => ownedManagedUpdateContext?.env,
+        getSnapshotSource: async () => {
+          const env =
+            ownedManagedUpdateContext?.env ?? admission?.managedEnv ?? opts.run?.env ?? process.env;
+          const source = await readUpdateCandidateSource(env, params.legacyConfigPlan);
+          return { config: source.config, env };
+        },
+        jsonMode: Boolean(opts.json),
         invocationCwd: params.invocationCwd,
         nodeRunner: params.packageUpdateNodeRunner,
         validateCandidate: async (candidateRoot) => {
@@ -641,7 +652,7 @@ export async function executeMutableUpdate(
           if (failed) {
             throw new UpdatePreMutationError(
               failed.name,
-              failed.stderrTail ?? "Candidate validation failed.",
+              failed.stderrTail ?? "Update checks failed.",
               { failureFacts: failed.failureFacts },
             );
           }

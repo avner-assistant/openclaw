@@ -10,6 +10,7 @@ import {
   isPluginControlUiPath,
   isUiBrowserTestFile,
   isUiTestTarget,
+  uiTimingTestFiles,
 } from "../test/vitest/vitest.ui-paths.mjs";
 import { boundaryTestFiles } from "../test/vitest/vitest.unit-paths.mjs";
 import { parsePermissiveBooleanToken } from "./lib/arg-utils.mts";
@@ -596,6 +597,10 @@ export function resolveImplicitVitestArgs(argv: string[], cwd = process.cwd()): 
     testTargets.length > 0 &&
     testTargets.every((target) => isUiTestTarget(target) && !isUiBrowserTestFile(target))
   ) {
+    // Mixed timing/ordinary UI selection needs the root matrix to preserve groups.
+    if (testTargets.some((target) => uiTimingTestFiles.includes(target))) {
+      return argv;
+    }
     return withImplicitVitestConfig(argv, UI_VITEST_CONFIG);
   }
   return argv;
@@ -614,10 +619,10 @@ export function installVitestNoOutputWatchdog(params: {
   onForceKill?: () => void;
   setTimeoutFn?: typeof setTimeout;
   clearTimeoutFn?: typeof clearTimeout;
-}): () => void {
+}): { recordActivity: () => void; teardown: () => void } {
   const timeoutMs = params.timeoutMs;
   if (!timeoutMs || timeoutMs <= 0) {
-    return () => {};
+    return { recordActivity: () => {}, teardown: () => {} };
   }
 
   const setTimeoutFn = params.setTimeoutFn ?? setTimeout;
@@ -725,17 +730,20 @@ export function installVitestNoOutputWatchdog(params: {
 
   resetSilenceTimer();
 
-  return () => {
-    if (!active) {
-      return;
-    }
-    active = false;
-    clearSilenceTimer();
-    clearForceKillTimer();
-    clearHeartbeatTimer();
-    for (const { stream, handler } of listeners) {
-      stream.off("data", handler);
-    }
+  return {
+    recordActivity: handleActivity,
+    teardown() {
+      if (!active) {
+        return;
+      }
+      active = false;
+      clearSilenceTimer();
+      clearForceKillTimer();
+      clearHeartbeatTimer();
+      for (const { stream, handler } of listeners) {
+        stream.off("data", handler);
+      }
+    },
   };
 }
 
@@ -845,7 +853,7 @@ export function spawnWatchedVitestProcess({
     forceSignal: "SIGKILL",
     forceSignalDelayMs: 100,
   });
-  const teardownNoOutputWatchdog = installVitestNoOutputWatchdog({
+  const noOutputWatchdog = installVitestNoOutputWatchdog({
     streams: [child.stdout, child.stderr],
     timeoutMs: resolveVitestNoOutputTimeoutMs(env),
     heartbeatMs: resolveVitestNoOutputHeartbeatMs(env),
@@ -884,7 +892,7 @@ export function spawnWatchedVitestProcess({
 
   const teardown = () => {
     childCleanup.teardown();
-    teardownNoOutputWatchdog();
+    noOutputWatchdog.teardown();
   };
   const completion = Promise.all([childCompletion, forwardedOutput])
     .then(async ([{ code: childCode, signal, groupJoined }]) => {
@@ -899,7 +907,9 @@ export function spawnWatchedVitestProcess({
 
   return {
     child,
-    completion: workerRun ? workerRun.borrow(child, completion) : completion,
+    completion: workerRun
+      ? workerRun.borrow(child, completion, noOutputWatchdog.recordActivity)
+      : completion,
     getForwardedSignal: childCleanup.getForwardedSignal,
     teardown,
   };

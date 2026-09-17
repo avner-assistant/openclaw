@@ -10,9 +10,15 @@ import { repairCanonicalSqliteIndexes } from "../infra/sqlite-index-schema.js";
 import {
   assertSqliteSchemaContains,
   assertSqliteSchemaTablesPresent,
+  collectSqliteSchemaIssues,
+  getCanonicalSqliteNamedIndexContracts,
   getCanonicalSqliteTableNames,
   type SqliteSchemaCompatibility,
 } from "../infra/sqlite-schema-contract.js";
+import {
+  legacySqliteSchemaIssueMessages,
+  throwSqliteSchemaMismatches,
+} from "../infra/sqlite-schema-issues.js";
 import { readSqliteUserVersion } from "../infra/sqlite-user-version.js";
 import { normalizeAgentId } from "../routing/session-key.js";
 import {
@@ -21,7 +27,10 @@ import {
 } from "./openclaw-agent-board-schema.js";
 import { CONTEXT_ENGINE_TURN_OUTBOX_TABLE } from "./openclaw-agent-context-engine-turn-outbox-schema.js";
 import { FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS } from "./openclaw-agent-db-additive-columns.js";
-import { OPENCLAW_AGENT_SCHEMA_VERSION } from "./openclaw-agent-db-contract.js";
+import {
+  OPENCLAW_AGENT_SCHEMA_VERSION,
+  SESSION_PARTICIPANTS_TABLE,
+} from "./openclaw-agent-db-contract.js";
 import {
   readExistingAgentSchemaMeta,
   assertExistingAgentSchemaOwner,
@@ -33,14 +42,16 @@ import {
 import { SESSION_GOAL_OPERATIONS_TABLE } from "./openclaw-agent-goal-operations-schema.js";
 import { MESSAGE_TOOL_RUN_OUTCOMES_TABLE } from "./openclaw-agent-message-tool-outcome-schema.js";
 import { LEGACY_PARTICIPANT_OPTIONAL_COLUMNS } from "./openclaw-agent-participants-migration.js";
-import { SESSION_PENDING_INPUTS_TABLE } from "./openclaw-agent-pending-inputs-schema.js";
+import {
+  SESSION_PENDING_INPUTS_TABLE,
+  SESSION_INPUT_COMPLETIONS_TABLE,
+} from "./openclaw-agent-pending-inputs-schema.js";
 import {
   ensureOpenClawAgentProgressCardSchemaInTransaction,
   AGENT_PROGRESS_CARD_SCHEMA_SQL,
   SESSION_PROGRESS_CARDS_TABLE,
 } from "./openclaw-agent-progress-card-schema.js";
 import { OPENCLAW_AGENT_SCHEMA_SQL } from "./openclaw-agent-schema.js";
-import { SESSION_PARTICIPANTS_TABLE } from "./openclaw-agent-session-participants-schema.js";
 import {
   AGENT_V14_ADDITIVE_SCHEMA_SQL,
   AGENT_V14_CORE_SCHEMA_SQL,
@@ -79,6 +90,7 @@ const AGENT_SCHEMA_COMPATIBILITY = {
     MESSAGE_TOOL_RUN_OUTCOMES_TABLE,
     SESSION_GOAL_OPERATIONS_TABLE,
     SESSION_PENDING_INPUTS_TABLE,
+    SESSION_INPUT_COMPLETIONS_TABLE,
     SESSION_PARTICIPANTS_TABLE,
     SESSION_PROGRESS_CARDS_TABLE,
     SESSION_TRANSCRIPT_ARCHIVES_TABLE,
@@ -98,7 +110,7 @@ const AGENT_SCHEMA_COMPATIBILITY = {
   allowedColumnDefinitions: {
     "conversations.delivery_target": ["delivery_target TEXT NOT NULL DEFAULT ''"],
   },
-  allowedMissingIndexes: ["idx_agent_transcript_context_pending"],
+  allowedMissingIndexes: ["idx_agent_transcript_context_pending", "idx_agent_session_nodes_label"],
   optionalCanonicalTriggerGroups: [
     {
       tableName: MEMORY_INDEX_SOURCES_TABLE,
@@ -118,8 +130,9 @@ export function assertOpenClawAgentSchemaContains(
   pathname: string,
   schemaSql: string,
   participantSchema: "current" | "legacy" = "current",
+  allowStartupIndexRepair = false,
 ): void {
-  assertSqliteSchemaContains(database, pathname, schemaSql, {
+  const compatibility = {
     ...AGENT_SCHEMA_COMPATIBILITY,
     allowedMissingTables: [
       ...AGENT_SCHEMA_COMPATIBILITY.allowedMissingTables,
@@ -130,7 +143,25 @@ export function assertOpenClawAgentSchemaContains(
       ...AGENT_SCHEMA_COMPATIBILITY.allowedMissingColumns,
       ...(participantSchema === "legacy" ? LEGACY_PARTICIPANT_OPTIONAL_COLUMNS : []),
     ],
-  });
+  };
+  if (!allowStartupIndexRepair) {
+    assertSqliteSchemaContains(database, pathname, schemaSql, compatibility);
+    return;
+  }
+  // Admission is read-only; the writable schema owner rebuilds these projections
+  // before session startup completes. Constraints and canonical data stay strict.
+  const repairableIndexes = new Set(
+    getCanonicalSqliteNamedIndexContracts(schemaSql).map((index) => index.name),
+  );
+  const issues = collectSqliteSchemaIssues(database, schemaSql, compatibility);
+  if (
+    issues.some(
+      (issue) =>
+        issue.code !== "missing-or-drifted-index" || !repairableIndexes.has(issue.objectName),
+    )
+  ) {
+    throwSqliteSchemaMismatches(pathname, legacySqliteSchemaIssueMessages(issues));
+  }
 }
 
 export function assertOpenClawAgentCurrentRuntimeSchema(

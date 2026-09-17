@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { resolveConfigEnvVars } from "../config/env-substitution.js";
 import { createConfigRuntimeEnv } from "../config/env-vars.js";
+import { captureRuntimeConfig } from "../config/runtime-source-projection.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginInstallRecord } from "../config/types.plugins.js";
 import { resolveUserPath } from "../utils.js";
@@ -13,7 +14,6 @@ import {
   type PluginActivationConfigSource,
 } from "./config-state.js";
 import { getCurrentPluginMetadataSnapshot } from "./current-plugin-metadata-snapshot.js";
-import { resolveOpenClawDevSourceRoot } from "./dev-source-root.js";
 import { extractPluginInstallRecordsFromInstalledPluginIndex } from "./installed-plugin-index-install-records.js";
 import { loadInstalledPluginIndexInstallRecordsSync } from "./installed-plugin-index-records.js";
 import { resolvePluginRegistrationConfigKey } from "./loader-registration-config.js";
@@ -101,7 +101,7 @@ function buildActivationMetadataHash(params: {
 }
 
 function buildCacheKeys(params: {
-  workspaceDir?: string;
+  discoveryContext: ReturnType<typeof resolvePluginDiscoveryContext>;
   plugins: NormalizedPluginsConfig;
   registrationConfigKey: string;
   activationMetadataKey?: string;
@@ -128,11 +128,7 @@ function buildCacheKeys(params: {
   cliMetadata: boolean;
   expectedSourceDigests?: Readonly<Record<string, string>>;
 }) {
-  const { roots, loadPaths, devSourceRoot } = resolvePluginDiscoveryContext({
-    workspaceDir: params.workspaceDir,
-    loadPaths: params.plugins.loadPaths,
-    env: params.env,
-  });
+  const { roots, loadPaths, devSourceRoot } = params.discoveryContext;
   const installs = Object.fromEntries(
     Object.entries(params.installs ?? {}).map(([pluginId, install]) => [
       pluginId,
@@ -278,7 +274,7 @@ export function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
     activationSourceConfig: options.activationSourceConfig,
   });
   const env = shouldResolveRawConfigEnvVars ? createConfigRuntimeEnv(rawConfig, baseEnv) : baseEnv;
-  const cfg = applyTestPluginDefaults(
+  const runtimeConfig = applyTestPluginDefaults(
     shouldResolveRawConfigEnvVars
       ? (resolveConfigEnvVars(rawConfig, env, {
           onMissing: () => undefined,
@@ -286,11 +282,15 @@ export function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
       : rawConfig,
     env,
   );
-  const activationSourceConfig = shouldResolveRawConfigEnvVars
+  const activationConfig = shouldResolveRawConfigEnvVars
     ? (resolveConfigEnvVars(rawActivationSourceConfig, env, {
         onMissing: () => undefined,
       }) as OpenClawConfig)
     : rawActivationSourceConfig;
+  // Registration callbacks retain these exact snapshots for their instance lifetime.
+  const cfg = captureRuntimeConfig(runtimeConfig);
+  const activationSourceConfig =
+    activationConfig === runtimeConfig ? cfg : captureRuntimeConfig(activationConfig);
   const normalized = normalizePluginsConfig(cfg.plugins);
   // Identical plugin inputs may share facts; source channel policy keeps its own root config.
   const activationSource = createPluginActivationSource({
@@ -344,16 +344,20 @@ export function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
       loadInstalledPluginIndexInstallRecordsSync({ env })),
     ...cfg.plugins?.installs,
   };
-  const devSourceRoot = resolveOpenClawDevSourceRoot(env);
+  const discoveryContext = resolvePluginDiscoveryContext({
+    workspaceDir: options.workspaceDir,
+    loadPaths: trustNormalized.loadPaths,
+    env,
+  });
   const registrationConfigKey = resolvePluginRegistrationConfigKey({
-    config: cfg,
-    activationSourceConfig,
+    runtimeEntries: normalized.entries,
+    sourceEntries: activationSource.plugins.entries,
   });
   const shouldActivate = options.mode !== "cli-metadata" && options.activate !== false;
   // Staged runtime registration is independent of publishing the process registry.
   const runtimeSideEffects = options.runtimeSideEffects ?? shouldActivate;
   const { cacheKey, resolveManifestCacheKey } = buildCacheKeys({
-    workspaceDir: options.workspaceDir,
+    discoveryContext,
     plugins: trustNormalized,
     registrationConfigKey,
     activationMetadataKey: buildActivationMetadataHash({
@@ -412,7 +416,7 @@ export function resolvePluginLoadCacheContext(options: PluginLoadOptions = {}) {
     shouldLoadModules: options.loadModules !== false,
     runtimeSubagentMode,
     installRecords,
-    devSourceRoot,
+    devSourceRoot: discoveryContext.devSourceRoot,
     cacheKey,
     resolveManifestCacheKey,
   };

@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { maxBytesForKind, mediaKindFromMime, type MediaKind } from "@openclaw/media-core/constants";
 import { mimeTypeFromFilePath, normalizeMimeType } from "@openclaw/media-core/mime";
+import { hasHttpUrlPrefix } from "@openclaw/net-policy/url-protocol";
 import { expectDefined } from "@openclaw/normalization-core";
 import {
   asDateTimestampMs,
@@ -22,11 +23,12 @@ import type {
 import { getRuntimeConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
 import { loadExactSessionEntryReadOnlyResult } from "../config/sessions/session-accessor.sqlite-entry-availability.js";
-import { resolveSessionEntry } from "../config/sessions/session-accessor.sqlite-entry.js";
+import { resolveSessionEntry } from "../config/sessions/session-accessor.sqlite-exact-read.js";
 import {
   resolveExistingAgentSessionStoreTargetsReadOnlyResult,
   type SessionStoreTargetsReadCache,
 } from "../config/sessions/targets-read-availability.js";
+import { resolveDeliveryQueueStateEnv } from "../infra/delivery-queue-sqlite.js";
 import { sanitizeUntrustedFileName } from "../infra/fs-safe-advanced.js";
 import { openLocalFileSafely, readLocalFileSafely } from "../infra/fs-safe.js";
 import { loadPendingSessionDeliveries } from "../infra/session-delivery-queue-storage.js";
@@ -43,6 +45,7 @@ import { getMediaDir, MEDIA_MAX_BYTES, saveMediaBuffer, saveMediaSource } from "
 import { normalizeAgentId, parseAgentSessionKey } from "../routing/session-key.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
 import { readAssistantDisplayContent } from "../shared/assistant-display-content.js";
+import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { buildAssistantMediaContentDisposition } from "./assistant-media-content-disposition.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
@@ -63,6 +66,7 @@ import {
   claimManagedImageRecordCleanupIfCurrent,
   deleteClaimedManagedImageRecord,
   insertManagedImageRecord,
+  listManagedImageOriginalMediaIds,
   listManagedImageRecordEntries,
   MANAGED_OUTGOING_ORIGINALS_SUBDIR,
   readManagedImageRecord,
@@ -453,11 +457,7 @@ async function deleteAgedOrphanManagedImageFiles(params: {
   if (await hasUnmigratedManagedImageMetadata(params.stateDir)) {
     return 0;
   }
-  const referencedMediaIds = new Set(
-    listManagedImageRecordEntries({ stateDir: params.stateDir }).map(
-      ({ record }) => record.original.mediaId,
-    ),
-  );
+  const referencedMediaIds = new Set(listManagedImageOriginalMediaIds(params.stateDir));
   const originalsDir = resolveManagedImageOriginalsDir(params.stateDir);
   let names: string[];
   try {
@@ -1041,8 +1041,11 @@ function collectManagedOutgoingAttachmentRefs(
 
 async function loadPendingPreparedAttachmentIds(stateDir: string): Promise<Set<string> | null> {
   try {
+    const queueContext = captureOpenClawStateWorkerContext({
+      env: resolveDeliveryQueueStateEnv(stateDir),
+    });
     const attachmentIds = new Set<string>();
-    for (const entry of await loadPendingSessionDeliveries(stateDir)) {
+    for (const entry of await loadPendingSessionDeliveries(queueContext)) {
       if (entry.kind !== "agentTurn") {
         continue;
       }
@@ -1375,6 +1378,8 @@ export async function createManagedOutgoingMediaBlocks(params: {
   localRoots?: readonly string[] | "any";
   continueOnPrepareError?: boolean;
   onPrepareError?: (error: Error) => void;
+  assertCurrent?: () => void;
+  abortSignal?: AbortSignal;
 }): Promise<ManagedMediaBlock[]> {
   const sessionKey = params.sessionKey.trim();
   if (!sessionKey) {
@@ -1413,6 +1418,7 @@ export async function createManagedOutgoingMediaBlocks(params: {
 
     let savedOriginalPath: string | null = null;
     try {
+      params.assertCurrent?.();
       const parsedDataUrl = parseMediaDataUrl(mediaUrl, fallbackLabel, limits);
       if (parsedDataUrl.kind === "unsupported-data-url") {
         throw new Error("Managed media attachment has an unsupported data URL content type");
@@ -1451,18 +1457,24 @@ export async function createManagedOutgoingMediaBlocks(params: {
               // File URLs have already been normalized for display metadata and policy checks.
               // Pass that path to the store instead of treating URI syntax as a filename.
               const ingestSource = localMediaPath ?? mediaUrl;
-              return await saveMediaSource(
-                ingestSource,
-                undefined,
-                "outgoing/originals",
-                Math.max(
-                  limits.maxBytes,
-                  maxBytesForKind("audio"),
-                  maxBytesForKind("video"),
-                  maxBytesForKind("document"),
-                  MEDIA_MAX_BYTES,
-                ),
+              const maxBytes = Math.max(
+                limits.maxBytes,
+                maxBytesForKind("audio"),
+                maxBytesForKind("video"),
+                maxBytesForKind("document"),
+                MEDIA_MAX_BYTES,
               );
+              if (hasHttpUrlPrefix(ingestSource)) {
+                const { saveRemoteMediaForStore } =
+                  await import("../media/store.remote.runtime.js");
+                return await saveRemoteMediaForStore({
+                  source: ingestSource,
+                  subdir: "outgoing/originals",
+                  maxBytes,
+                  abortSignal: params.abortSignal,
+                });
+              }
+              return await saveMediaSource(ingestSource, undefined, "outgoing/originals", maxBytes);
             })();
       savedOriginalPath = savedOriginal.path;
       let savedOriginalContentType = savedOriginal.contentType ?? item.mimeType;
@@ -1599,6 +1611,7 @@ export async function createManagedOutgoingMediaBlocks(params: {
         }
       }
       const block = buildManagedMediaBlock(record, playback);
+      params.assertCurrent?.();
       insertManagedImageRecord(record, stateDir);
       const durationMs = asNonNegativeFiniteNumber(item.durationMs);
       const width = asNonNegativeFiniteNumber(item.width);
@@ -1615,6 +1628,16 @@ export async function createManagedOutgoingMediaBlocks(params: {
     } catch (error) {
       if (savedOriginalPath) {
         await fs.rm(savedOriginalPath, { force: true }).catch(() => {});
+      }
+      try {
+        params.assertCurrent?.();
+      } catch (authorityError) {
+        await removeManagedOutgoingMediaBlocks({
+          blocks,
+          messageId: params.messageId ?? null,
+          stateDir,
+        });
+        throw authorityError;
       }
       const sanitizedError = getSanitizedManagedImageAttachmentError(error, label, hintedKind);
       if (params.continueOnPrepareError) {

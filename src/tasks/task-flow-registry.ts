@@ -604,6 +604,15 @@ export function syncFlowFromTaskResult(task: TaskFlowSyncInput): TaskFlowSyncRes
     return { ok: true, flow };
   }
   const prepared = prepareTaskMirroredFlowSyncFromCurrent(task, flow);
+  // Older mirrored rows stored SQL NULL for the same cleared wait state as JSON null.
+  if (
+    areTaskFlowRecordsEqual(
+      { ...prepared.current, waitJson: prepared.current.waitJson ?? null },
+      { ...prepared.next, revision: prepared.current.revision },
+    )
+  ) {
+    return { ok: true, flow };
+  }
   const updated = writeFlowRecord(prepared.next, prepared.current);
   if (!updated) {
     return {
@@ -649,6 +658,17 @@ export function getTaskFlowById(flowId: string): TaskFlowRecord | undefined {
   ensureTaskFlowRegistryReady();
   const flow = flows.get(flowId);
   return flow ? cloneFlowRecord(flow) : undefined;
+}
+
+export function getTaskMirroredFlowIds(flowIds: Iterable<string>): ReadonlySet<string> {
+  ensureTaskFlowRegistryReady();
+  const mirrored = new Set<string>();
+  for (const flowId of flowIds) {
+    if (flows.get(flowId)?.syncMode === "task_mirrored") {
+      mirrored.add(flowId);
+    }
+  }
+  return mirrored;
 }
 
 export function listTaskFlowsForOwnerKey(ownerKey: string): TaskFlowRecord[] {

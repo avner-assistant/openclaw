@@ -171,6 +171,8 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   const pluginMetadataSnapshotScope = createDoctorPluginMetadataSnapshotScope({
     getBaseSnapshot: () => pluginMetadataSnapshotState.current,
     env: process.env,
+    getDeferredPluginIds: () =>
+      preflight.deferredPluginMigrations?.map((pending) => pending.pluginId) ?? [],
   });
   const runWithPluginMetadataSnapshot = pluginMetadataSnapshotScope.run;
   const invalidatePluginMetadataSnapshot = () => {
@@ -383,10 +385,14 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
     await import("./doctor/shared/legacy-config-binding-repair.js");
   applyConfigMutation(
     runWithCurrentPluginMetadata(state.candidate, () =>
-      repairUnownedChannelAccountBindings(state.candidate),
+      repairUnownedChannelAccountBindings({
+        config: state.candidate,
+        sourceConfigBeforeMigrations: snapshot.sourceConfigBeforeMigrations,
+      }),
     ),
     {
-      fixHint: `Run "${doctorFixCommand}" to bind channel accounts with a single existing route owner.`,
+      fixHint: `Run "${doctorFixCommand}" to preserve channel account ownership.`,
+      emitWarnings: true,
     },
   );
 
@@ -426,6 +432,12 @@ export async function loadAndMaybeMigrateDoctorConfig(params: {
   }
 
   const pluginActivationSourceConfig = state.candidate;
+  const { collectCodexPluginActivationWarnings } =
+    await import("./doctor/shared/codex-plugin-activation-warning.js");
+  emitDoctorNotes({
+    note,
+    warningNotes: collectCodexPluginActivationWarnings(pluginActivationSourceConfig),
+  });
   const { applyPluginAutoEnable } = await import("../config/plugin-auto-enable.js");
   applyConfigMutation(
     runWithCurrentPluginMetadata(state.candidate, () =>

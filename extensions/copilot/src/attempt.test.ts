@@ -34,6 +34,7 @@ import { createMockPluginRegistry } from "openclaw/plugin-sdk/plugin-test-runtim
 import { createOpenClawTestState } from "openclaw/plugin-sdk/test-state";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCopilotAttempt } from "./attempt.js";
+import { projectAgentRunAttemptTerminal } from "./attempt.test-support.js";
 import { createCopilotTestHostCapabilities } from "./host-capability.test-support.js";
 import type { CopilotClientPool } from "./runtime.js";
 import type { createCopilotToolBridge } from "./tool-bridge.js";
@@ -42,20 +43,6 @@ type AgentHarnessAttemptResult = Extract<AgentHarnessAttemptResultContract, { te
 type SettledTurnFinalizationAttemptParams = Parameters<
   NonNullable<AgentHarnessV2["finalizeSettledTurn"]>
 >[0]["attempt"];
-
-function projectAgentRunAttemptTerminal(terminal: AgentHarnessAttemptResult["terminal"]) {
-  return {
-    aborted: terminal.kind === "aborted" && terminal.source !== "yield_cleanup",
-    promptError:
-      terminal.kind === "failed"
-        ? terminal.error
-        : terminal.kind === "ok"
-          ? null
-          : (terminal.failure?.error ?? null),
-    timedOut: terminal.kind === "timeout" && terminal.source !== "observation",
-    timedOutDuringCompaction: terminal.kind === "timeout" && terminal.phase === "compaction",
-  };
-}
 
 const gatewayQuestionMock = vi.hoisted(() => ({
   waiters: new Map<string, (value: unknown) => void>(),
@@ -626,6 +613,7 @@ describe("runCopilotAttempt", () => {
   });
 
   it("reports code-mode engagement through the real tool bridge", async () => {
+    const { createOpenClawCodingTools } = await import("openclaw/plugin-sdk/agent-harness");
     const sdk = makeFakeSdk((session) => {
       session.sendAndWait.mockResolvedValueOnce(makeAssistantMessageEvent("done"));
     });
@@ -637,6 +625,7 @@ describe("runCopilotAttempt", () => {
       makeParams({
         disableTools: false,
         config: { tools: { codeMode: true } },
+        hostCapabilities: createCopilotTestHostCapabilities(createOpenClawCodingTools),
       } as never),
       { pool: makeFakePool(sdk) },
     );
@@ -1106,27 +1095,36 @@ describe("runCopilotAttempt", () => {
     expect(cfg.hooks?.onPreToolUse).toEqual(expect.any(Function));
   });
 
-  it("does not emit llm_output when cancellation happens before the SDK turn starts", async () => {
-    const llmOutput = vi.fn();
-    initializeGlobalHookRunner(
-      createMockPluginRegistry([{ hookName: "llm_output", handler: llmOutput }]),
-    );
-    const controller = new AbortController();
-    const sdk = makeFakeSdk();
+  it.each(["sync", "async"] as const)(
+    "does not emit llm_output when cancellation happens during %s session establishment",
+    async (mode) => {
+      const llmOutput = vi.fn();
+      initializeGlobalHookRunner(
+        createMockPluginRegistry([{ hookName: "llm_output", handler: llmOutput }]),
+      );
+      const controller = new AbortController();
+      const sdk = makeFakeSdk();
 
-    const result = await runCopilotAttempt(
-      makeParams({ abortSignal: controller.signal } as never),
-      {
-        onSessionEstablished: () => controller.abort(),
-        pool: makeFakePool(sdk),
-      },
-    );
-    await waitForEventLoopTurn();
+      const result = await runCopilotAttempt(
+        makeParams({ abortSignal: controller.signal } as never),
+        {
+          onSessionEstablished:
+            mode === "sync"
+              ? () => controller.abort()
+              : async () => {
+                  await waitForEventLoopTurn();
+                  controller.abort();
+                },
+          pool: makeFakePool(sdk),
+        },
+      );
+      await waitForEventLoopTurn();
 
-    expect(projectAgentRunAttemptTerminal(result.terminal).aborted).toBe(true);
-    expect(sdk.sessions[0]?.sendAndWait).not.toHaveBeenCalled();
-    expect(llmOutput).not.toHaveBeenCalled();
-  });
+      expect(projectAgentRunAttemptTerminal(result.terminal).aborted).toBe(true);
+      expect(sdk.sessions[0]?.sendAndWait).not.toHaveBeenCalled();
+      expect(llmOutput).not.toHaveBeenCalled();
+    },
+  );
 
   it("waits for agent_end hooks before resolving one-shot attempts", async () => {
     let releaseAgentEnd: () => void = () => undefined;

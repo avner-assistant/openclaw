@@ -1,24 +1,24 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import { runWithGatewayIndependentRootWorkAdmission } from "../process/gateway-work-admission.js";
 import { normalizeDeliveryContext } from "../utils/delivery-context.shared.js";
 import { isTaskFlowCancellationPending } from "./task-cancellation-state.js";
 import { isTerminalTaskFlow } from "./task-flow-registry.types.js";
 import {
   getTaskFlowById,
-  syncFlowFromTaskResult,
   updateFlowRecordByIdExpectedRevision,
 } from "./task-flow-runtime-internal.js";
 import { clearTaskActivity, flushTaskActivity } from "./task-registry-activity.js";
 import { ensureLinkedTaskFlowRegistryReady } from "./task-registry-flow-link.js";
-import { findLatestTaskForFlowId, listTasksForFlowId } from "./task-registry-query.js";
+import { listTasksForFlowId } from "./task-registry-query.js";
 import {
   cloneTaskDeliveryState,
   cloneTaskRecord,
   cloneTaskRecordForObserver,
   applyTaskRecordPatch,
+  isEquivalentTaskRecord,
 } from "./task-registry-records.js";
 import {
   withTaskRegistryMutation,
+  syncFlowFromTaskAfterTaskMutation,
   addOwnerKeyIndex,
   addParentFlowIdIndex,
   addRelatedSessionKeyIndex,
@@ -30,9 +30,7 @@ import {
   taskRegistryLog,
   rebuildRunIdIndex,
   taskDeliveryStates,
-  taskFlowSyncRetryTimers,
   tasks,
-  TASK_FLOW_SYNC_RETRY_DELAYS_MS,
 } from "./task-registry-state.js";
 import { tryPersistTaskDeliveryStateUpsert, tryPersistTaskUpsert } from "./task-registry.store.js";
 import {
@@ -90,71 +88,6 @@ function syncManagedFlowCancellationFromTask(task: TaskRecord): void {
   }
 }
 
-function scheduleTaskFlowSyncRetry(task: TaskRecord, operation: string, attempt = 0): void {
-  const taskId = task.taskId.trim();
-  if (!taskId || taskFlowSyncRetryTimers.has(taskId)) {
-    return;
-  }
-  const delayMs = TASK_FLOW_SYNC_RETRY_DELAYS_MS[attempt];
-  if (delayMs == null) {
-    taskRegistryLog.warn("Exhausted parent flow sync retries from task", {
-      operation,
-      taskId,
-      flowId: task.parentFlowId,
-    });
-    return;
-  }
-  const retryTimer = setTimeout(() => {
-    taskFlowSyncRetryTimers.delete(taskId);
-    // A terminal task no longer blocks suspension, but its durable parent-flow
-    // projection still mutates state. Keep every delayed attempt visible and
-    // prevent it from crossing a prepared host snapshot boundary.
-    void runWithGatewayIndependentRootWorkAdmission(async () => {
-      const current = tasks.get(taskId);
-      if (!current) {
-        return;
-      }
-      const flowId = current.parentFlowId?.trim();
-      if (!flowId || findLatestTaskForFlowId(flowId)?.taskId !== taskId) {
-        return;
-      }
-      const result = syncFlowFromTaskResult(current);
-      if (!result.ok) {
-        taskRegistryLog.warn("Failed to retry parent flow sync from task", {
-          operation,
-          taskId,
-          flowId: current.parentFlowId,
-          reason: result.reason,
-        });
-        scheduleTaskFlowSyncRetry(current, operation, attempt + 1);
-      }
-    }, "tasks:mutation").catch((error: unknown) => {
-      taskRegistryLog.warn("Failed to admit parent flow sync retry from task", {
-        operation,
-        taskId,
-        flowId: task.parentFlowId,
-        error,
-      });
-    });
-  }, delayMs);
-  retryTimer.unref?.();
-  taskFlowSyncRetryTimers.set(taskId, retryTimer);
-}
-
-export function syncFlowFromTaskAfterTaskMutation(task: TaskRecord, operation: string): void {
-  const result = syncFlowFromTaskResult(task);
-  if (result.ok) {
-    return;
-  }
-  taskRegistryLog.warn("Failed to sync parent flow from task mutation", {
-    operation,
-    taskId: task.taskId,
-    flowId: task.parentFlowId,
-    reason: result.reason,
-  });
-  scheduleTaskFlowSyncRetry(task, operation);
-}
-
 export function updateTask(taskId: string, patch: Partial<TaskRecord>): TaskRecord | null {
   return withTaskRegistryMutation(
     () => {
@@ -174,32 +107,35 @@ export function updateTask(taskId: string, patch: Partial<TaskRecord>): TaskReco
       const parentFlowIndexChanged = current.parentFlowId?.trim() !== next.parentFlowId?.trim();
       ensureLinkedTaskFlowRegistryReady(current);
       ensureLinkedTaskFlowRegistryReady(next);
-      if (becomesTerminal) {
-        flushTaskActivity(taskId);
+      if (!isTerminalTaskStatus(current.status) || !isEquivalentTaskRecord(current, next)) {
+        if (becomesTerminal) {
+          flushTaskActivity(taskId);
+        }
+        // Persist before mutating memory. If the store rejects the write, keep the
+        // in-memory mirror at the durable value and report that no mutation applied.
+        if (!tryPersistTaskUpsert(next, "update")) {
+          return null;
+        }
+        tasks.set(taskId, next);
+        bumpTaskRegistryRevision();
+        if (becomesTerminal) {
+          clearTaskActivity(taskId);
+        }
+        if (patch.runId && patch.runId !== current.runId) {
+          rebuildRunIdIndex();
+        }
+        if (sessionIndexChanged) {
+          deleteOwnerKeyIndex(taskId, current);
+          addOwnerKeyIndex(taskId, next);
+          deleteRelatedSessionKeyIndex(taskId, current);
+          addRelatedSessionKeyIndex(taskId, next);
+        }
+        if (parentFlowIndexChanged) {
+          deleteParentFlowIdIndex(taskId, current);
+          addParentFlowIdIndex(taskId, next);
+        }
       }
-      // Persist before mutating memory. If the store rejects the write, keep the
-      // in-memory mirror at the durable value and report that no mutation applied.
-      if (!tryPersistTaskUpsert(next, "update")) {
-        return null;
-      }
-      tasks.set(taskId, next);
-      bumpTaskRegistryRevision();
-      if (becomesTerminal) {
-        clearTaskActivity(taskId);
-      }
-      if (patch.runId && patch.runId !== current.runId) {
-        rebuildRunIdIndex();
-      }
-      if (sessionIndexChanged) {
-        deleteOwnerKeyIndex(taskId, current);
-        addOwnerKeyIndex(taskId, next);
-        deleteRelatedSessionKeyIndex(taskId, current);
-        addRelatedSessionKeyIndex(taskId, next);
-      }
-      if (parentFlowIndexChanged) {
-        deleteParentFlowIdIndex(taskId, current);
-        addParentFlowIdIndex(taskId, next);
-      }
+      // Storage no-ops still repair linked flows and retry failed observer publications.
       syncFlowFromTaskAfterTaskMutation(next, "update");
       try {
         syncManagedFlowCancellationFromTask(next);

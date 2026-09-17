@@ -2,9 +2,9 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
+import { readAcpSessionMetaForEntry } from "../acp/runtime/session-meta-readonly.js";
 import {
   readAcpSessionMeta,
-  readAcpSessionMetaForEntry,
   repairAcpSessionMetaKeyForMigration,
 } from "../acp/runtime/session-meta.js";
 import { resolveModelAgentRuntimeMetadata } from "../agents/agent-runtime-metadata.js";
@@ -18,9 +18,15 @@ import { resolveExecDefaults } from "../agents/exec-defaults.js";
 import { resolveAgentAvatarUrlFromSource } from "../agents/identity-avatar-file.js";
 import type { ModelCatalogEntry } from "../agents/model-catalog.js";
 import { splitTrailingAuthProfile } from "../agents/model-ref-profile.js";
-import { resolveDefaultModelForAgent } from "../agents/model-selection.js";
+import {
+  buildModelAliasIndex,
+  resolveDefaultModelForAgent,
+  resolveModelRefFromString,
+} from "../agents/model-selection.js";
 import { resolveSandboxConfigForAgent } from "../agents/sandbox/config.js";
 import { SESSION_PERMISSION_BY_EXEC_MODE } from "../agents/session-permission-exec-mode.js";
+import { readUtilityModelSetting } from "../agents/utility-model-setting.js";
+import { resolveConfiguredPrimaryModelForAgent } from "../agents/utility-model.js";
 import { insideGitCheckout } from "../agents/worktrees/git.js";
 import { getRuntimeConfig } from "../config/io.js";
 import { resolveAgentModelFallbackValues } from "../config/model-input.js";
@@ -61,7 +67,7 @@ export function resolveDeletedAgentIdFromSessionKey(
   cfg: OpenClawConfig,
   sessionKey: string,
   entry?: SessionEntry | null,
-  options?: { acpMetadataSessionKey?: string | null },
+  options?: { acpMetadataSessionKey?: string | null; acpMeta?: SessionEntry["acp"] | null },
 ): string | null {
   const parsed = parseAgentSessionKey(sessionKey);
   if (!parsed) {
@@ -75,12 +81,15 @@ export function resolveDeletedAgentIdFromSessionKey(
     // Free ACP runtime keys use agent:<harnessId>:acp:<uuid>, but key shape is
     // not proof: ACP bridge sessions can use ACP-shaped keys without SessionAcpMeta.
     // Configured acp:binding keys stay owner-scoped even when ACP metadata exists.
-    const acpMeta = readAcpMetaForDeletedAgentCheck({
-      cfg,
-      sessionKey,
-      entry,
-      acpMetadataSessionKey: options?.acpMetadataSessionKey,
-    });
+    const acpMeta =
+      options?.acpMeta !== undefined
+        ? options.acpMeta
+        : readAcpMetaForDeletedAgentCheck({
+            cfg,
+            sessionKey,
+            entry,
+            acpMetadataSessionKey: options?.acpMetadataSessionKey,
+          });
     if (acpMeta) {
       return null;
     }
@@ -312,13 +321,16 @@ function resolveGatewayAgentModel(
   // Agent rows expose model identity to clients; credential-profile binding stays in
   // canonical config and is consumed only by execution-time model selection.
   const primary = `${resolvedModel.provider}/${resolvedModel.model}`;
+  const utilityOnly =
+    !resolveConfiguredPrimaryModelForAgent({ cfg, agentId }) &&
+    readUtilityModelSetting(cfg, agentId).kind === "explicit";
   const fallbackOverride = resolveAgentModelFallbacksOverride(cfg, agentId);
   const defaultFallbacks = resolveAgentModelFallbackValues(cfg.agents?.defaults?.model);
   const fallbacks = normalizeFallbackList(
     (fallbackOverride ?? defaultFallbacks).map((value) => splitTrailingAuthProfile(value).model),
   );
   return {
-    primary,
+    ...(utilityOnly ? {} : { primary }),
     ...(fallbacks.length > 0 ? { fallbacks } : {}),
   };
 }
@@ -337,7 +349,7 @@ function resolvedPermissionLabel(
     : undefined;
 }
 
-export function listAgentsForGateway(
+export async function listAgentsForGateway(
   cfg: OpenClawConfig,
   modelCatalog?: ModelCatalogEntry[],
   options?: {
@@ -345,15 +357,16 @@ export function listAgentsForGateway(
     includeSystem?: boolean;
     httpAvatarBasePath?: string;
   },
-): {
+): Promise<{
   defaultId: string;
   ownership: GatewayAgentOwnership;
   selectionRequired: boolean;
   mainKey: string;
   scope: SessionScope;
   agents: GatewayAgentRow[];
-} {
+}> {
   const basic = listGatewayAgentsBasic(cfg);
+  const provenanceRecords = await listAgentProvenance();
   const execApprovals = loadExecApprovals();
   const identityById = new Map<string, GatewayAgentRow["identity"]>();
   for (const entry of listAgentEntries(cfg)) {
@@ -386,7 +399,7 @@ export function listAgentsForGateway(
     ? basic.agents
     : basic.agents.filter((entry) => entry.kind !== "system");
   const provenanceById = new Map(
-    listAgentProvenance().map((record) => [record.agentId, record] as const),
+    provenanceRecords.map((record) => [record.agentId, record] as const),
   );
   const agents = roster.map((entry) => {
     const { id } = entry;
@@ -399,6 +412,16 @@ export function listAgentsForGateway(
         : undefined;
     const resolvedModel = resolveDefaultModelForAgent({ cfg, agentId: id });
     const model = resolveGatewayAgentModel(cfg, id, resolvedModel);
+    const utilitySetting = readUtilityModelSetting(cfg, id);
+    const selectionParams = { cfg, agentId: id, defaultProvider: resolvedModel.provider };
+    const utility =
+      utilitySetting.kind === "explicit"
+        ? resolveModelRefFromString({
+            ...selectionParams,
+            raw: utilitySetting.modelRef,
+            aliasIndex: buildModelAliasIndex(selectionParams),
+          })?.ref
+        : undefined;
     const sessionKey = resolveAgentMainSessionKey({ cfg, agentId: id });
     const agentRuntime = projectWorkerPlacementAgentRuntime(
       resolveModelAgentRuntimeMetadata({
@@ -452,6 +475,7 @@ export function listAgentsForGateway(
         thinkingDefault: thinkingProfile.thinkingDefault,
       },
       { model },
+      utility ? { utilityModel: `${utility.provider}/${utility.model}` } : {},
       defaultPermissionMode ? { defaultPermissionMode } : {},
     );
     const provenance = provenanceById.get(id);

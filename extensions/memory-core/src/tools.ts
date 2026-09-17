@@ -41,7 +41,6 @@ import {
   resolveMemorySearchAbortError,
   runMemorySearchWithDeadline,
 } from "./memory/search-deadline.js";
-import { recordShortTermRecalls } from "./short-term-promotion.js";
 import {
   decorateCitations,
   resolveMemoryCitationsMode,
@@ -264,7 +263,7 @@ export function createMemorySearchTool(options: MemoryToolOptions) {
             buildMemorySearchUnavailableResult("Session transcript search is not enabled.", {
               warning: "Session transcript search is unavailable for this agent.",
               action:
-                'Enable memory.search.experimental.sessionMemory and add "sessions" to memory.search.sources, then retry memory_search.',
+                'If an exact session-history capability is available for this run, use it. Otherwise, ask the operator to enable semantic session search by enabling memory.search.experimental.sessionMemory and adding "sessions" to memory.search.sources.',
             }),
           );
         }
@@ -503,14 +502,18 @@ export function createMemorySearchTool(options: MemoryToolOptions) {
                 cfg,
               });
               if ((memory?.outcome === "ok" || memory?.outcome === "partial") && dreaming.enabled) {
-                void recordShortTermRecalls({
+                const recall = {
                   workspaceDir: memoryValue?.workspaceDir,
                   query,
                   results: recalled,
+                  nowMs: Date.now(),
                   timezone: dreaming.timezone,
-                }).catch(() => {
-                  // Gateway recall persistence stays off the reply latency path.
-                });
+                };
+                void import("./short-term-promotion-record.js")
+                  .then(({ recordShortTermRecalls }) => recordShortTermRecalls(recall))
+                  .catch(() => {
+                    // Gateway recall persistence stays off the reply latency path.
+                  });
               }
               const attempts = [
                 ...((requestedCorpus === "all" || memory?.outcome === "partial") && memory

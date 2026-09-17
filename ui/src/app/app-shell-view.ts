@@ -6,10 +6,7 @@ import { icons } from "../components/icons.ts";
 import { renderLazyElementModal } from "../components/lazy-view-error.ts";
 import { renderConnectingSplash } from "../components/loading-skeleton.ts";
 import { renderNewSessionLink } from "../components/new-session-link.ts";
-import {
-  renderLazySettingsSidebar,
-  type SettingsSidebarModule,
-} from "../components/settings-sidebar-lazy.ts";
+import { renderLazySettingsSidebar } from "../components/settings-sidebar-lazy.ts";
 import type { ThemeModeChangeDetail } from "../components/theme-mode-toggle.ts";
 import { t } from "../i18n/index.ts";
 import { canCallGatewayMethod } from "../lib/gateway-methods.ts";
@@ -20,6 +17,11 @@ import {
 import { readSessionMethodAccess } from "../lib/session-method-access.ts";
 import { normalizeAgentId, resolveUiSelectedSessionAgentId } from "../lib/sessions/session-key.ts";
 import { isTerminalAvailable } from "../lib/terminal-availability.ts";
+import {
+  debugOverlayTemplate,
+  renderPendingDebugOverlay,
+  type DebugOverlayFrameHost,
+} from "../pages/debug/debug-overlay-frame.ts";
 import type { NewSessionTarget } from "../pages/new-session/location.ts";
 import { pluginTabKey, pluginTabRefFromSearch } from "../pages/plugin/route.ts";
 import { renderPluginSurface } from "../plugins/control-ui-view.ts";
@@ -36,8 +38,8 @@ import type { ApplicationContext, ApplicationNavigationOptions } from "./context
 import { resolveControlUiAuthToken } from "./control-ui-auth.ts";
 import { gatewayPresentationScope } from "./gateway-presentation-scope.ts";
 import {
-  DEBUG_OVERLAY_ELEMENT,
   isOptionalElementDefined,
+  DEBUG_OVERLAY_ELEMENT,
   KEYBOARD_SHORTCUTS_ELEMENT,
   type LazyCustomElementRequestController,
   MACOS_TITLEBAR_ELEMENT,
@@ -71,7 +73,10 @@ import { createUpdateProgressWatcher } from "./update-confirmation.ts";
 
 const EMPTY_SESSION_HAS_DRAFT = () => false;
 
-export interface ShellViewHost extends DevicePairSetupHost {
+type SettingsSidebarHost = Parameters<typeof renderLazySettingsSidebar>[0];
+
+export interface ShellViewHost
+  extends DevicePairSetupHost, DebugOverlayFrameHost, SettingsSidebarHost {
   readonly context: ApplicationContext<RouteId> | undefined;
   readonly runtime: ApplicationRuntime | undefined;
   readonly activeSessionKey: string;
@@ -88,11 +93,7 @@ export interface ShellViewHost extends DevicePairSetupHost {
   readonly outboxStoreRuntime: OutboxStoreRuntime | null;
   readonly routeState: ShellRouteState;
   readonly settingsPreloadTimers: Map<EventTarget, ReturnType<typeof globalThis.setTimeout>>;
-  readonly settingsSidebarRenderer: SettingsSidebarModule["renderSettingsSidebar"] | null;
-  readonly settingsSidebarLoadFailed: boolean;
   readonly settingsSearchQuery: string;
-  loadSettingsSidebarRenderer(): void;
-  retrySettingsSidebarRenderer(): void;
   closeNavDrawer(options?: { restoreFocus?: boolean }): void;
   newSessionRouteAgentId(): string;
   enabledRouteIds(): readonly RouteId[];
@@ -171,7 +172,6 @@ export function renderApplicationShell(host: ShellViewHost) {
           context.basePath,
         )
       : null;
-  const activePluginTabId = activePluginRef ? pluginTabKey(activePluginRef) : "";
   // Onboarding renders without any navigation chrome, so the settings takeover
   // must not reserve its fixed sidebar column (the grid would stay off-center).
   const nativeEmbed = isNativeEmbedHost();
@@ -257,12 +257,13 @@ export function renderApplicationShell(host: ShellViewHost) {
   const uiSettings = context.theme.settings;
   // The new-session draft shares the chat layout: full-height pane that owns
   // its scrolling and pins the composer dock to the bottom.
-  const chatLikeRoute = sessionRoute || activeRoute === "new-session";
+  const chatLikeRoute = sessionRoute || activeRoute === "new-session" || activeRoute === "systems";
   if (!settingsTakeover && !nativeEmbed) {
     Object.assign(host.navigationSidebar, {
       basePath: context.basePath,
       activeRouteId: activeRoute,
-      activePluginTabId,
+      router: host.runtime.router,
+      activePluginTabId: activePluginRef ? pluginTabKey(activePluginRef) : "",
       enabledRouteIds: host.enabledRouteIds(),
       sessionKey: host.activeSessionKey,
       connected: gatewayConnected,
@@ -283,8 +284,6 @@ export function renderApplicationShell(host: ShellViewHost) {
       sidebarLiveActivity: uiSettings.sidebarLiveActivity !== false,
       pinnedAgentIds: navigationSnapshot.pinnedAgentIds,
       themeMode: context.theme.mode,
-      lobsterPetVisits: uiSettings.lobsterPetVisits !== false,
-      lobsterPetSounds: uiSettings.lobsterPetSounds === true,
       gatewayVersion: config.serverVersion ?? gatewaySnapshot.hello?.server?.version ?? null,
       devGitBranch: config.devGitBranch,
       watchUpdateProgress,
@@ -308,6 +307,9 @@ export function renderApplicationShell(host: ShellViewHost) {
           presentation: nativeEmbed ? (embedSettingsRoot ? "embed-list" : "embed-page") : "sidebar",
           basePath: context.basePath,
           activeRouteId: activeRoute,
+          agents: context.agents.state.agentsList?.agents ?? [],
+          agentIdentity: context.agentIdentity,
+          settingsAgentSelection: context.settingsAgentSelection,
           activePathname: host.routeState.location?.pathname ?? "",
           activeSearch: host.routeState.location?.search ?? "",
           activeHash: host.routeState.location?.hash ?? "",
@@ -388,7 +390,9 @@ export function renderApplicationShell(host: ShellViewHost) {
       lazyElementState?.status === "loading" &&
       lazyElementState.element === host.commandPaletteElement
         ? renderCommandPaletteLoading(() => host.lazyCustomElements.close())
-        : renderLazyElementModal(host.lazyCustomElements)
+        : lazyElementState?.element === DEBUG_OVERLAY_ELEMENT
+          ? renderPendingDebugOverlay(host, lazyElementState)
+          : renderLazyElementModal(host.lazyCustomElements)
     }
     ${
       isOptionalElementDefined(host.commandPaletteElement)
@@ -402,11 +406,7 @@ export function renderApplicationShell(host: ShellViewHost) {
           ></openclaw-command-palette>`
         : nothing
     }
-    ${
-      isOptionalElementDefined(DEBUG_OVERLAY_ELEMENT)
-        ? html`<openclaw-debug-overlay></openclaw-debug-overlay>`
-        : nothing
-    }
+    ${isOptionalElementDefined(DEBUG_OVERLAY_ELEMENT) ? debugOverlayTemplate : nothing}
     ${
       !nativeEmbed && isOptionalElementDefined(KEYBOARD_SHORTCUTS_ELEMENT)
         ? html`<openclaw-keyboard-shortcuts-dialog
@@ -639,7 +639,7 @@ export function renderApplicationShell(host: ShellViewHost) {
                 data-chat-autotype-exempt
                 .client=${gatewayConnected ? gatewaySnapshot.client : null}
                 .available=${desktopPanelAvailable}
-                .suppressed=${settingsTakeover || nativeEmbed}
+                .suppressed=${settingsTakeover || nativeEmbed || activeRoute === "systems"}
                 .basePath=${context.basePath}
               ></openclaw-desktop-panel>
             `

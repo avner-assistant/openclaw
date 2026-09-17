@@ -3,17 +3,16 @@ unset PR_MAIN_SHA
 PR_MAIN_SHA=""
 
 repo_root() {
+  # The entrypoint freezes this identity before a linked wrapper can delete
+  # its source directory. Post-removal checks must use the same owner.
+  if [ -n "${canonical_repo_root:-}" ]; then
+    printf '%s\n' "$canonical_repo_root"
+    return
+  fi
   # Resolve canonical repository root from git common-dir so wrappers work
   # the same from main checkout or any linked worktree.
   local base_dir
   local common_git_dir
-  # Anchor-exec handoff (see scripts/pr): the wrapper runs from materialized
-  # temp-dir bytes with no git context of its own; the handoff env carries the
-  # repository the run addresses.
-  if [ -n "${OPENCLAW_PR_ANCHOR_REPO_ROOT:-}" ]; then
-    (cd "$OPENCLAW_PR_ANCHOR_REPO_ROOT" && pwd)
-    return
-  fi
   base_dir="${script_parent_dir:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
   if common_git_dir=$(git -C "$base_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
@@ -217,14 +216,27 @@ checkout_pr_worktree_target() {
 }
 
 fetch_canonical_ref() {
-  local refspec="$1" root source git_dir
+  local refspec="$1" root source git_dir promisor filter=""
   shift
   root=$(repo_root) || return 1
   source=$(git -C "$root" remote get-url origin) || return 1
   git_dir=$(git rev-parse --absolute-git-dir) || return 1
   # Resolve relative URLs at the canonical root; ignore worktree origin/refmaps.
   # Other PRs and ordinary fetches own shared refs and the root FETCH_HEAD.
-  git -C "$root" --git-dir="$git_dir" fetch --no-tags --refmap= "$@" "$source" "$refspec"
+  # Automatic maintenance can prune unrelated worktree metadata, even on fetch.
+  set -- fetch --no-auto-maintenance --no-tags --refmap= "$@" "$source" "$refspec"
+  promisor=$(git -C "$root" config --bool remote.origin.promisor) || [ "$?" -eq 1 ] || return 1
+  if [ "$promisor" = true ]; then
+    filter=$(git -C "$root" config --get remote.origin.partialclonefilter) || [ "$?" -eq 1 ] || return 1
+    if [ -n "$filter" ]; then
+      # Literal URLs lose origin's filter; --filter would persist a new remote.
+      # Project the canonical promisor settings only for this fetch.
+      set -- "--config-env=remote.$source.promisor=PR_CANONICAL_FETCH_PROMISOR" \
+        "--config-env=remote.$source.partialclonefilter=PR_CANONICAL_FETCH_FILTER" "$@"
+    fi
+  fi
+  PR_CANONICAL_FETCH_PROMISOR="$promisor" PR_CANONICAL_FETCH_FILTER="$filter" \
+    git -C "$root" --git-dir="$git_dir" "$@"
 }
 
 fetch_canonical_main() {
@@ -284,6 +296,21 @@ refresh_main_snapshot() {
   PR_MAIN_SHA="$sha"
 }
 
+provision_pr_worktree() {
+  local root="$1" pr="$2" seed_sha="$3" provisioner_dir
+  provisioner_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+  # Runtime code and workspace aliases follow the wrapper's selected trust anchor.
+  # Pass current shell lock facts; the adapter consumes the owner's live predicate.
+  (
+    # The trusted wrapper pins installed packages; caller module-dir overrides
+    # must not redirect this source loader or reconcile its dependency links.
+    unset PNPM_CONFIG_MODULES_DIR pnpm_config_modules_dir npm_config_modules_dir
+    TSX_TSCONFIG_PATH="$provisioner_dir/../../tsconfig.json" \
+      node --import "$provisioner_dir/../tsx.mjs" "$provisioner_dir/worktree-provision.mts" \
+        "$root" "$pr" "$seed_sha" "$PR_OPERATION_LOCK_REF" "$PR_OPERATION_LOCK_OWNER_OID"
+  ) || return 1
+}
+
 enter_worktree() {
   # OR-list callers disable errexit throughout this function; guard required steps explicitly.
   local pr="$1"
@@ -302,34 +329,33 @@ enter_worktree() {
   # Fetch can launch helpers and mutate Git state even when it fails; leave validation first.
   mark_pr_operation_side_effects_started || return 1
 
-  # Resolve through the parent, never through the leaf: a missing directory has
-  # no real path of its own, and resolving a leaf symlink would silently adopt
-  # whichever worktree it aliases.
   local dir="$root/.worktrees/pr-$pr"
-  local resolved_parent resolved_dir="" initialized_sha=""
-  resolved_parent=$(resolve_existing_dir_path "$(dirname "$dir")" 2>/dev/null || true)
-  [ -z "$resolved_parent" ] || resolved_dir="$resolved_parent/pr-$pr"
+  local resolved_parent resolved_dir state registration initialized_sha=""
+  state=$(pr_worktree_state "$dir" "" entry) || return $?
+  resolved_dir=$(printf '%s\n' "$state" | jq -r '.path') || return $?
+  registration=$(worktree_registration_state "$resolved_dir") || return $?
 
-  if [ ! -d "$dir" ] || [ -z "$resolved_dir" ] || ! worktree_is_registered "$resolved_dir"; then
-    if [ -e "$dir" ] || { [ -n "$resolved_dir" ] && worktree_is_registered "$resolved_dir"; }; then
-      require_worktree_cleanup_evidence "$dir" || return 1
-      echo "Pruning stale worktree registration for .worktrees/pr-$pr"
-      git -C "$root" worktree prune || return 1
-      remove_worktree_if_present "$dir" || return 1
-      [ ! -e "$dir" ] || {
-        echo "Refusing scripts/pr operation for PR #$pr: $dir is not a registered worktree and could not be cleared; scripts/pr refuses to mutate the shared canonical checkout." >&2
-        return 1
-      }
+  if [ "$registration" != registered ] ||
+    ! printf '%s\n' "$state" | jq -e '.present' >/dev/null; then
+    if [ "$registration" = registered ] ||
+      printf '%s\n' "$state" | jq -e '.present or .admin != ""' >/dev/null; then
+      echo "Removing exact stale PR worktree .worktrees/pr-$pr"
     fi
+    remove_worktree_if_present "$dir" || return $?
     # Cold bootstrap needs one extra fetch before private FETCH_HEAD exists.
     # Initialize fully before the next network wait so interruption is retryable.
     # The PR lock owns this existing temp branch, not shared origin/main or FETCH_HEAD.
     PR_MAIN_SHA=""
     fetch_canonical_main "refs/heads/temp/pr-$pr" || return 1
-    git -C "$root" worktree add -B "temp/pr-$pr" "$dir" "refs/heads/temp/pr-$pr" || return 1
+    local seed_sha
+    seed_sha=$(GIT_NO_LAZY_FETCH=1 git -C "$root" rev-parse --verify "refs/heads/temp/pr-$pr^{commit}") || return 1
+    provision_pr_worktree "$root" "$pr" "$seed_sha" || return 1
     resolved_parent=$(resolve_existing_dir_path "$(dirname "$dir")") || return 1
     resolved_dir="$resolved_parent/pr-$pr"
     initialized_sha=$(git -C "$dir" rev-parse --verify HEAD) || return 1
+    state=$(pr_worktree_state "$dir" "" entry) || return $?
+    registration=$(worktree_registration_state "$resolved_dir") || return $?
+    [ "$registration" = registered ] || return 1
   fi
 
   cd "$resolved_dir" || return 1
@@ -338,9 +364,11 @@ enter_worktree() {
   # prove Git resolves it to this worktree before any branch moves. A directory
   # that is not a worktree lets discovery escape up into the shared canonical
   # checkout, where a sibling session's branch would be clobbered.
-  local actual_toplevel
+  local actual_toplevel actual_identity expected_identity
   actual_toplevel=$(resolve_existing_dir_path "$(git rev-parse --path-format=absolute --show-toplevel 2>/dev/null)" 2>/dev/null || true)
-  if [ "$actual_toplevel" != "$resolved_dir" ]; then
+  actual_identity=$(git rev-parse --path-format=absolute --git-dir --git-common-dir) || return $?
+  expected_identity=$(printf '%s\n' "$state" | jq -r '.admin, .common') || return $?
+  if [ "$actual_toplevel" != "$resolved_dir" ] || [ "$actual_identity" != "$expected_identity" ]; then
     echo "Refusing scripts/pr operation for PR #$pr: expected worktree $resolved_dir, Git resolved ${actual_toplevel:-no repository}; scripts/pr refuses to mutate the shared canonical checkout." >&2
     return 1
   fi
@@ -360,62 +388,65 @@ enter_worktree() {
 pr_meta_json() {
   local pr="$1"
   local metadata files expected_file_count actual_file_count head_before head_after head_after_json
-  metadata=$(read_pr_view_json "$pr" "number,title,state,isDraft,author,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,url,body,labels,assignees,changedFiles,additions,deletions,statusCheckRollup,files") || return 1
+  local repo_json repo_nwo repo_url identity_filter identity_before identity_after
+  repo_json=$(gh_plain repo view --json nameWithOwner,url) || return 1
+  if ! repo_nwo=$(printf '%s\n' "$repo_json" | jq -er '.nameWithOwner | select(type == "string" and test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))') ||
+    ! repo_url=$(printf '%s\n' "$repo_json" | jq -er --arg repo "$repo_nwo" '.url | select(type == "string" and test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$") and endswith("/" + $repo))'); then
+    echo "Invalid base repository identity for PR #$pr." >&2
+    return 1
+  fi
+  # Pin the base repository, not the fork's headRepository. Keep the exact
+  # observed base/head pair; neither a local main ref nor a newer snapshot is a substitute.
+  identity_filter='
+    select(.number == $pr and .url == ($repo_url + "/pull/" + ($pr | tostring)))
+    | select(all(.baseRefOid, .headRefOid; type == "string" and test("^[0-9a-f]{40}$")))
+    | select(all(.baseRefName, .headRefName; type == "string" and length > 0))
+    | {number,url,baseRefOid,headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner}'
+  metadata=$(GH_REPO="$repo_nwo" read_pr_view_json "$pr" "number,title,state,isDraft,author,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,headRepositoryOwner,url,body,labels,assignees,changedFiles,additions,deletions,statusCheckRollup,files") || return 1
   head_before=$(pr_view_string_field "$metadata" "headRefOid" "$pr" "Retry review initialization.") || return 1
+  if ! identity_before=$(printf '%s\n' "$metadata" | jq -ceS --argjson pr "$pr" --arg repo_url "$repo_url" "$identity_filter"); then
+    echo "Invalid PR identity for #$pr: expected $repo_url/pull/$pr and complete base/head OIDs and refs." >&2
+    return 1
+  fi
   if ! expected_file_count=$(printf '%s\n' "$metadata" | jq -er '.changedFiles | if type == "number" and . >= 0 and . == floor then . else error("invalid changed file count") end' 2>/dev/null); then
     echo "Invalid PR metadata for #$pr: changedFiles must be a non-negative integer." >&2
     return 1
   fi
 
-  # `gh pr view --json files` is cacheable but stops at 100 entries. Use it
-  # when complete; only large or incomplete responses spend uncached REST quota.
-  files='[]'
-  if [ "$expected_file_count" -le 100 ]; then
-    files=$(printf '%s\n' "$metadata" | jq -c '
-      .files
-      | if type == "array"
-          and all(.[];
-            (.path | type == "string")
-            and (.additions | type == "number")
-            and (.deletions | type == "number")
-            and (.changeType | type == "string" and length > 0)
-          )
-        then map({
-            path: .path,
-            additions: .additions,
-            deletions: .deletions,
-            changeType: (
-              if (.changeType | ascii_downcase) == "removed"
-                or (.changeType | ascii_downcase) == "deleted"
-              then "DELETED"
-              else (.changeType | ascii_upcase)
-              end
-            )
-          })
-        else []
-        end
-    ' 2>/dev/null || printf '[]')
+  # gh truncates large file arrays at 100. A valid partial list (or a missing
+  # changeType on older gh versions) can use REST, but null is never an empty diff.
+  if ! printf '%s\n' "$metadata" | jq -e '
+    def count: type == "number" and . >= 0 and . == floor;
+    .changedFiles as $count | .files
+    | type == "array" and length <= $count
+      and all(.[]; (.path | type == "string" and length > 0)
+        and (.additions | count) and (.deletions | count))
+      and (map(.path) | length == (unique | length))
+  ' >/dev/null 2>&1; then
+    echo "Invalid PR file metadata for #$pr: files must be an explicit array of unique valid entries consistent with changedFiles; null or missing files are unavailable." >&2
+    return 1
   fi
-
-  actual_file_count=$(printf '%s\n' "$files" | jq -r 'length')
-  if [ "$actual_file_count" -ne "$expected_file_count" ]; then
-    local repo_nwo
-    repo_nwo=$(gh_plain repo view --json nameWithOwner --jq .nameWithOwner) || return 1
-    # Pin the base repository and revalidate every page before the final head check.
+  files=$(printf '%s\n' "$metadata" | jq -c '.files') || return 1
+  actual_file_count=$(printf '%s\n' "$files" | jq -r 'length') || return 1
+  if [ "$actual_file_count" -eq "$expected_file_count" ] &&
+    printf '%s\n' "$files" | jq -e 'all(.[]; .changeType | type == "string" and length > 0)' >/dev/null; then
+    files=$(printf '%s\n' "$files" | jq -c 'map({
+      path, additions, deletions,
+      changeType: (if (.changeType | ascii_downcase) == "removed" or (.changeType | ascii_downcase) == "deleted"
+        then "DELETED" else (.changeType | ascii_upcase) end)
+    })') || return 1
+  else
     if ! files=$(
       set -o pipefail
       gh_plain api --paginate "repos/$repo_nwo/pulls/$pr/files?per_page=100" -H 'Cache-Control: max-age=0' |
-        jq -cs '
-          add
+        jq -ces '
+          if length > 0 and all(.[]; type == "array") then add
+          else error("expected complete array pages") end
           | map({
               path: .filename,
               additions: .additions,
               deletions: .deletions,
-              changeType: (
-                if .status == "removed" then "DELETED"
-                else (.status | ascii_upcase)
-                end
-              )
+              changeType: (if .status == "removed" then "DELETED" else (.status | ascii_upcase) end)
             })
         '
     ); then
@@ -424,18 +455,29 @@ pr_meta_json() {
     fi
   fi
 
-  head_after_json=$(read_pr_view_json "$pr" "headRefOid") || return 1
+  head_after_json=$(GH_REPO="$repo_nwo" read_pr_view_json "$pr" "number,url,baseRefName,baseRefOid,headRefName,headRefOid,headRepository,headRepositoryOwner") || return 1
   head_after=$(pr_view_string_field "$head_after_json" "headRefOid" "$pr" "Retry review initialization.") || return 1
   if [ "$head_after" != "$head_before" ]; then
     echo "PR head changed while collecting file metadata for #$pr (started at $head_before, ended at $head_after). Retry review initialization." >&2
     return 1
   fi
+  if ! identity_after=$(printf '%s\n' "$head_after_json" | jq -ceS --argjson pr "$pr" --arg repo_url "$repo_url" "$identity_filter") ||
+    [ "$identity_after" != "$identity_before" ]; then
+    echo "PR base/head or repository identity changed or became unavailable while collecting file metadata for #$pr. Retry review initialization." >&2
+    return 1
+  fi
 
   if ! actual_file_count=$(
-    printf '%s\n' "$files" |
-      jq -er 'if type == "array" then length else error("expected an array") end'
+    printf '%s\n' "$files" | jq -er '
+      def count: type == "number" and . >= 0 and . == floor;
+      if type == "array" and all(.[];
+          (.path | type == "string" and length > 0)
+          and (.additions | count) and (.deletions | count)
+          and (.changeType | type == "string" and length > 0))
+        and (map(.path) | length == (unique | length))
+      then length else error("invalid or duplicate file entries") end'
   ); then
-    echo "Invalid paginated PR file metadata for #$pr: expected a JSON array." >&2
+    echo "Invalid paginated PR file metadata for #$pr: expected unique valid file entries." >&2
     return 1
   fi
   if [ "$actual_file_count" -ne "$expected_file_count" ]; then
@@ -540,8 +582,12 @@ gc_pr_worktrees() {
         if ! require_worktree_cleanup_evidence "$dir"; then
           echo "skipping $dir (merge evidence preserved)"
         elif [ "$dry_run" = "true" ]; then
-          echo "would remove $dir (PR #$pr state=$state)"
-          removed=$((removed + 1))
+          if remove_worktree_if_present "$dir" true; then
+            echo "would remove $dir (PR #$pr state=$state)"
+            removed=$((removed + 1))
+          else
+            echo "skipping $dir (cleanup incomplete)"
+          fi
         elif cleanup_pr_worktree "$dir"; then
           echo "removed $dir (PR #$pr state=$state)"
           removed=$((removed + 1))

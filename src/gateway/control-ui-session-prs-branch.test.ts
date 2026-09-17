@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
+import * as worktreeGit from "../agents/worktrees/git.js";
 import { loadSessionPullRequestReferences } from "./control-ui-session-pr-references.js";
 import { loadControlUiSessionPullRequests } from "./control-ui-session-prs.js";
 import {
@@ -15,7 +16,8 @@ import {
   testGitContext as context,
 } from "./control-ui-session-prs.test-support.js";
 
-vi.mock("./control-ui-session-pr-references.js", () => ({
+vi.mock("./control-ui-session-pr-references.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./control-ui-session-pr-references.js")>()),
   loadSessionPullRequestReferences: vi.fn(async () => []),
 }));
 
@@ -253,7 +255,7 @@ describe("session branch diff stats", () => {
     expect(await load()).toEqual(detached);
     expect(fetchImpl.mock.calls).toHaveLength(6);
     failureStatus = 503;
-    expect(await load()).toEqual(detached);
+    expect(await load()).toEqual({ ...detached, status: "unavailable" });
     failureStatus = 429;
     expect(await load()).toEqual({ ...detached, rateLimited: true });
     const callsAtBackoff = fetchImpl.mock.calls.length;
@@ -341,6 +343,7 @@ describe("session branch diff stats", () => {
     vi.mocked(loadSessionPullRequestReferences).mockResolvedValue([42]);
     let hasPull = false;
     let limited = false;
+    let referenceStatus = 503;
     const fetchImpl = routedFetch([
       {
         match: "/pulls?head=",
@@ -350,7 +353,7 @@ describe("session branch diff stats", () => {
             : githubJson(hasPull ? [pullListItem({ head: { ref: "feature" } })] : []),
       },
       { match: "/pulls/103469", response: () => githubJson({ additions: 1, deletions: 0 }) },
-      { match: "/pulls/42", response: () => githubJson({}, hasPull ? 503 : 404) },
+      { match: "/pulls/42", response: () => githubJson({}, hasPull ? referenceStatus : 404) },
       { match: "/repos/openclaw/openclaw", response: () => githubJson({ fork: false }) },
     ]);
     const load = () =>
@@ -371,9 +374,16 @@ describe("session branch diff stats", () => {
     const published = await load();
     expect(published.pullRequests).toMatchObject([{ number: 103469, state: "open" }]);
     expect(published.branch).toBeUndefined();
-    expect(published.status).toBeUndefined();
+    expect(published.status).toBe("unavailable");
+    expect(published.rateLimited).toBe(false);
     vi.mocked(loadSessionPullRequestReferences).mockRejectedValueOnce(new Error("indexing"));
     expect(await load()).toEqual(published);
+
+    referenceStatus = 404;
+    const recovered = await load();
+    expect(recovered.pullRequests).toEqual(published.pullRequests);
+    expect(recovered.branch).toBeUndefined();
+    expect(recovered.status).toBeUndefined();
 
     limited = true;
     vi.mocked(loadSessionPullRequestReferences).mockResolvedValue([43]);
@@ -449,14 +459,38 @@ describe("session branch diff stats", () => {
     expect(result.branch).toMatchObject({ additions: 3, deletions: 0 });
   });
 
-  it("omits the branch payload when the remote branch has nothing to compare", async () => {
-    await initializeFeatureBranch();
-    await trackRemote("feature");
-
-    const result = await loadBranchState();
-    // origin/feature == origin/main: GitHub would answer "nothing to compare".
-    expect(result.branch).toBeUndefined();
-  });
+  it.each(["none", "uncommitted", "unpushed"])(
+    "preserves %s local work at equal remote tips without recounting commits",
+    async (localWork) => {
+      await initializeFeatureBranch();
+      await trackRemote("feature");
+      if (localWork === "uncommitted") {
+        await appendFile("a.txt", "pending\n");
+      } else if (localWork === "unpushed") {
+        await appendCommit("a.txt", "pending\n", "local only");
+      }
+      const reads = vi.spyOn(worktreeGit, "runGitBytes");
+      try {
+        const result = await loadBranchState();
+        expect(result.branch).toEqual(
+          localWork === "none"
+            ? undefined
+            : {
+                owner: "openclaw",
+                repo: "openclaw",
+                branch: "feature",
+                additions: 1,
+                deletions: 0,
+                changedFiles: 1,
+              },
+        );
+        expect(reads).toHaveBeenCalled();
+        expect(reads.mock.calls.filter(([, args]) => args[0] === "rev-list")).toHaveLength(0);
+      } finally {
+        reads.mockRestore();
+      }
+    },
+  );
 
   it("reports local changes without createUrl until the branch exists on origin", async () => {
     await initializeFeatureBranch();
@@ -474,22 +508,26 @@ describe("session branch diff stats", () => {
     });
   });
 
-  it("reports uncommitted changes when the remote branch has nothing to compare", async () => {
-    await initializeFeatureBranch();
-    await trackRemote("feature");
-    await appendFile("a.txt", "pending\n");
-
-    const result = await loadBranchState();
-    // With equal remote refs, dirty work remains visible without a Create PR link.
-    expect(result.branch).toEqual({
-      owner: "openclaw",
-      repo: "openclaw",
-      branch: "feature",
-      additions: 1,
-      deletions: 0,
-      changedFiles: 1,
-    });
-  });
+  it.each(["missing object", "malformed ref"])(
+    "preserves unknown comparison behavior for equal remote tips with a %s",
+    async (problem) => {
+      await initializeFeatureBranch();
+      await trackRemote("feature");
+      const value = problem === "missing object" ? "1".repeat(40) : "not-an-object-id";
+      for (const branch of ["main", "feature"]) {
+        await fs.writeFile(
+          path.join(root, ".git", "refs", "remotes", "origin", branch),
+          `${value}\n`,
+        );
+      }
+      const result = await loadBranchState();
+      expect(result.branch?.createUrl).toBe(
+        problem === "missing object"
+          ? "https://github.com/openclaw/openclaw/pull/new/feature"
+          : undefined,
+      );
+    },
+  );
 
   it("drops the Create PR row once the pushed tip is a merged PR's head", async () => {
     const mergedHead = await initializeFeatureHead({ trackFeature: true });

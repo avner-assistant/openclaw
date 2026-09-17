@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { err, ok, type Result } from "@openclaw/normalization-core/result";
-import { USER_PREFS_PROFILE_KEY_LIMIT } from "../../packages/gateway-protocol/src/schema/users.js";
+import { USER_PREFS_PROFILE_KEY_LIMIT } from "../../packages/gateway-protocol/src/schema/user-profile-constants.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../infra/kysely-sync.js";
 import { tableExists } from "./openclaw-state-db-schema-helpers.js";
 import type { DB as OpenClawStateKyselyDatabase } from "./openclaw-state-db.generated.js";
@@ -181,21 +181,23 @@ export function writeUserPreferences(
     );
   }
   const updatedAtMs = Date.now();
-  for (const entry of serialized) {
+  if (serialized.length > 0) {
     executeSqliteQuerySync(
       sqlite,
       db
         .insertInto("user_preferences")
-        .values({
-          profile_id: profileId,
-          pref_key: entry.prefKey,
-          value_json: entry.valueJson,
-          updated_at_ms: updatedAtMs,
-        })
-        .onConflict((conflict) =>
-          conflict.columns(["profile_id", "pref_key"]).doUpdateSet({
+        .values(
+          serialized.map((entry) => ({
+            profile_id: profileId,
+            pref_key: entry.prefKey,
             value_json: entry.valueJson,
             updated_at_ms: updatedAtMs,
+          })),
+        )
+        .onConflict((conflict) =>
+          conflict.columns(["profile_id", "pref_key"]).doUpdateSet({
+            value_json: (eb) => eb.ref("excluded.value_json"),
+            updated_at_ms: (eb) => eb.ref("excluded.updated_at_ms"),
           }),
         ),
     );

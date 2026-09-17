@@ -5,6 +5,7 @@ import { resolvePathViaExistingAncestorSync } from "../../infra/boundary-path.js
 import { resolveUpdateFinalizationTimeoutMs } from "../../infra/update-finalization-budget.js";
 import { canResolveRegistryVersionForPackageTarget } from "../../infra/update-global.js";
 import { finishUpdateRun, recordUpdateRunPhase } from "../../infra/update-run-ledger.js";
+import { DEFAULT_UPDATE_STEP_TIMEOUT_MS } from "../../infra/update-run-timeouts.js";
 import { defaultRuntime } from "../../runtime.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../../state/openclaw-state-db-contract.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
@@ -12,7 +13,6 @@ import { VERSION } from "../../version.js";
 import { createUpdateProgress, type UpdateDisplayProgress } from "./progress.js";
 import {
   confirmUpdateDowngrade,
-  resolveNodeRunner,
   tryResolveInvocationCwd,
   type UpdateCommandOptions,
 } from "./shared.js";
@@ -40,10 +40,7 @@ import {
   resolveUpdateTargetEnv,
   withUpdateInProgressEnv,
 } from "./update-command-service-env.js";
-import {
-  gatewayServiceCommandUsesRoot,
-  resolvePackageRuntimePreflight,
-} from "./update-command-service-plan.js";
+import { resolvePackageRuntimePreflight } from "./update-command-service-plan.js";
 import type { UpdateCommandRecoveryState } from "./update-command-service.js";
 import { resolveUpdateCommandTarget } from "./update-command-target.js";
 import {
@@ -56,8 +53,6 @@ import {
   withUpdateFailureTriage,
 } from "./update-command-triage.js";
 import { withUpdateCommandRecoveryUnwind } from "./update-command-unwind.js";
-
-const DEFAULT_UPDATE_STEP_TIMEOUT_MS = 30 * 60_000;
 
 type PreparedUpdate = NonNullable<Awaited<ReturnType<typeof prepareUpdateCommand>>>;
 
@@ -72,21 +67,21 @@ export async function updateCommand(inputOpts: UpdateCommandOptions): Promise<vo
   );
   // Post-core children report phase results; the outer updater owns the run ledger.
   if (prepared.postCoreUpdateResume) {
-    return await withUpdateInProgressEnv(invocationCwd, async () => {
-      const { resumePostCoreUpdate } = await import("./update-execution.runtime.js");
-      await resumePostCoreUpdate({
+    return await withUpdateInProgressEnv(invocationCwd, async () =>
+      (await import("./update-execution.runtime.js")).resumePostCoreUpdate({
         root: prepared.discoveredRoot,
         channel: prepared.postCoreUpdateChannel,
         opts: inputOpts,
         timeoutMs: prepared.timeoutMs ?? DEFAULT_UPDATE_STEP_TIMEOUT_MS,
-      });
-    });
+      }),
+    );
   }
   return await withUpdateAdmissionReporting(inputOpts, async () => {
     const env = await resolveUpdateCommandAdmissionEnv({
       opts: inputOpts,
       root: prepared.servicePlan?.rootRedirect?.root ?? prepared.discoveredRoot,
       invocationCwd,
+      pkgOwnership: prepared.pkgOwnership,
     });
     const { updateStateNeedsInitialization } = await import("./update-command-initialization.js");
     if (await updateStateNeedsInitialization(env)) {
@@ -108,6 +103,7 @@ async function runAdmittedUpdate(
     root: prepared.servicePlan?.rootRedirect?.root ?? prepared.discoveredRoot,
     invocationCwd,
     initialization,
+    pkgOwnership: prepared.pkgOwnership,
   });
   const opts = { ...inputOpts, run };
   prepared.controlPlaneUpdateSentinelMeta = {
@@ -170,6 +166,7 @@ async function initializeAndRunUpdate(
   invocationCwd: string | undefined,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
+  const targetEnv = resolveUpdateTargetEnv({ baseEnv: env, nodeRunner: process.execPath });
   const runId = env.OPENCLAW_UPDATE_RUN_ID?.trim() || randomUUID();
   let handleFailure: Awaited<ReturnType<typeof prepareUpdateCommandFailureTriage>> | undefined;
   try {
@@ -177,7 +174,7 @@ async function initializeAndRunUpdate(
       (registerRun) =>
         withUpdateInProgressEnv(invocationCwd, () =>
           withUpdateCommandExecutor(runId, async (executor) => {
-            const target = await withOwnedManagedUpdateEnv(env, () =>
+            const target = await withOwnedManagedUpdateEnv(targetEnv, () =>
               resolveUpdateCommandTarget(
                 opts,
                 recoveryState,
@@ -229,7 +226,6 @@ async function initializeAndRunUpdate(
               timeoutMs: prepared.timeoutMs ?? DEFAULT_UPDATE_STEP_TIMEOUT_MS,
               startedAt: prepared.startedAt,
               progress,
-              jsonMode: Boolean(opts.json),
               managedServiceEnv: env,
               invocationCwd,
               honorPackageRoot:
@@ -271,7 +267,7 @@ async function initializeAndRunUpdate(
                   );
                 }
                 Object.assign(target, config);
-                await preflightUpdateCommandSchemas({
+                return await preflightUpdateCommandSchemas({
                   ...target,
                   shouldRestart: prepared.shouldRestart,
                   updateStepTimeoutMs: timeoutMs,
@@ -280,7 +276,7 @@ async function initializeAndRunUpdate(
                   opts,
                 });
               };
-              await checkSchemas();
+              const schemaPreflight = await checkSchemas();
               const initializationRuntime = await import("./update-command-initialization.js");
               await initializationRuntime.confirmFreshUpdateDowngrade({
                 target,
@@ -288,19 +284,22 @@ async function initializeAndRunUpdate(
                 controlPlaneUpdateSentinelMeta: prepared.controlPlaneUpdateSentinelMeta,
               });
               initialization.downgradeConfirmed = true;
-              const canRefreshManagedServiceNode =
-                prepared.shouldRestart &&
-                target.managedServiceNodeRunner !== undefined &&
-                (await gatewayServiceCommandUsesRoot({ root: target.root })) === true;
               const runtime = await resolvePackageRuntimePreflight({
+                ...target,
+                shouldRestart: prepared.shouldRestart,
                 target: target.packageRuntimeTarget,
                 timeoutMs,
                 nodeRunner: target.managedServiceNodeRunner,
-                fallbackNodeRunner: canRefreshManagedServiceNode ? resolveNodeRunner() : undefined,
+                service: schemaPreflight?.service,
+                invocationCwd,
               });
               if (!runtime.ok) {
-                const { error, failureFacts } = runtime;
-                return await target.refuseUpdate("node-runtime-preflight", error, failureFacts);
+                return await target.refuseUpdate(
+                  "node-runtime-preflight",
+                  runtime.error,
+                  runtime.failureFacts,
+                  runtime.recoverySteps,
+                );
               }
               target.packageUpdateNodeRunner = runtime.value.nodeRunner;
               if (schemas.state >= OPENCLAW_STATE_SCHEMA_VERSION) {
@@ -336,7 +335,7 @@ async function initializeAndRunUpdate(
                           invocationCwd,
                           progress: presentation.progress,
                           assertCurrent: fence.assertCurrent,
-                          checkSchemas,
+                          checkSchemas: async () => void (await checkSchemas()),
                         });
                       } finally {
                         presentation.dispose();
@@ -436,8 +435,14 @@ async function updateCommandInternal(
     opts,
     controlPlaneUpdateSentinelMeta,
   };
-  const refuseUpdate: typeof target.refuseUpdate = (reason, message, failureFacts) =>
-    reportPreMutationUpdateResult({ ...reportContext, reason, message, failureFacts });
+  const refuseUpdate: typeof target.refuseUpdate = (reason, message, failureFacts, recoverySteps) =>
+    reportPreMutationUpdateResult({
+      ...reportContext,
+      reason,
+      message,
+      failureFacts,
+      recoverySteps,
+    });
 
   recordUpdateRunPhase(
     run.runId,
@@ -454,19 +459,11 @@ async function updateCommandInternal(
     { env: run.env },
   );
   const schemaPreflight = await preflightUpdateCommandSchemas({
-    legacyConfigPlan,
-    root,
-    updateInstallKind,
-    switchToGit,
+    ...target,
     shouldRestart,
     updateStepTimeoutMs,
     invocationCwd,
-    managedServiceRootRedirect,
-    channel,
-    devTarget,
-    packageTargetSchemaVersions,
     packageTargetVersion: targetVersion ?? undefined,
-    packageInstallSpec,
     opts,
     refuseUpdate,
   });
@@ -551,29 +548,29 @@ async function updateCommandInternal(
   }
 
   if (updateInstallKind === "package") {
-    // Changing runners is safe only when this update owns and will rewrite the
-    // service; otherwise the unchanged unit could still restart on the stale Node.
-    const canRefreshManagedServiceNode =
-      shouldRestart &&
-      managedServiceNodeRunner !== undefined &&
-      (await gatewayServiceCommandUsesRoot({ root })) === true;
     const runtimePreflight = await resolvePackageRuntimePreflight({
+      ...target,
+      shouldRestart,
       target: packageRuntimeTarget,
       timeoutMs: updateStepTimeoutMs,
       nodeRunner: managedServiceNodeRunner,
-      fallbackNodeRunner: canRefreshManagedServiceNode ? resolveNodeRunner() : undefined,
+      service: schemaPreflight.service,
+      invocationCwd,
     });
     if (!runtimePreflight.ok) {
-      const { error, failureFacts } = runtimePreflight;
-      return await refuseUpdate("node-runtime-preflight", error, failureFacts);
+      return await refuseUpdate(
+        "node-runtime-preflight",
+        runtimePreflight.error,
+        runtimePreflight.failureFacts,
+        runtimePreflight.recoverySteps,
+      );
     }
-    const runtimeSelection = runtimePreflight.value;
-    packageUpdateNodeRunner = runtimeSelection.nodeRunner;
+    packageUpdateNodeRunner = runtimePreflight.value.nodeRunner;
     recoveryState.triageTarget.nodeRunner = packageUpdateNodeRunner;
-    if (runtimeSelection.replacedNodeRunner && !opts.json) {
+    if (runtimePreflight.value.replacedNodeRunner && !opts.json) {
       defaultRuntime.log(
         theme.warn(
-          `Managed gateway service Node (${runtimeSelection.replacedNodeRunner}) cannot run openclaw@${runtimeSelection.targetVersion ?? tag}.`,
+          `Managed gateway service Node (${runtimePreflight.value.replacedNodeRunner}) cannot run openclaw@${runtimePreflight.value.targetVersion ?? tag}.`,
         ),
       );
       defaultRuntime.log(

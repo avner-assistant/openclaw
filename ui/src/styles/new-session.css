@@ -318,34 +318,6 @@ html:is(.openclaw-native-macos, .openclaw-native-desktop) .new-session-page__inc
   max-width: min(40vw, 260px);
 }
 
-.agent-select--compact .agent-select__trigger,
-:root[data-theme-mode="light"] .agent-select--compact .agent-select__trigger {
-  width: auto;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.agent-select--compact .agent-select__trigger:hover:not(:disabled),
-.agent-select--compact .agent-select__trigger[aria-expanded="true"] {
-  color: var(--text);
-  background: color-mix(in srgb, var(--bg-hover) 84%, transparent);
-}
-
-.agent-select--compact .agent-select__avatar {
-  width: 18px;
-  height: 18px;
-}
-
-.agent-select--compact .agent-select__label {
-  max-width: min(32vw, 220px);
-}
-
 .new-session-page__trigger {
   display: inline-flex;
   align-items: center;
@@ -607,7 +579,6 @@ wa-popover.new-session-page__select::part(body) {
   box-shadow: var(--overlay-shadow);
 }
 
-.agent-select--compact .agent-select__menu-title,
 .new-session-page__menu-title {
   padding: 4px 8px 2px;
   color: var(--muted);
@@ -846,6 +817,17 @@ wa-popover.new-session-page__where-popover::part(body) {
   color: var(--muted);
   text-align: center;
   font-size: var(--control-ui-text-sm);
+}
+
+.new-session-page__environment-skeletons {
+  display: grid;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
+.new-session-page__environment-skeleton-row {
+  display: block;
+  height: 14px;
 }
 
 .new-session-page__menu-chevron {
@@ -1263,8 +1245,11 @@ wa-popover.new-session-page__where-popover::part(body) {
   }
 
   .new-session-page__trigger,
-  .agent-select--compact .agent-select__trigger,
-  :root[data-theme-mode="light"] .agent-select--compact .agent-select__trigger {
+  .new-session-page__select--agent .agent-select--compact .agent-select__trigger,
+  :root[data-theme-mode="light"]
+    .new-session-page__select--agent
+    .agent-select--compact
+    .agent-select__trigger {
     height: 32px;
     padding-inline: 6px;
     color: var(--text);
@@ -1481,10 +1466,11 @@ wa-popover.new-session-page__where-popover::part(body) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex: 0 0 24px;
-  width: 24px;
-  height: 24px;
-  padding: 3px;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  margin-right: -4px;
+  padding: 2px;
   border: 0;
   border-radius: 50%;
   color: inherit;
@@ -1498,8 +1484,8 @@ wa-popover.new-session-page__where-popover::part(body) {
 
 .new-session-page__connect-device svg {
   display: block;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
 }
 
 .new-session-page__cloud-choice-list + .new-session-page__environment-heading {

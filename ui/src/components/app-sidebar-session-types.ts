@@ -31,12 +31,20 @@ import { getSafeLocalStorage } from "../local-storage.ts";
 import type { CloudWorkerStopAction } from "./cloud-worker-stop.ts";
 import type { SessionPlacementState } from "./session-row-badges.ts";
 
+type SidebarAttentionRequest = {
+  kind: "question" | "approval";
+  id: string;
+  preview: string;
+  count: number;
+  createdAtMs: number;
+};
+
 export type SidebarSessionAttention =
   | { kind: "none" }
-  | { kind: "question" }
-  | { kind: "approval" }
+  | { kind: "question"; requests: readonly SidebarAttentionRequest[] }
+  | { kind: "approval"; requests: readonly SidebarAttentionRequest[] }
   | { kind: "agent"; note: string; icon: SessionAgentAttentionIconId }
-  | { kind: "error"; reason: string };
+  | { kind: "error"; reason: string; childLabel?: string };
 
 /** Client-owned attention that can name a session before its row is loaded. */
 export type SidebarKnownSessionAttention = {
@@ -46,7 +54,7 @@ export type SidebarKnownSessionAttention = {
 
 export const SIDEBAR_SESSION_NO_ATTENTION: SidebarSessionAttention = { kind: "none" };
 
-export function sidebarSessionAttentionPriority(attention: SidebarSessionAttention): number {
+function sidebarSessionAttentionPriority(attention: SidebarSessionAttention): number {
   switch (attention.kind) {
     case "question":
     case "approval":
@@ -60,6 +68,34 @@ export function sidebarSessionAttentionPriority(attention: SidebarSessionAttenti
     default:
       return attention satisfies never;
   }
+}
+
+/** Preserve request identity while combining a session or collapsed group's attention. */
+export function summarizeSidebarSessionAttention(
+  values: readonly SidebarSessionAttention[],
+): SidebarSessionAttention {
+  const pending = values
+    .flatMap((attention) =>
+      attention.kind === "question" || attention.kind === "approval" ? attention.requests : [],
+    )
+    .toSorted(
+      (a, b) =>
+        a.createdAtMs - b.createdAtMs || a.id.localeCompare(b.id) || a.kind.localeCompare(b.kind),
+    );
+  const first = pending[0];
+  if (first) {
+    return {
+      kind: first.kind,
+      requests: [
+        ...new Map(pending.map((request) => [`${request.kind}:${request.id}`, request])).values(),
+      ],
+    };
+  }
+  return (
+    values.toSorted(
+      (a, b) => sidebarSessionAttentionPriority(b) - sidebarSessionAttentionPriority(a),
+    )[0] ?? SIDEBAR_SESSION_NO_ATTENTION
+  );
 }
 
 export type SidebarRecentSession = {
@@ -213,6 +249,7 @@ export type SidebarSessionGroupMenuState = {
 
 export type SidebarSessionSortMode = "created" | "updated" | "people";
 export type SidebarSessionStatusFilter = "active" | "archived" | "all";
+export type SidebarEmptyGroupsMode = "filtering" | "always" | "never";
 export type SidebarSessionOwnerFilter = {
   ownerId: string | null;
   involvingMe: boolean;
@@ -255,6 +292,10 @@ export type SidebarSessionMutationScope = {
 
 export type SidebarSessionMutationResult = "completed" | "failed" | "stale";
 
+export type SidebarCatalogSessionMutationScope = SidebarSessionMutationScope & {
+  catalogGeneration: number;
+};
+
 export type SidebarSessionPatch = {
   archived?: boolean;
   pinned?: boolean;
@@ -281,7 +322,6 @@ const SIDEBAR_SESSION_CATALOG_GROUPING_STORAGE_KEY = "openclaw:sidebar:sessions:
 const SIDEBAR_SESSION_SHOW_PREVIEW_STORAGE_KEY = "openclaw:sidebar:sessions:show-preview";
 const SIDEBAR_SESSION_SHOW_CRON_STORAGE_KEY = "openclaw:sidebar:sessions:show-cron";
 const SIDEBAR_SESSION_SHOW_SYSTEM_STORAGE_KEY = "openclaw:sidebar:sessions:show-system";
-const SIDEBAR_SESSION_HIDE_EMPTY_GROUPS_STORAGE_KEY = "openclaw:sidebar:sessions:hide-empty-groups";
 const SIDEBAR_SESSION_STATUS_FILTER_STORAGE_KEY = "openclaw:sidebar:sessions:status-filter";
 const SIDEBAR_SESSION_SORT_MODE_STORAGE_KEY = "openclaw:sidebar:sessions:sort-mode";
 const SIDEBAR_SESSION_COLLAPSED_SECTIONS_STORAGE_KEY =
@@ -314,10 +354,6 @@ export function loadStoredSidebarSessionsShowPreview(): boolean {
 
 export function loadStoredSidebarSessionsShowSystem(): boolean {
   return getSafeLocalStorage()?.getItem(SIDEBAR_SESSION_SHOW_SYSTEM_STORAGE_KEY) === "true";
-}
-
-export function loadStoredSidebarSessionsHideEmptyGroups(): boolean {
-  return getSafeLocalStorage()?.getItem(SIDEBAR_SESSION_HIDE_EMPTY_GROUPS_STORAGE_KEY) === "true";
 }
 
 export function loadStoredSidebarSessionStatusFilter(): SidebarSessionStatusFilter {
@@ -407,10 +443,6 @@ export function storeSidebarSessionsShowPreview(show: boolean) {
 
 export function storeSidebarSessionsShowSystem(show: boolean) {
   getSafeLocalStorage()?.setItem(SIDEBAR_SESSION_SHOW_SYSTEM_STORAGE_KEY, String(show));
-}
-
-export function storeSidebarSessionsHideEmptyGroups(hide: boolean) {
-  getSafeLocalStorage()?.setItem(SIDEBAR_SESSION_HIDE_EMPTY_GROUPS_STORAGE_KEY, String(hide));
 }
 
 export function storeSidebarSessionStatusFilter(value: SidebarSessionStatusFilter) {

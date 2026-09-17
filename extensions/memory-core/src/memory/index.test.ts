@@ -70,23 +70,35 @@ describe("memory index", () => {
     ).run(model, providerKey, providerFixture.identityAlias.provider);
   }
 
-  it("does not prepare vector deletes after in-place reset drops a missing vector table", async () => {
+  it("rebuilds a missing vector table through forced sync with cached readiness", async () => {
     const cfg = createCfg({
       vectorEnabled: true,
     });
     const manager = await getFreshManager(cfg);
     trackManager(manager);
-    type VectorState = { available: boolean | null; dims?: number };
-    const vector = Reflect.get(manager, "vector") as VectorState;
-    vector.available = true;
-    vector.dims = 4;
-    Reflect.set(Reflect.get(manager, "database"), "vectorReady", Promise.resolve(true));
+    await manager.sync({ reason: "test", force: true });
+    const db = Reflect.get(manager, "db") as DatabaseSync;
+    expect(db.prepare("SELECT COUNT(*) AS count FROM memory_index_chunks_vec").get()).toEqual({
+      count: 1,
+    });
+    await expect(manager.probeVectorAvailability()).resolves.toBe(true);
+    expect(manager.status().vector).toMatchObject({ storeAvailable: true, dims: 4 });
+    db.exec("DROP TABLE memory_index_chunks_vec");
+    expect(
+      db.prepare("SELECT name FROM sqlite_master WHERE name = 'memory_index_chunks_vec'").get(),
+    ).toBeUndefined();
 
-    await expect(
-      Reflect.apply(Reflect.get(manager, "runInPlaceReindex"), manager, [
-        { reason: "test", force: true },
-      ]),
-    ).resolves.toBeUndefined();
+    await manager.sync({ reason: "test", force: true });
+    const chunks = db.prepare("SELECT id, text FROM memory_index_chunks ORDER BY id").all();
+    expect(chunks).toEqual([
+      { id: expect.any(String), text: expect.stringContaining("Alpha memory line.") },
+    ]);
+    expect(db.prepare("SELECT id FROM memory_index_chunks_vec ORDER BY id").all()).toEqual(
+      chunks.map(({ id }) => ({ id })),
+    );
+    expect(await manager.search("alpha")).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: "memory/2026-01-12.md" })]),
+    );
   });
 
   it("indexes memory files and searches", async () => {
@@ -247,7 +259,7 @@ describe("memory index", () => {
   });
 
   it.each(["none", "openai"])(
-    "indexes incomplete and mixed annotations promptly with provider %s",
+    "preserves incomplete and mixed annotations when indexing with provider %s",
     async (provider) => {
       await fs.writeFile(
         path.join(fixture.paths.workspace, "MEMORY.md"),
@@ -260,9 +272,8 @@ describe("memory index", () => {
       );
       const manager = await getFreshManager(createCfg({ provider }));
       try {
-        const started = performance.now();
+        // curated-annotations.test.ts in memory-host-sdk guards parser backtracking.
         await manager.sync({ reason: "test", force: true });
-        expect(performance.now() - started).toBeLessThan(3_000);
         const db = Reflect.get(manager, "db") as DatabaseSync;
         expect(
           db
@@ -1656,6 +1667,8 @@ describe("memory index", () => {
 
       expect(ftsMatchCount(markers.retained)).toBe(0);
       expect(ftsMatchCount(markers.trigger)).toBe(0);
+      // Hand ordinary dirty state to maintenance so recovery must use the retained queue.
+      manager.takeReindexRetryStateForMaintenance();
       const recoveryState = manager as unknown as {
         syncing: Promise<void> | null;
         queuedSessions: Map<string, unknown>;
@@ -1708,12 +1721,14 @@ describe("memory index", () => {
       trigger: "LIVE REJECTION RECOVERY TARGET 729",
     };
     const sessionKey = (sessionId: string) => `agent:main:live-rejection:${sessionId}`;
+    // Startup catchup must not consume the controlled sync mocks.
     const manager = await getFreshManager(
       createCfg({
         provider: "none",
         sources: ["sessions"],
         sessionMemory: true,
       }),
+      "cli",
     );
     let resolveActiveSync: (() => void) | undefined;
     const activeSyncGate = new Promise<void>((resolve) => {

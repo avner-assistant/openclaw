@@ -25,20 +25,22 @@ core feature, owned by the thread, stored with the agent, and they survive
 
 Open `/dashboards` to browse dashboard-enabled threads as a card gallery. Search
 by thread or author, filter by author, and sort by recent activity or title.
-Select a card to open its owning task with the dashboard as the focused main
-view. Choose **Restore split** to bring the side panel alongside it. An open
-Dashboards page updates as threads are renamed, archived, or deleted, including
+Stored sessions without a matching task URL remain visible as previews without an open link.
+Select a linked card to open its owning task using your personal presentation override
+or the dashboard’s shared default. In fullscreen, choose **Restore split** to
+bring the side panel alongside it. An open Dashboards page updates as threads
+are renamed, archived, or deleted, including
 after a Gateway reconnect.
 If a refresh fails, the page keeps the last loaded dashboards visible with a
 stale-data warning. Choose **Retry** to load the list again.
 
-The dashboard and its server-side thread preference follow you when you connect
-to the same Gateway from another device. The active dashboard tab and task
-layout remain per-device UI state. The browser retains layout and tab preferences
+The dashboard and its shared presentation default follow you when you connect
+to the same Gateway from another device. Personal presentation overrides, the
+active dashboard tab, and other task layout choices remain per-device UI state. The browser retains layout and tab preferences
 for up to 500 sessions, keeping the most recently changed entries when it reaches
 that limit. Ordinary task revisits restore the browser's saved arrangement for
-that task; opening a gallery card explicitly focuses the dashboard. Increasing
-the limit does not recover preferences already evicted by an older version.
+that task; gallery cards follow the same presentation preference. Increasing the
+limit does not recover preferences already evicted by an older version.
 
 The browser keeps the three most recently visited tasks in each pane loaded,
 including their dashboard widgets, while you switch tasks or visit Settings.
@@ -133,12 +135,29 @@ never needs the agent.
   **Auto height** from the widget menu to fit the content again.
 - **Tabs.** A board can have several pages — say, an overview tab and a
   focused tab with one big widget. Each tab remembers its widget layout.
+  Visited tabs stay loaded while the dashboard is retained, preserving local
+  filters and widget interactions when you switch back. Unvisited tabs load on
+  demand; changed content still refreshes, and removed tabs release their widgets.
 - **Dashboard view.** The board can occupy the main area or a resizable side
   panel. With Dashboard active in the side panel, choose **Swap** in the task
   toolbar, then **Focus** for a dashboard-only view. **Restore split** brings
   the side panel back. A tab with one full-width widget fills the focused
   dashboard edge to edge, without a card border or surrounding padding.
   Restoring the split or adding another widget brings back the normal spacing.
+- **Shared default.** In the task menu’s **Layout** submenu, choose **Use current
+  view as default** to save the current fullscreen or split view for this dashboard.
+  The action appears only while Dashboard is shown, you can edit the session, and
+  its current view differs from the shared default. Saving does not rearrange
+  anyone already viewing the dashboard; the default applies on subsequent opens
+  and revisits, including opens from the dashboard gallery.
+  Your browser’s deliberate **Focus** / **Restore split** choice takes precedence
+  over the shared default. Choosing the shared view again clears that personal
+  override. Applying a shared default does not create a personal override.
+  Dock position, dimensions, and other panels remain local. Existing browser
+  layouts without presentation provenance retain their complete saved layout
+  until you deliberately choose a presentation; OpenClaw does not guess whether
+  an older expansion was automatic. Local layout retention remains 500 sessions.
+  An explicit `?dashboard=expanded` link requests fullscreen for that visit only.
 - **Agent parity.** The agent's `dashboard` tool creates or updates trusted
   plugin widgets, moves, resizes, and removes widgets, manages tabs, switches
   the visible tab, and requests a split or expanded dashboard with
@@ -150,6 +169,17 @@ never needs the agent.
   `registeredContentKind`; remove a widget before replacing its content owner
   or registered source kind.
   Ask "show the finance tab and expand the dashboard" and watch it happen.
+
+  To publish the initial view instead, use `dashboard` with
+  `action: "set_default_presentation"` and `presentation: "split"` or `"expanded"`.
+  This durable operation works without a connected browser. `action: "read"`
+  returns the effective `defaultPresentation`, which is `"split"` when unset.
+  Both the menu and agent use the same authorized `sessions.patch` mutation.
+  The optional `boardPresentation` metadata is stored with the session, survives
+  restart and `/new` or `/reset` of that session, and is removed with session
+  deletion. Patching `boardPresentation: null` restores the built-in split default.
+  No database schema migration or backfill is required. Older builds ignore this
+  presentation behavior; reverting does not remove boards or transcripts.
 
   Switching the visible tab or dashboard presentation requires a connected
   Control UI. If none is connected, the command returns `UNAVAILABLE`; open the
@@ -204,11 +234,15 @@ from custom HTML widgets and does not loosen their sandbox or network grants.
 
 ## Share a browser dashboard with your agent
 
-Use a **Browser dashboard** when you want your agent to read and interact with
-the same page you see:
+Ask for a **Browser dashboard** when you want a saved dashboard where your agent
+can read and interact with the same page you see:
 
 > Open this HTTP status app as a fullscreen dashboard. Pin this session as
 > Service Status, and use that same page when I ask you to change its filters.
+
+To show the browser beside chat, ask to open the
+[Browser side panel](/web/control-ui/panels#browser-panel). That opens the
+existing panel without creating a dashboard widget or expanding the board.
 
 The Browser plugin's `browser:dashboard` widget presents a tab in a local
 OpenClaw-managed browser. The Control UI streams that tab, so HTTP apps also

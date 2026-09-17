@@ -1,4 +1,7 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import type { SessionParticipantIdentity } from "../../../packages/gateway-protocol/src/schema/session-participant.js";
+import type { ControlUiNavigationItem } from "../../../src/plugin-sdk/control-ui.js";
+import type { GatewayControlUiPluginTab } from "../api/gateway.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../api/types.ts";
 import { SIDEBAR_NAV_ROUTES } from "../app-navigation.ts";
 import type { RouteId } from "../app-route-paths.ts";
@@ -36,8 +39,12 @@ import {
   resolveUiSessionNavigationParentKey,
 } from "../lib/sessions/session-key.ts";
 import { reconcileSidebarZone } from "../lib/sidebar-zone.ts";
+import { pluginTabKey } from "../pages/plugin/route.ts";
+import type { ControlUiRegistration } from "../plugins/control-ui-capability.ts";
+import { sidebarPluginTabs } from "./app-sidebar-nav-menus.ts";
 import {
   SIDEBAR_SESSION_NO_ATTENTION,
+  summarizeSidebarSessionAttention,
   type SidebarRecentSession,
   type SidebarSessionSortMode,
   type SidebarSessionStatusFilter,
@@ -53,13 +60,17 @@ export function resolveSidebarHomeAttention(
   sessionKey: string,
   row: GatewaySessionRow | null,
 ) {
-  const known = attention
-    .knownSessionAttention()
-    .find((entry) => areUiSessionKeysEquivalent(entry.sessionKey, sessionKey));
-  return (
-    known?.attention ??
-    (row ? attention.resolveSessionAttention(row) : SIDEBAR_SESSION_NO_ATTENTION)
+  const known = summarizeSidebarSessionAttention(
+    attention
+      .knownSessionAttention()
+      .filter((entry) => areUiSessionKeysEquivalent(entry.sessionKey, sessionKey))
+      .map((entry) => entry.attention),
   );
+  return known.kind !== "none"
+    ? known
+    : row
+      ? attention.resolveSessionAttention(row)
+      : SIDEBAR_SESSION_NO_ATTENTION;
 }
 
 type SidebarSessionSortOptions = {
@@ -303,8 +314,29 @@ export function buildSidebarSessionNavigationState(input: {
 export function buildReconciledSidebarZone(input: {
   sidebarEntries: readonly string[];
   rows: SidebarRecentSession[];
-  pluginNavigationKeys: ReadonlySet<string>;
+  pluginNavigation: readonly ControlUiRegistration<ControlUiNavigationItem>[];
+  pluginTabs: readonly GatewayControlUiPluginTab[] | undefined;
 }) {
+  const navigation = input.pluginNavigation;
+  const occupiedPlacements = new Set(input.sidebarEntries);
+  const pluginTabs = new Map(
+    sidebarPluginTabs(input.pluginTabs)
+      .filter(
+        (tab) =>
+          (!tab.placement || !occupiedPlacements.has(tab.placement)) &&
+          !navigation.some(
+            (entry) => entry.pluginId === tab.pluginId && entry.value.page.id === tab.id,
+          ),
+      )
+      .map((tab) => [pluginTabKey(tab), tab]),
+  );
+  const defaultPluginNavigationKeys = new Set([
+    ...pluginTabs.keys(),
+    ...navigation
+      .filter((entry) => entry.value.defaultVisible !== false)
+      .toSorted((a, b) => (a.value.order ?? 0) - (b.value.order ?? 0) || a.key.localeCompare(b.key))
+      .map((entry) => entry.key),
+  ]);
   const pinnedRows = input.rows.filter((row) => row.pinned);
   // Only loaded rows count as authoritative unpinned state; entries for
   // other agents' sessions must survive canonical writes untouched.
@@ -314,11 +346,14 @@ export function buildReconciledSidebarZone(input: {
     pinnedRows,
     SIDEBAR_NAV_ROUTES,
     knownUnpinnedKeys,
-    input.pluginNavigationKeys,
+    new Set([...pluginTabs.keys(), ...navigation.map((entry) => entry.key)]),
+    defaultPluginNavigationKeys,
   );
   return {
     ...reconciled,
     sessionRows: new Map(pinnedRows.map((row) => [row.key, row])),
+    pluginTabs,
+    defaultPluginNavigationKeys,
   };
 }
 
@@ -578,6 +613,64 @@ export function findProjectedSidebarSession(input: {
   return undefined;
 }
 
+function sessionParticipantIdentityKey(identity: SessionParticipantIdentity): string {
+  switch (identity.type) {
+    case "profile":
+    case "agent":
+      return JSON.stringify([identity.type, identity.id]);
+    case "remote":
+      return JSON.stringify([
+        identity.type,
+        identity.pluginId,
+        identity.domain,
+        identity.idKind,
+        identity.id,
+      ]);
+    case "observation":
+      return JSON.stringify([
+        identity.type,
+        identity.pluginId,
+        identity.accountId,
+        identity.senderKind,
+        identity.id,
+      ]);
+    case "legacy":
+      return JSON.stringify([identity.type, identity.actorType, identity.source, identity.id]);
+    default:
+      return identity satisfies never;
+  }
+}
+
+function hasMultipleSidebarSessionIdentities(
+  ownerOptions: readonly SessionOwnerOption[],
+  rows: readonly SidebarRecentSession[],
+): boolean {
+  const identities = new Set(
+    ownerOptions.map((owner) =>
+      sessionParticipantIdentityKey(
+        owner.identity ?? {
+          type: owner.type === "human" ? "profile" : "agent",
+          id: owner.id,
+        },
+      ),
+    ),
+  );
+  if (identities.size >= 2) {
+    return true;
+  }
+  return someSidebarSessionInTree(rows, (row) => {
+    const participants = row.participants ?? [];
+    for (const participant of participants) {
+      identities.add(sessionParticipantIdentityKey(participant.identity));
+      if (identities.size >= 2) {
+        return true;
+      }
+    }
+    // A truncated participant projection cannot prove that the sidebar is single-user.
+    return (row.participantCount ?? participants.length) > participants.length;
+  });
+}
+
 export function applySidebarSessionOwnerFilter(input: {
   projected: SidebarRecentSession[];
   ownerFacet: SessionsListResult["owners"];
@@ -598,10 +691,7 @@ export function applySidebarSessionOwnerFilter(input: {
   const ownerOptions = selfOwner
     ? [selfOwner, ...facetOwners.filter((owner) => owner.id !== selfOwner.id)]
     : facetOwners;
-  const hasParticipants =
-    ownerOptions.length < 2 &&
-    someSidebarSessionInTree(input.projected, (row) => (row.participantCount ?? 0) > 0);
-  const ownershipVisible = ownerOptions.length >= 2 || hasParticipants;
+  const ownershipVisible = hasMultipleSidebarSessionIdentities(ownerOptions, input.projected);
   // An absent facet is unresolved during hydration. A present facet is the
   // Gateway's complete owner inventory, even when rows are owner-filtered.
   const selectedOwnerId = input.selectedOwnerId?.trim() || null;

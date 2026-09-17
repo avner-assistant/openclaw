@@ -19,12 +19,57 @@ backup.
 
 ## Recommended: `openclaw update`
 
-Detects your install type (npm, pnpm, Bun, or git), validates the candidate while
+Detects your install type (npm, pnpm, Bun, or git), checks the new version while
 the old Gateway serves, then activates and verifies the update.
 
 ```bash
 openclaw update
 ```
+
+Managed-service inspection is best effort. If the service manager is unavailable,
+including Linux hosts without systemd, the update continues and records a warning.
+It leaves unverified service definitions unchanged and skips their automatic
+restart. Restart the Gateway you launched manually after the update, or use its
+actual supervisor. Doctor still checks for active state writers before migrations.
+
+The installed 2026.9.4 updater can refuse with `managed-service-preflight` before
+the target code runs. To reach a release containing this repair, use the
+[manual package-manager procedure](/install/updating/update-methods#alternative-manual-npm-pnpm-or-bun)
+with the same owning package manager, prefix, and state/configuration. Back up
+first, stop the Gateway through its actual supervisor or foreground process owner,
+replace the package, run Doctor, and restart through that same owner.
+`--no-restart` cannot repair the old admission check.
+
+Registry updates inspect the exact candidate's Node requirement before staging.
+An incompatible runtime produces `node-runtime-preflight`, with the target
+version, required engine range, selected Node version, and an upgrade command.
+npm directory permission failures produce `global-install-permission-denied`,
+naming the directory, its owner when available, and the next action. Dry-run JSON
+includes these outcomes in `failures`; the update report and Doctor's update
+history retain recorded failures. The serving Gateway stays in place during
+these preflight checks.
+
+These checks run in the **installed updater**. Older updaters cannot gain new
+preflight behavior from the candidate they have not installed yet. If upgrading
+from an older release, check [Node requirements](/install/node) and the npm
+prefix's permissions first; see [update troubleshooting](/install/update-troubleshooting#node-and-global-install-permissions).
+
+<Note>
+On FreeBSD, OpenClaw 2026.9.4 can stop before staging an update with
+`managed handoff process start identity is unavailable`. Changing the target or
+adding `--no-restart` cannot repair the installed updater.
+
+For a pkg or Ports installation, update through pkg or Ports; do not overwrite
+its files with npm. For an npm-owned installation, use the
+[manual package-manager procedure](/install/updating/update-methods#alternative-manual-npm-pnpm-or-bun)
+from a separate shell, with the same owning npm, installation prefix, and
+Gateway state/configuration. Select a published version whose release notes
+include the FreeBSD fixes; changes on `main` are not a published release.
+
+Stop and start the Gateway through its actual supervisor or foreground process
+owner around the manual replacement. This recovery does not add CLI-managed
+FreeBSD rc.d service updates.
+</Note>
 
 An already-installed registry package version or Git target SHA still runs plugin maintenance, repairs eligible old OpenClaw release pins, and restarts a running managed Gateway only when plugins change and `--no-restart` is not set; unchanged runs finish as `skipped` / `already-current`.
 
@@ -39,8 +84,8 @@ An explicit package artifact (for example, a tarball path or URL) is validated
 and installed even when its version matches; matching versions do not prove
 that two artifacts contain the same code.
 An explicit `--channel` choice still becomes the saved update channel.
-For targets that support candidate validation, Doctor lint, config and plugin planning, and a
-canary boot on copied state finish before the service stops. The stopped interval
+For versions that support checks before installation, health checks, config and plugin planning, and a
+test Gateway boot on copied state finish before the service stops. The stopped interval
 contains the swap, required migrations, plugin downloads and convergence, and
 service start. Plugin work uses the installed target without requiring a serving
 Gateway. A changed plugin snapshot runs fresh Doctor migrations before restart;
@@ -56,11 +101,17 @@ It preserves non-secret Gateway auth settings such as `gateway.auth.rateLimit`
 for policy checks, while using a temporary token and disabling Tailscale identity
 authentication.
 The activated Gateway retains your normal listener settings.
+The canary verifies the copied plugin payloads without downloading replacements.
+It warns when plugin refresh is deferred; live update finalization owns that
+refresh, so a slow registry cannot consume the canary's startup budget.
+This candidate-side behavior also applies when the installed updater is 2026.9.3.
+That older updater still caps the entire validation sequence at five minutes;
+its `--timeout` option cannot increase this cap.
 
 Package updates also check npm availability for enabled configured plugins before
 stopping the serving Gateway or replacing the installed core. Registry targets
 are checked early; explicit package artifacts are checked using the privately
-staged package version before rehearsal, live-state preparation, or activation.
+staged package version before private validation, live-state preparation, or activation.
 The check uses the same plugin version rules as post-update synchronization,
 including release-cohort tracking, beta selection, and extended-stable targets.
 A missing plugin version or registry error produces a warning naming the
@@ -191,6 +242,17 @@ fallback does not undo an earlier migration; if the database is already newer
 than the restored package, install a compatible target and finish Doctor before
 starting the Gateway.
 
+For a Git checkout updated by 2026.9.2, a Doctor refusal before state writes
+prints source recovery commands when the checkout's reflog identifies the
+previous commit unambiguously. Wait for the updater to exit, then follow the
+printed checkout, `pnpm install`, `pnpm build`, and service-start guidance from
+an independent shell. If the previous commit cannot be verified, Doctor points
+you to the reflog instead. A refusal after state repairs keeps the migration
+owner's instructions: restoring source alone does not restore state.
+These diagnostics also enter the warning log, subject to normal logging settings
+and rotation. After resolving the refusal cause, retry the update. Once the
+upgrade succeeds, subsequent updates check the new version before activation.
+
 ### From chat
 
 Ask the agent to update OpenClaw, or send `/update` from Discord or another
@@ -203,7 +265,7 @@ restrictions still apply.
 or access to the `gateway` tool. The tool, slash command, and Control UI all use
 the same Gateway update handler and current authorization checks.
 
-The candidate validates while the old Gateway serves, and an already-current
+The new version is checked while the old Gateway serves, and an already-current
 update restarts it only when plugins change. Update runs can send these notices
 in that chat as the Gateway observes the recorded milestones:
 
@@ -264,6 +326,42 @@ configured update channel and install method.
 Agents must never run `npm install -g openclaw` or stop the Gateway service
 from a chat shell; use `/update` or the update action so restart and notification
 stay coordinated.
+
+## Inspect FreeBSD service discovery
+
+The standalone `scripts/freebsd-service-inspect.mjs` diagnostic reports which
+`openclaw` rc.d definitions the native configuration selects. It requires a
+root-owned Node installation, script, and shared discovery helper. It does not
+require the OpenClaw Ports service package.
+
+From an existing root shell, install the script from a trusted OpenClaw package:
+
+```sh
+install -d -o root -g wheel -m 0755 /usr/local/libexec/lib
+install -o root -g wheel -m 0644 /path/to/openclaw/scripts/freebsd-service-inspect.mjs /usr/local/libexec/openclaw-service-inspect.mjs
+install -o root -g wheel -m 0644 /path/to/openclaw/scripts/lib/freebsd-service-discovery.mjs /usr/local/libexec/lib/freebsd-service-discovery.mjs
+(cd / && /usr/bin/env -i HOME=/ PATH=/sbin:/bin:/usr/sbin:/usr/bin LC_ALL=C /usr/local/bin/node /usr/local/libexec/openclaw-service-inspect.mjs)
+```
+
+Use your root-owned Node path if it differs. Clear the environment before Node
+starts, as shown, to exclude Node preload options. The command accepts no arguments.
+It reads native administrator shell configuration as root and requests no
+service lifecycle operation. Administrator configuration is trusted shell code,
+not a sandboxed data format.
+
+The result includes the exact clean environment and working directory used for
+discovery. It corresponds to `service` invoked with that same context. Configuration
+that depends on another environment or directory can select different services.
+
+The single JSON result reports `absent`, `present`, or `unknown`. Present results
+include executable and non-executable definitions, their native search order,
+and the first executable definition. Symlinks, unsafe ownership, incomplete
+inspection, or unexpected configuration output produce `unknown` and exit 1.
+Configuration contents and subprocess errors are not included in the result.
+
+This is a diagnostic observation. It does not establish process or package
+ownership, authorize an update, or enable CLI-managed rc.d service updates.
+Continue to use the installation owner's update procedure above.
 
 ## Stale update history
 
@@ -364,6 +462,16 @@ openclaw health
 ```
 
 </Steps>
+
+### Background exec notifications after an update
+
+`[OpenClaw exec completion]` identifies an automatic follow-up for a background
+command, rather than a recurring heartbeat poll. These follow-ups can run with
+`agents.defaults.heartbeat.every: "0m"`. To keep background exec without these
+extra model calls, set `tools.exec.notifyOnExit: false` and check per-agent
+overrides at `agents.entries.<id>.tools.exec.notifyOnExit`. Use `process poll` to
+collect results. See [Background exec notifications](/gateway/background-process#disable-automatic-completion-turns)
+for when the setting takes effect.
 
 <a id="rollback" />
 <a id="roll-back-a-package-install" />

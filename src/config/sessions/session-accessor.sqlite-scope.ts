@@ -1,5 +1,6 @@
 // Sanctioned low-level scope/Kysely entry point for doctor, migrations, and infrastructure.
 // Runtime feature code imports the session accessor barrel instead of this module.
+import { channel } from "node:diagnostics_channel";
 import { performance } from "node:perf_hooks";
 import { isMainThread, threadId } from "node:worker_threads";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
@@ -14,7 +15,6 @@ import {
   toAgentStoreSessionKey,
 } from "../../routing/session-key.js";
 import type { StoreWriterTiming } from "../../shared/store-writer-queue.js";
-import { withOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
 import {
   getOpenClawAgentDatabaseIfOpen,
@@ -59,6 +59,7 @@ type SessionSqliteDatabase = Pick<
   | "session_nodes"
   | "session_participants"
   | "session_pending_inputs"
+  | "session_input_completions"
   | "session_progress_cards"
   | "session_suggestions"
   | "session_transcript_archives"
@@ -107,7 +108,7 @@ export type SessionSqliteTargetResolutionCache = Map<
 
 const SQLITE_SESSION_SLOW_WRITE_MS = 1_000;
 const SQLITE_SESSION_WRITE_ERROR_MAX_CHARS = 2_048;
-const SQLITE_TRANSCRIPT_READ_QUERY_CHUNK_SIZE = 400;
+const sessionWriteDiagnostics = channel("openclaw.session.write");
 
 /** Checks the freshly read identity and lifecycle before a synchronous transcript mutation. */
 export function transcriptWriteScopeIsCurrent(
@@ -240,12 +241,6 @@ export async function runExclusiveSqliteSessionWrite<T>(
     ...(diagnostics?.workerThreadId !== undefined
       ? { workerThreadId: diagnostics.workerThreadId }
       : {}),
-    ...(diagnostics?.reclamationAdmission
-      ? {
-          reclamationAdmissionId: diagnostics.reclamationAdmission.admissionId,
-          reclamationAdmissionReleaseCause: diagnostics.reclamationAdmission.releaseCause,
-        }
-      : {}),
     ...(diagnostics?.artifactPreparation
       ? { artifactPreparation: artifactPreparationLogFields(diagnostics.artifactPreparation) }
       : {}),
@@ -261,30 +256,47 @@ export async function runExclusiveSqliteSessionWrite<T>(
         }
       : {}),
   });
+  const logFields = (completedAt: number) => ({
+    agentId: scope.agentId,
+    ...timingFields(completedAt),
+    ...(diagnostics?.reclamationAdmission
+      ? {
+          reclamationAdmissionId: diagnostics.reclamationAdmission.admissionId,
+          reclamationAdmissionReleaseCause: diagnostics.reclamationAdmission.releaseCause,
+        }
+      : {}),
+    storePath,
+  });
+  let completedAt = startedAt;
+  let outcome: "ok" | "error" = "ok";
   try {
     const result = await (writer === "worker"
       ? runOpenClawAgentWorkerWrite(databaseOptions, fn, timing)
       : runOpenClawAgentWriteAdmission(databaseOptions, fn, false, timing));
-    const completedAt = performance.now();
+    completedAt = performance.now();
     if (completedAt - startedAt >= SQLITE_SESSION_SLOW_WRITE_MS) {
-      getChildLogger({ subsystem: "session-sqlite" }).warn("slow SQLite session write", {
-        agentId: scope.agentId,
-        ...timingFields(completedAt),
-        storePath,
-      });
+      getChildLogger({ subsystem: "session-sqlite" }).warn(
+        "slow SQLite session write",
+        logFields(completedAt),
+      );
     }
     return result;
   } catch (error) {
+    outcome = "error";
+    completedAt = performance.now();
     getChildLogger({ subsystem: "session-sqlite" }).warn("SQLite session write failed", {
-      agentId: scope.agentId,
-      ...timingFields(performance.now()),
+      ...logFields(completedAt),
       error: truncateUtf16Safe(
         formatErrorMessageWithCode(error),
         SQLITE_SESSION_WRITE_ERROR_MAX_CHARS,
       ),
-      storePath,
     });
     throw error;
+  } finally {
+    if (sessionWriteDiagnostics.hasSubscribers) {
+      // Profiling retains fixed owner categories and timings, never database or admission identities.
+      sessionWriteDiagnostics.publish({ ...timingFields(completedAt), writer, outcome });
+    }
   }
 }
 
@@ -503,54 +515,6 @@ export function resolveSqliteTranscriptReadScope(
     ...resolveSqliteReadScope(scope, targetCache),
     sessionId: scope.sessionId,
   };
-}
-
-/** Borrow one store at a time so bounded registry eviction cannot invalidate a batched read. */
-export function readSqliteTranscriptStoreBatches<T>(
-  scopes: readonly SessionTranscriptReadScope[],
-  readChunk: (
-    database: Pick<OpenClawAgentDatabase, "db" | "path">,
-    sessionIds: readonly string[],
-  ) => Map<string, T>,
-): Array<T | undefined> {
-  const results: Array<T | undefined> = Array.from({ length: scopes.length });
-  const groups = new Map<
-    string,
-    { indexes: Map<string, number[]>; options: OpenClawAgentDatabaseOptions }
-  >();
-  const targetCache: SessionSqliteTargetResolutionCache = new Map();
-  for (const [index, scope] of scopes.entries()) {
-    const resolved = resolveSqliteTranscriptReadScope(scope, targetCache);
-    const options = toDatabaseOptions(resolved);
-    const databasePath = resolveOpenClawAgentSqlitePath(options);
-    const group = groups.get(databasePath) ?? { indexes: new Map(), options };
-    const indexes = group.indexes.get(resolved.sessionId) ?? [];
-    indexes.push(index);
-    group.indexes.set(resolved.sessionId, indexes);
-    groups.set(databasePath, group);
-  }
-  for (const group of groups.values()) {
-    withOpenClawAgentDatabaseReadOnly(
-      (database) => {
-        const sessionIds = [...group.indexes.keys()];
-        for (
-          let offset = 0;
-          offset < sessionIds.length;
-          offset += SQLITE_TRANSCRIPT_READ_QUERY_CHUNK_SIZE
-        ) {
-          const chunk = sessionIds.slice(offset, offset + SQLITE_TRANSCRIPT_READ_QUERY_CHUNK_SIZE);
-          for (const [sessionId, value] of readChunk(database, chunk)) {
-            for (const index of group.indexes.get(sessionId) ?? []) {
-              results[index] = value;
-            }
-          }
-        }
-      },
-      group.options,
-      { throwOnMissingTable: true },
-    );
-  }
-  return results;
 }
 
 export function toDatabaseOptions(

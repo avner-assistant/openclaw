@@ -355,6 +355,7 @@ describe("applyMediaUnderstanding", () => {
     vi.doMock("../media/media-services.js", () => ({
       runFfmpeg: runFfmpegMock,
       convertHeicToJpeg: convertHeicToJpegMock,
+      readImageMetadataFromHeader: () => null,
     }));
     vi.doMock("../process/exec.js", () => ({
       runExec: runExecMock,
@@ -917,7 +918,7 @@ describe("applyMediaUnderstanding", () => {
   it("auto-detects sherpa for audio when binary and model files are available", async () => {
     const binDir = await createTempMediaDir();
     const modelDir = await createTempMediaDir();
-    await createMockExecutable(binDir, "sherpa-onnx-offline");
+    const executablePath = await createMockExecutable(binDir, "sherpa-onnx-offline");
     await fs.writeFile(path.join(modelDir, "tokens.txt"), "a");
     await fs.writeFile(path.join(modelDir, "encoder.onnx"), "a");
     await fs.writeFile(path.join(modelDir, "decoder.onnx"), "a");
@@ -938,7 +939,7 @@ describe("applyMediaUnderstanding", () => {
 
     expect(ctx.Transcript).toBe("sherpa ok");
     const [command, args, options] = getRunExecCall();
-    expect(command).toBe("sherpa-onnx-offline");
+    expect(command).toBe(executablePath);
     expect(args).toEqual([
       `--tokens=${path.join(modelDir, "tokens.txt")}`,
       `--encoder=${path.join(modelDir, "encoder.onnx")}`,
@@ -952,7 +953,7 @@ describe("applyMediaUnderstanding", () => {
   it("skips auto-detected sherpa audio when structured output has empty text", async () => {
     const binDir = await createTempMediaDir();
     const modelDir = await createTempMediaDir();
-    await createMockExecutable(binDir, "sherpa-onnx-offline");
+    const executablePath = await createMockExecutable(binDir, "sherpa-onnx-offline");
     await fs.writeFile(path.join(modelDir, "tokens.txt"), "a");
     await fs.writeFile(path.join(modelDir, "encoder.onnx"), "a");
     await fs.writeFile(path.join(modelDir, "decoder.onnx"), "a");
@@ -976,13 +977,13 @@ describe("applyMediaUnderstanding", () => {
     expect(ctx.Transcript).toBeUndefined();
     expect(ctx.Body).toBe("[Audio attachment could not be analyzed]");
     const [command] = getRunExecCall();
-    expect(command).toBe("sherpa-onnx-offline");
+    expect(command).toBe(executablePath);
   });
 
   it("auto-detects whisper-cli when sherpa is unavailable", async () => {
     const binDir = await createTempMediaDir();
     const modelDir = await createTempMediaDir();
-    await createMockExecutable(binDir, "whisper-cli");
+    const executablePath = await createMockExecutable(binDir, "whisper-cli");
     const modelPath = path.join(modelDir, "tiny.bin");
     await fs.writeFile(modelPath, "model");
 
@@ -1001,8 +1002,8 @@ describe("applyMediaUnderstanding", () => {
     );
 
     expect(ctx.Transcript).toBe("whisper cpp ok");
-    const [command, args, options] = getRunExecCallForCommand("whisper-cli");
-    expect(command).toBe("whisper-cli");
+    const [command, args, options] = getRunExecCallForCommand(executablePath);
+    expect(command).toBe(executablePath);
     if (!Array.isArray(args)) {
       throw new Error("expected whisper-cli args");
     }
@@ -1026,7 +1027,7 @@ describe("applyMediaUnderstanding", () => {
   it("transcodes non-wav audio before auto-detected whisper-cli runs", async () => {
     const binDir = await createTempMediaDir();
     const modelDir = await createTempMediaDir();
-    await createMockExecutable(binDir, "whisper-cli");
+    const executablePath = await createMockExecutable(binDir, "whisper-cli");
     const modelPath = path.join(modelDir, "tiny.bin");
     await fs.writeFile(modelPath, "model");
 
@@ -1076,8 +1077,8 @@ describe("applyMediaUnderstanding", () => {
     expect(String(ffmpegArgs[11])).toContain("telegram-voice.wav");
     expect(String(ffmpegArgs[11]).endsWith(".part")).toBe(true);
 
-    const [command, args, options] = getRunExecCallForCommand("whisper-cli");
-    expect(command).toBe("whisper-cli");
+    const [command, args, options] = getRunExecCallForCommand(executablePath);
+    expect(command).toBe(executablePath);
     if (!Array.isArray(args)) {
       throw new Error("expected whisper-cli transcode args");
     }
@@ -2579,6 +2580,48 @@ describe("applyMediaUnderstanding", () => {
       mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     });
     expect(ctx.Body).not.toContain("approved local file path");
+  });
+
+  it("keeps agent enrichment separate when its setter changes published media text", async () => {
+    const ctx = await createAudioCtx({ body: "caption" });
+    const filePath = await createTempMediaFile({
+      fileName: "accessor-notes.txt",
+      content: "retained file context",
+    });
+    ctx.media = [...(ctx.media ?? []), { path: filePath, contentType: "text/plain" }];
+    let agentText: string | undefined;
+    Object.defineProperty(ctx, "agentText", {
+      configurable: true,
+      enumerable: true,
+      get: () => agentText,
+      set: (value: string | undefined) => {
+        agentText = value;
+        const output = ctx.MediaUnderstanding?.[0];
+        if (output) {
+          output.text = "changed transcript";
+        }
+      },
+    });
+
+    const result = await applyMediaUnderstanding({
+      ctx,
+      cfg: createGroqAudioConfig(),
+      providers: createGroqProviders("first transcript"),
+      processingMode: "audio-and-files",
+    });
+
+    expect(result).toMatchObject({ appliedAudio: true, appliedFile: true });
+    expect(ctx.agentText).toContain("Transcript:\nfirst transcript");
+    expect(ctx.agentText).not.toContain("changed transcript");
+    expect(ctx.Body).toContain("Transcript:\nchanged transcript");
+    expect(ctx.Body).not.toContain("first transcript");
+    expect(ctx.BodyForAgent).toBe(ctx.agentText);
+    expect(ctx.Transcript).toBe("first transcript");
+    for (const body of [ctx.agentText, ctx.Body]) {
+      expect(body).toContain('<file name="accessor-notes.txt" mime="text/plain">');
+      expect(body).toContain("retained file context");
+    }
+    await expect(fs.readFile(filePath, "utf8")).resolves.toBe("retained file context");
   });
 
   it.each(["prepared transcript", ""])(

@@ -28,12 +28,6 @@ import { createDeferredCore } from "../shared/deferred.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { hasSameTranscriptCaptureIntent } from "../transcripts/config-reload.js";
 import { resolveTranscriptsConfig } from "../transcripts/config.js";
-import {
-  canReadDetailedUpdateMetadata,
-  GATEWAY_EVENT_UPDATE_AVAILABLE,
-  projectUpdateAvailable,
-  type GatewayUpdateAvailableEventPayload,
-} from "./events.js";
 import type { GatewayBroadcastToConnIdsFn } from "./server-broadcast-types.js";
 import type { GatewayControlUiRootLifecycle } from "./server-control-ui-root.js";
 import type { GatewayRecoveryRuntime } from "./server-instance-runtime.types.js";
@@ -50,15 +44,13 @@ import {
   type GatewayStartupOutcomeRecorder,
 } from "./server-startup-outcomes.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
+import { createDeferredGatewayUpdateCheck } from "./server-startup-update-check.js";
 import {
   beginMacOSSystemCaWarmupOnce,
   type warmMacOSSystemCaOffMainThread,
 } from "./system-ca-warmup.js";
-import { startUpdateRunWatcher, wakeUpdateRunWatcher } from "./update-run-watcher.js";
 const ACP_BACKEND_READY_TIMEOUT_MS = 5_000;
 const ACP_BACKEND_READY_POLL_MS = 50;
-const DEFERRED_SIDECAR_START_DELAY_MS = 100;
-const SKIP_STARTUP_MODEL_PREWARM_ENV = "OPENCLAW_SKIP_STARTUP_MODEL_PREWARM";
 type Awaitable<T> = T | Promise<T>;
 
 const loadMainSessionRestartRecoveryModule = createLazyRuntimeModule(
@@ -88,15 +80,11 @@ export type GatewayPostReadySidecarHandle = {
     nextRegistry: PluginRegistry;
     changedPluginIds: ReadonlySet<string>;
     nextConfig: OpenClawConfig;
-  }) => { drain: () => Promise<void>; resume: (config: OpenClawConfig) => void };
+  }) => { drain: () => Promise<void>; resume: (config: OpenClawConfig) => Awaitable<void> };
 };
 
 function shouldCheckRestartSentinel(env: NodeJS.ProcessEnv = process.env): boolean {
   return !env.VITEST && env.NODE_ENV !== "test";
-}
-
-function shouldSkipStartupModelPrewarm(env: NodeJS.ProcessEnv = process.env): boolean {
-  return isTruthyEnvValue(env[SKIP_STARTUP_MODEL_PREWARM_ENV]);
 }
 
 function schedulePostReadySidecarTask(params: {
@@ -294,7 +282,26 @@ function scheduleTranscriptsAutoStartSidecar(params: {
         drain: async () => {
           await withPluginRuntimeRegistryScope(previousRegistry, () => service?.stop(affected));
         },
-        resume(resumedConfig) {
+        async resume(resumedConfig) {
+          const registry = params.getPluginRegistry();
+          const newlyAvailable = new Set<string>();
+          // Metadata preflight has no runtime provider aliases for newly enabled
+          // plugins. Retire their unavailable-provider retries once the real
+          // registration is published so capture resumes immediately.
+          for (const { providerId } of resolveTranscriptsConfig(config.transcripts).autoStart) {
+            const normalized = providerId.trim().toLowerCase();
+            const provider = findCapabilityProviderEntry(
+              registry.transcriptSourceProviders,
+              providerId,
+            );
+            if (provider && changedPluginIds.has(provider.pluginId) && !affected.has(normalized)) {
+              affected.add(normalized);
+              newlyAvailable.add(normalized);
+            }
+          }
+          if (newlyAvailable.size) {
+            await withPluginRuntimeRegistryScope(registry, () => service?.stop(newlyAvailable));
+          }
           config = resumedConfig;
           pausedProviders = undefined;
           start();
@@ -347,18 +354,6 @@ async function waitForAcpRuntimeBackendReady(params: {
   } while (performance.now() < deadline);
 
   return false;
-}
-
-async function prewarmConfiguredPrimaryModel(params: {
-  cfg: OpenClawConfig;
-  getConfig?: () => OpenClawConfig | Promise<OpenClawConfig>;
-  isCurrent?: () => boolean;
-  pluginMetadataSnapshot?: PluginMetadataSnapshot;
-  workspaceDir?: string;
-  log: { warn: (msg: string) => void };
-  startupTrace?: GatewayStartupTrace;
-}): Promise<void> {
-  await publishConfiguredModelRuntimeSnapshots(params);
 }
 
 type StartupExternalAuthHydrationDeps = {
@@ -427,7 +422,6 @@ async function publishConfiguredModelRuntimeSnapshots(params: {
   isCurrent?: () => boolean;
   pluginMetadataSnapshot?: PluginMetadataSnapshot;
   workspaceDir?: string;
-  log: { warn: (msg: string) => void };
   startupTrace?: GatewayStartupTrace;
 }): Promise<void> {
   const { refreshPreparedModelRuntimeSnapshots } =
@@ -475,24 +469,6 @@ async function publishConfiguredModelRuntimeSnapshots(params: {
   });
 }
 
-async function publishStartupModelRuntime(
-  params: {
-    cfg: OpenClawConfig;
-    getConfig?: () => OpenClawConfig | Promise<OpenClawConfig>;
-    isCurrent?: () => boolean;
-    pluginMetadataSnapshot?: PluginMetadataSnapshot;
-    workspaceDir?: string;
-    log: { warn: (msg: string) => void };
-    startupTrace?: GatewayStartupTrace;
-  },
-  prewarm: typeof prewarmConfiguredPrimaryModel = prewarmConfiguredPrimaryModel,
-): Promise<void> {
-  const publication = shouldSkipStartupModelPrewarm()
-    ? publishConfiguredModelRuntimeSnapshots
-    : prewarm;
-  await publication(params);
-}
-
 /** Start post-ready sidecars such as channels, hooks, plugin services, and cleanup tasks. */
 export async function startGatewaySidecars(params: {
   cfg: OpenClawConfig;
@@ -506,7 +482,6 @@ export async function startGatewaySidecars(params: {
   shouldStartChannels?: () => boolean;
   refreshChatMetadata?: () => Promise<void>;
   onChannelsStarted?: () => Awaitable<void>;
-  prewarmPrimaryModel?: typeof prewarmConfiguredPrimaryModel;
   onPluginServices?: (pluginServices: PluginServicesHandle | null) => void;
   onPostReadySidecars: (...sidecars: GatewayPostReadySidecarHandle[]) => void;
   shouldCreatePostReadySidecars?: () => boolean;
@@ -603,26 +578,22 @@ export async function startGatewaySidecars(params: {
   if ((await params.pluginRuntimeClaim?.waitForUnblocked()) !== false) {
     await measureStartup(params.startupTrace, "sidecars.model-runtime", () =>
       withPluginRuntimeRegistryScope(params.pluginRegistry, () =>
-        publishStartupModelRuntime(
-          {
-            cfg: params.cfg,
-            getConfig: async () =>
-              await measureStartup(params.startupTrace, "sidecars.model-auth", () =>
-                hydrateConfiguredExternalCliAuth({
-                  getConfig: getModelRuntimeConfig,
-                  log: params.log,
-                }),
-              ),
-            isCurrent: params.pluginRuntimeClaim?.isCurrent,
-            ...(params.pluginMetadataSnapshot
-              ? { pluginMetadataSnapshot: params.pluginMetadataSnapshot }
-              : {}),
-            workspaceDir: params.defaultWorkspaceDir,
-            log: params.log,
-            startupTrace: params.startupTrace,
-          },
-          params.prewarmPrimaryModel,
-        ),
+        publishConfiguredModelRuntimeSnapshots({
+          cfg: params.cfg,
+          getConfig: () =>
+            measureStartup(params.startupTrace, "sidecars.model-auth", () =>
+              hydrateConfiguredExternalCliAuth({
+                getConfig: getModelRuntimeConfig,
+                log: params.log,
+              }),
+            ),
+          isCurrent: params.pluginRuntimeClaim?.isCurrent,
+          ...(params.pluginMetadataSnapshot
+            ? { pluginMetadataSnapshot: params.pluginMetadataSnapshot }
+            : {}),
+          workspaceDir: params.defaultWorkspaceDir,
+          startupTrace: params.startupTrace,
+        }),
       ),
     );
   }
@@ -913,7 +884,7 @@ export async function startGatewaySidecars(params: {
               catalog,
               ref: hooksModelRef,
               defaultProvider: resolvedDefaultProvider,
-              defaultModel,
+              defaultModel: { provider: resolvedDefaultProvider, model: defaultModel },
             });
             if (!status.allowed) {
               params.logHooks.warn(
@@ -968,144 +939,6 @@ const defaultGatewayPostAttachRuntimeDeps: GatewayPostAttachRuntimeDeps = {
   loadSubagentRegistryActivation: async () =>
     (await import("../agents/subagents/registry/subagent-registry.js")).activateSubagentRegistry,
 };
-
-function createDeferredGatewayUpdateCheck(params: {
-  startupTrace?: GatewayStartupTrace;
-  runtimeDeps: GatewayPostAttachRuntimeDeps;
-  getConfig: () => OpenClawConfig;
-  log: {
-    info: (msg: string) => void;
-    warn: (msg: string) => void;
-  };
-  isNixMode: boolean;
-  broadcastToConnIds: GatewayBroadcastToConnIdsFn;
-  getClientConnIds: (filter?: (client: GatewayClient) => boolean) => ReadonlySet<string>;
-  waitForPostReadyWork?: () => Promise<void>;
-  activeWorkInspectors?: Partial<GatewayActiveWorkInspectors>;
-}): { start: () => void; stop: () => Promise<void> } {
-  let stopped = false;
-  let runWatcher: ReturnType<typeof startUpdateRunWatcher> | undefined;
-  let owner: ReturnType<typeof createGatewayUpdateCheck> | undefined;
-  let ownerReady: Promise<void> | undefined;
-  let initialization: Promise<unknown> | undefined;
-  let stopPromise: Promise<void> | undefined;
-  let latestUpdateAvailable: GatewayUpdateAvailableEventPayload["updateAvailable"] = null;
-  let latestSchedule: GatewayUpdateAvailableEventPayload["schedule"];
-
-  const broadcastUpdateAvailable = (payload: GatewayUpdateAvailableEventPayload) => {
-    if (stopped) {
-      return;
-    }
-    const detailedConnIds = params.getClientConnIds((client) =>
-      canReadDetailedUpdateMetadata(client.connect.role ?? "operator", client.connect.scopes ?? []),
-    );
-    const legacyConnIds = new Set(params.getClientConnIds());
-    for (const connId of detailedConnIds) {
-      legacyConnIds.delete(connId);
-    }
-    params.broadcastToConnIds(GATEWAY_EVENT_UPDATE_AVAILABLE, payload, detailedConnIds, {
-      dropIfSlow: true,
-    });
-    params.broadcastToConnIds(
-      GATEWAY_EVENT_UPDATE_AVAILABLE,
-      { updateAvailable: projectUpdateAvailable(payload.updateAvailable, false) ?? null },
-      legacyConnIds,
-      { dropIfSlow: true },
-    );
-  };
-
-  const stop = () => {
-    stopped = true;
-    return (stopPromise ??= (async () => {
-      // Fence immediately; a lazy factory that finishes later stops its own
-      // owner below. Never join the post-ready barrier during failed startup.
-      const cleanup = Promise.all([runWatcher?.stop(), owner?.stop()]);
-      await ownerReady;
-      await cleanup;
-      await initialization;
-    })());
-  };
-
-  const start = () => {
-    if (ownerReady || stopped) {
-      return;
-    }
-    runWatcher = startUpdateRunWatcher({
-      broadcast: (event, payload) =>
-        params.broadcastToConnIds(event, payload, params.getClientConnIds()),
-      log: params.log,
-    });
-    ownerReady = (async () => {
-      try {
-        owner = await params.runtimeDeps.createGatewayUpdateCheck({
-          getConfig: params.getConfig,
-          onUpdateRunCreated: wakeUpdateRunWatcher,
-          log: params.log,
-          isNixMode: params.isNixMode,
-          ...(params.activeWorkInspectors
-            ? { activeWorkInspectors: params.activeWorkInspectors }
-            : {}),
-          onUpdateAvailableChange: (updateAvailable) => {
-            latestUpdateAvailable = updateAvailable;
-            const payload: GatewayUpdateAvailableEventPayload = {
-              updateAvailable,
-              ...(latestSchedule ? { schedule: latestSchedule } : {}),
-            };
-            broadcastUpdateAvailable(payload);
-          },
-          onUpdateScheduleChange: (schedule) => {
-            latestSchedule = schedule;
-            const payload: GatewayUpdateAvailableEventPayload = {
-              updateAvailable: latestUpdateAvailable,
-              schedule,
-            };
-            broadcastUpdateAvailable(payload);
-          },
-        });
-      } catch (err) {
-        if (!stopped) {
-          params.log.warn(`gateway update check failed to initialize: ${String(err)}`);
-        }
-        return;
-      }
-      if (stopped) {
-        await owner.stop();
-        return;
-      }
-      // Local identity is ready before channel selection; remote discovery
-      // stays post-ready, but both already have the same shutdown owner.
-      const updateCheck = owner;
-      initialization = (async () => updateCheck.initialize())().catch((err: unknown) => {
-        if (!stopped) {
-          params.log.warn(`gateway update status failed to initialize: ${String(err)}`);
-        }
-      });
-    })();
-    void ownerReady.catch(() => {});
-    void (async () => {
-      await params.waitForPostReadyWork?.();
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
-      await ownerReady;
-      if (!stopped) {
-        await runWithGatewayIndependentRootWorkAdmission(
-          async () =>
-            await measureStartup(params.startupTrace, "post-attach.update-check", () =>
-              owner?.start(),
-            ),
-          "startup:update-check",
-        );
-      }
-    })().catch((err: unknown) => {
-      if (!stopped) {
-        params.log.warn(`gateway update check readiness wait failed: ${String(err)}`);
-      }
-    });
-  };
-
-  return { start, stop };
-}
 
 /** Start work that depends on the HTTP server being attached and visible. */
 export async function startGatewayPostAttachRuntime(
@@ -1318,13 +1151,14 @@ export async function startGatewayPostAttachRuntime(
       ? { start: () => {}, stop: async () => {} }
       : createDeferredGatewayUpdateCheck({
           startupTrace: params.startupTrace,
-          runtimeDeps,
+          createUpdateCheck: runtimeDeps.createGatewayUpdateCheck,
           getConfig: params.getConfig,
           log: params.log,
           isNixMode: params.isNixMode,
           broadcastToConnIds: params.broadcastToConnIds,
           getClientConnIds: params.getClientConnIds,
           waitForPostReadyWork: params.waitForPostReadyWork,
+          isClosing: params.isClosing,
           activeWorkInspectors: params.activeWorkInspectors,
         });
   if (!params.minimalTestGateway) {
@@ -1340,13 +1174,6 @@ export async function startGatewayPostAttachRuntime(
   };
   const waitForSidecarStartTurn = () =>
     new Promise<void>((resolve) => {
-      if (params.sidecarStartup === "defer") {
-        // Give startup logging and bind observers a deterministic head start
-        // when tests or callers request deferred sidecar startup.
-        const timer = setTimeout(resolve, DEFERRED_SIDECAR_START_DELAY_MS);
-        timer.unref?.();
-        return;
-      }
       setImmediate(resolve);
     });
 
@@ -1650,12 +1477,9 @@ export async function startGatewayPostAttachRuntime(
 }
 
 export const testing = {
-  prewarmConfiguredPrimaryModel,
   hydrateConfiguredExternalCliAuth,
   publishConfiguredModelRuntimeSnapshots,
-  publishStartupModelRuntime,
   refreshLatestUpdateRestartSentinelIfPresent,
   scheduleRestartSentinelWakeAfterReady,
-  shouldSkipStartupModelPrewarm,
 };
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

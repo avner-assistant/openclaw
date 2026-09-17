@@ -224,6 +224,12 @@ export async function recoverPendingWorkspaceResults(
     if (environmentId !== undefined && placement?.environmentId !== environmentId) {
       continue;
     }
+    if (placements.getPlacementMove(pending.sessionId)?.abandonSource) {
+      // Move recovery owns forced abandonment for this session. Preserve the
+      // pending result fence so recoverPlacementMoves can retire it under
+      // FORCED_WORKER_ABANDONMENT_ERROR and return to local placement.
+      continue;
+    }
     try {
       const pendingPlacement =
         placement?.state === "active" || placement?.state === "draining" ? placement : undefined;
@@ -573,7 +579,7 @@ export async function recoverPendingWorkspaceResults(
           assertPreservedEnvironment();
           placements.acceptWorkspaceResult(turnClaim);
           const recordedStagedResultRef = placements
-            .listPendingWorkspaceResults()
+            .listPendingWorkspaceResults(turnClaim.sessionId)
             .find(
               (result) =>
                 result.sessionId === turnClaim.sessionId &&
@@ -641,7 +647,7 @@ export async function recoverPendingWorkspaceResults(
       try {
         const current = placements.get(pending.sessionId);
         const currentPending = placements
-          .listPendingWorkspaceResults()
+          .listPendingWorkspaceResults(pending.sessionId)
           .find(
             (candidate) =>
               candidate.sessionId === pending.sessionId &&

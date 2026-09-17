@@ -395,6 +395,9 @@ function preserveSupportedTelegramHtmlTags(
   html: string,
   support: TelegramHtmlTagSupport = TELEGRAM_LEGACY_HTML_TAG_SUPPORT,
 ): string {
+  if (!html.includes("&lt;")) {
+    return html;
+  }
   let codeDepth = 0;
   let preDepth = 0;
   let result = "";
@@ -479,7 +482,7 @@ function wrapSegmentFileRefs(
   preDepth: number,
   anchorDepth: number,
 ): string {
-  if (!text || codeDepth > 0 || preDepth > 0 || anchorDepth > 0) {
+  if (codeDepth > 0 || preDepth > 0 || anchorDepth > 0 || !text.includes(".")) {
     return text;
   }
   const wrappedStandalone = text.replace(getFileReferencePattern(), wrapStandaloneFileRef);

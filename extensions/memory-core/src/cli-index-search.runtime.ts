@@ -2,7 +2,7 @@ import path from "node:path";
 import { resolveMemorySearchStaleness } from "openclaw/plugin-sdk/memory-core-host-engine-storage";
 import {
   resolveMemoryDreamingConfig,
-  resolveMemoryDreamingWorkspaces,
+  resolveMemoryDreamingWorkspace,
   resolveMemoryDeepDreamingConfig,
 } from "openclaw/plugin-sdk/memory-core-host-status";
 import {
@@ -32,6 +32,7 @@ import type {
   MemoryPromoteExplainOptions,
   MemorySearchCommandOptions,
 } from "./cli.types.js";
+import { resolveMemoryPromotionFileMaxChars } from "./memory-budget.js";
 import { forgetMemoryEntries } from "./memory-forget.js";
 import { captureMemoryRebuildNotice } from "./memory-rebuild-notice.js";
 import { formatMemoryVectorDegradedWriteReason } from "./memory/manager-vector-warning.js";
@@ -196,16 +197,10 @@ export async function runMemoryIndex(
   });
 }
 export async function runMemorySearch(
-  queryArg: string | undefined,
+  query: string,
   opts: MemorySearchCommandOptions,
   hostOptions?: MemoryCoreRuntimeHost,
 ) {
-  const query = opts.query ?? queryArg;
-  if (!query) {
-    defaultRuntime.error("Missing search query. Provide a positional query or use --query <text>.");
-    process.exitCode = 1;
-    return;
-  }
   await withMemoryCommand({
     commandName: "memory search",
     agent: opts.agent,
@@ -236,11 +231,10 @@ export async function runMemorySearch(
         });
       } catch (err) {
         const message = formatErrorMessage(err);
-        defaultRuntime.error(
+        throw new Error(
           [`Memory search failed: ${message}`, readRebuildWarning()].filter(Boolean).join(" "),
+          { cause: err },
         );
-        process.exitCode = 1;
-        return;
       }
       const status = manager.status();
       const staleness = resolveMemorySearchStaleness(status, agentId);
@@ -284,13 +278,6 @@ export async function runMemorySearch(
 }
 
 export async function runMemoryForget(opts: MemoryForgetCommandOptions) {
-  if (!opts.session?.length && !opts.hookSource?.length && !opts.participant?.length) {
-    defaultRuntime.error(
-      "Memory forget requires --session <id-or-key>, --hook-source <source>, or --participant <actor-id>.",
-    );
-    process.exitCode = 1;
-    return;
-  }
   try {
     const cfg = getRuntimeConfig({ skipPluginValidation: true });
     const agentId = resolveMemoryAgent(cfg, opts.agent);
@@ -353,8 +340,7 @@ export async function runMemoryForget(opts: MemoryForgetCommandOptions) {
     }
     defaultRuntime.log(lines.join("\n"));
   } catch (error) {
-    defaultRuntime.error(`Memory forget failed: ${formatErrorMessage(error)}`);
-    process.exitCode = 1;
+    throw new Error(`Memory forget failed: ${formatErrorMessage(error)}`, { cause: error });
   }
 }
 
@@ -396,9 +382,7 @@ export async function runMemoryPromote(
         cfg,
       });
       if (!workspaceDir) {
-        defaultRuntime.error("Memory promote requires a resolvable workspace directory.");
-        process.exitCode = 1;
-        return;
+        throw new Error("Memory promote requires a resolvable workspace directory.");
       }
       let candidates: Awaited<ReturnType<typeof rankShortTermPromotionCandidates>>;
       try {
@@ -416,18 +400,19 @@ export async function runMemoryPromote(
           includePromoted: Boolean(opts.includePromoted),
         });
       } catch (err) {
-        defaultRuntime.error(`Memory promote ranking failed: ${formatErrorMessage(err)}`);
-        process.exitCode = 1;
-        return;
+        throw new Error(`Memory promote ranking failed: ${formatErrorMessage(err)}`, {
+          cause: err,
+        });
       }
       let applyResult: Awaited<ReturnType<typeof applyShortTermPromotions>> | undefined;
       if (opts.apply) {
         try {
+          const workspaceAgentIds = resolveMemoryDreamingWorkspace(cfg, workspaceDir)?.agentIds ?? [
+            agentId,
+          ];
           applyResult = await applyShortTermPromotions({
             agentId,
-            workspaceAgentIds: resolveMemoryDreamingWorkspaces(cfg).find(
-              (workspace) => path.resolve(workspace.workspaceDir) === path.resolve(workspaceDir),
-            )?.agentIds,
+            workspaceAgentIds,
             workspaceDir,
             candidates,
             limit: opts.limit,
@@ -436,12 +421,17 @@ export async function runMemoryPromote(
             minUniqueQueries: opts.minUniqueQueries ?? dreaming.minUniqueQueries,
             maxAgeDays: dreaming.maxAgeDays,
             maxPromotedSnippetTokens: dreaming.maxPromotedSnippetTokens,
+            maxPriorEntryLossFraction: dreaming.maxPriorEntryLossFraction,
+            memoryFileMaxChars: resolveMemoryPromotionFileMaxChars({
+              cfg,
+              agentIds: workspaceAgentIds,
+            }),
             timezone: dreaming.timezone,
           });
         } catch (err) {
-          defaultRuntime.error(`Memory promote apply failed: ${formatErrorMessage(err)}`);
-          process.exitCode = 1;
-          return;
+          throw new Error(`Memory promote apply failed: ${formatErrorMessage(err)}`, {
+            cause: err,
+          });
         }
       }
       const outputLimit =
@@ -550,16 +540,10 @@ export async function runMemoryPromote(
   });
 }
 export async function runMemoryPromoteExplain(
-  selectorArg: string | undefined,
+  selector: string,
   opts: MemoryPromoteExplainOptions,
   hostOptions?: MemoryCoreRuntimeHost,
 ) {
-  const selector = selectorArg?.trim();
-  if (!selector) {
-    defaultRuntime.error("Memory promote-explain requires a non-empty selector.");
-    process.exitCode = 1;
-    return;
-  }
   await withMemoryCommand({
     commandName: "memory promote-explain",
     agent: opts.agent,
@@ -575,9 +559,7 @@ export async function runMemoryPromoteExplain(
         cfg,
       });
       if (!workspaceDir) {
-        defaultRuntime.error("Memory promote-explain requires a resolvable workspace directory.");
-        process.exitCode = 1;
-        return;
+        throw new Error("Memory promote-explain requires a resolvable workspace directory.");
       }
       let candidates: Awaited<ReturnType<typeof rankShortTermPromotionCandidates>>;
       try {
@@ -591,15 +573,13 @@ export async function runMemoryPromoteExplain(
           maxAgeDays: dreaming.maxAgeDays,
         });
       } catch (err) {
-        defaultRuntime.error(`Memory promote-explain failed: ${formatErrorMessage(err)}`);
-        process.exitCode = 1;
-        return;
+        throw new Error(`Memory promote-explain failed: ${formatErrorMessage(err)}`, {
+          cause: err,
+        });
       }
       const candidate = candidates.find((entry) => matchesPromotionSelector(entry, selector));
       if (!candidate) {
-        defaultRuntime.error(`No promotion candidate matched "${selector}".`);
-        process.exitCode = 1;
-        return;
+        throw new Error(`No promotion candidate matched "${selector}".`);
       }
       const thresholds = {
         minScore: dreaming.minScore,

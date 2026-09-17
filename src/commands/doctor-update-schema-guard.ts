@@ -8,11 +8,16 @@ import {
   preflightOpenClawDatabaseSchemas,
   type OpenClawDatabaseSchemaPreflight,
 } from "../state/openclaw-database-preflight.js";
+import { openDoctorStateSchemaReadAdmission } from "../state/openclaw-state-db-doctor-schema.js";
 import { tableExists } from "../state/openclaw-state-db-schema-helpers.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { readStateSchemaPublicationBlocker } from "../state/openclaw-state-schema-publication.js";
 import { UpdateSchemaRefusalError } from "../state/openclaw-update-schema-refusal.js";
 import { VERSION } from "../version.js";
+import {
+  recordUpdateDoctorRefusal,
+  resolveUpdateDoctorGitRecovery,
+} from "./doctor-update-refusal.js";
 
 async function readDrivingUpdater(): Promise<
   { version: string; canDeferStateSchema: boolean } | undefined
@@ -24,7 +29,9 @@ async function readDrivingUpdater(): Promise<
   });
   try {
     const database = openNodeSqliteDatabase(snapshot.location, { readOnly: true });
+    let closeSchemaReadAdmission: (() => void) | undefined;
     try {
+      closeSchemaReadAdmission = openDoctorStateSchemaReadAdmission(database);
       const blocker = readStateSchemaPublicationBlocker(database);
       return blocker
         ? {
@@ -33,8 +40,12 @@ async function readDrivingUpdater(): Promise<
           }
         : undefined;
     } finally {
-      clearNodeSqliteKyselyCacheForDatabase(database);
-      database.close();
+      try {
+        closeSchemaReadAdmission?.();
+      } finally {
+        clearNodeSqliteKyselyCacheForDatabase(database);
+        database.close();
+      }
     }
   } finally {
     await snapshot.cleanupAsync();
@@ -54,6 +65,7 @@ export async function guardUpdateDoctorSchemaUpgrade(options: {
     options.schemas ??
     (await preflightOpenClawDatabaseSchemas({
       env: process.env,
+      openStateSchemaReadAdmission: openDoctorStateSchemaReadAdmission,
     }));
   if (!schemas.pendingMigrations?.length) {
     return;
@@ -73,9 +85,14 @@ export async function guardUpdateDoctorSchemaUpgrade(options: {
   if (blockedMigrations.length === 0) {
     return;
   }
+  const recovery = await resolveUpdateDoctorGitRecovery();
   const error = new UpdateSchemaRefusalError(blockedMigrations, updater.version, {
     targetVersion: VERSION,
+    recovery,
   });
+  if (recovery) {
+    recordUpdateDoctorRefusal(error.message);
+  }
   if (options.json) {
     writeRuntimeJson(options.runtime, formatCliJsonFailure(error));
     exitCliAfterOutput(options.runtime, 1);

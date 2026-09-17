@@ -64,6 +64,117 @@ function createState(overrides: Partial<ChatState> = {}): ChatState {
   };
 }
 
+it.each(
+  [false, true].flatMap((persistedFirst) =>
+    [false, true].map((transformed) => ({ persistedFirst, transformed })),
+  ),
+)(
+  "settles a saved interrupted partial once with both error emitters (persisted first=$persistedFirst, transformed=$transformed)",
+  ({ persistedFirst, transformed }) => {
+    const runId = "interrupted-run";
+    const text = "The saved partial reply should appear once.";
+    const user = {
+      role: "user",
+      content: [{ type: "text", text: "Ask" }],
+      __openclaw: { id: "user", seq: 1, runId },
+    };
+    const saved = {
+      role: "assistant",
+      content: transformed
+        ? [
+            { type: "text", text: "Saved transformed text" },
+            { type: "image", source: { type: "url", url: "https://example.test/proof.png" } },
+          ]
+        : [{ type: "text", text }],
+      stopReason: "error",
+      __openclaw: {
+        id: "saved",
+        seq: 2,
+        runId,
+        mirrorOrigin: "codex-app-server",
+        idempotencyKey: "saved-key",
+      },
+    };
+    const state = createState({ chatMessages: [user], chatRunId: runId });
+    handleChatGatewayEvent(state, {
+      runId,
+      sessionKey: "main",
+      seq: 12,
+      state: "delta",
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    });
+    const persist = () =>
+      applySessionMessagePayload(state, { runId, message: saved }, true, { kind: "history-delta" });
+    if (persistedFirst) {
+      persist();
+    }
+    handleChatGatewayEvent(state, {
+      runId,
+      sessionKey: "main",
+      seq: 13,
+      state: "error",
+      errorMessage: "codex app-server client closed before turn completed",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        __openclaw: { runId, idempotencyKey: "saved-key" },
+      },
+    });
+    handleChatGatewayEvent(state, {
+      runId,
+      sessionKey: "main",
+      seq: 1,
+      state: "error",
+      errorMessage: "Outer returned failure",
+    });
+    if (!persistedFirst) {
+      persist();
+    }
+    expect(state.chatMessages).toEqual([user, saved]);
+    expect(state.chatRunError?.summary).toBeTruthy();
+    const restored = createState({ chatMessages: structuredClone(state.chatMessages) });
+    applySessionMessagePayload(restored, { runId, message: saved }, true, {
+      kind: "history-delta",
+    });
+    expect(restored.chatMessages).toEqual([user, saved]);
+  },
+);
+
+it("preserves receipt-less fallback ownership across cache before matching persistence", () => {
+  const runId = "unreceipted-run";
+  const user = {
+    role: "user",
+    content: [{ type: "text", text: "Ask" }],
+    __openclaw: { id: "user", seq: 1, runId },
+  };
+  const state = createState({ chatMessages: [user], chatRunId: runId, chatStream: "Partial" });
+  handleChatGatewayEvent(state, {
+    runId,
+    sessionKey: "main",
+    seq: 13,
+    state: "error",
+    errorMessage: "Interrupted",
+  });
+  const cached = structuredClone(state.chatMessages);
+  const restored = createState({ chatMessages: cached });
+  expect(getChatSessionProjection(restored).entries[1]).toMatchObject({
+    live: true,
+    pending: false,
+    afterSequence: 1,
+    identity: { runId },
+  });
+  const prior = {
+    role: "assistant",
+    content: [{ type: "text", text: "Partial" }],
+    __openclaw: { id: "prior", seq: 2, runId: "prior-run", runTerminal: true },
+  };
+  applySessionMessagePayload(restored, { message: prior }, true, { kind: "history-delta" });
+  expect(restored.chatMessages).toHaveLength(3);
+  const current = { ...prior, __openclaw: { id: "current", seq: 3, runId, runTerminal: true } };
+  applySessionMessagePayload(restored, { message: current }, true, { kind: "history-delta" });
+  expect(restored.chatMessages).toEqual([user, prior, current]);
+});
+
 it.each([false, true])(
   "completes an overtaken commentary item with formatting (persisted=%s)",
   (persisted) => {
@@ -4364,6 +4475,13 @@ describe("loadChatHistory retry handling", () => {
 
     expect(request.mock.calls.map(([method, params]) => [method, params])).toEqual([
       ["chat.history", { sessionKey: "main", limit: 80, maxBytes: 256 * 1024 }],
+    ]);
+    expect(state.chatMessages).toEqual([pending]);
+
+    staleHistory.resolve(createAssistantHistory("stale history"));
+    await firstLoad;
+    expect(request.mock.calls.map(([method, params]) => [method, params])).toEqual([
+      ["chat.history", { sessionKey: "main", limit: 80, maxBytes: 256 * 1024 }],
       [
         "chat.history",
         {
@@ -4374,10 +4492,6 @@ describe("loadChatHistory retry handling", () => {
         },
       ],
     ]);
-    expect(state.chatMessages).toEqual([pending]);
-
-    staleHistory.resolve(createAssistantHistory("stale history"));
-    await firstLoad;
     expect(state.chatMessages).toEqual([pending]);
     expect(state.chatLoading).toBe(true);
 

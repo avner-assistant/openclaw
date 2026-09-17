@@ -120,6 +120,7 @@ function createPage(pageSize = 2) {
     return () => eventListeners.delete(listener);
   };
   const agentSelection: ApplicationContext["agentSelection"] = {
+    intentRevision: 0,
     state: { selectedId: "harbor", scopeId: null },
     set: () => undefined,
     setScope: () => undefined,
@@ -205,7 +206,6 @@ describe("AgentsHomePage", () => {
     expect(request).toHaveBeenCalledWith(
       "sessions.list",
       expect.objectContaining({ includeLastMessage: true, offset: 2 }),
-      expect.anything(),
     );
 
     const openChat = cards[0]?.querySelector<HTMLElement>(".agents-home__open");

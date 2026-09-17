@@ -32,6 +32,7 @@ import {
 import { extractFirstTextBlock } from "../shared/chat-message-content.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 import * as sessionLifecycleState from "./session-lifecycle-state.js";
+import { removeChatTestDirectory as removeTempDir } from "./session-test-directories.test-support.js";
 import {
   agentDiscoveryMock,
   connectOk,
@@ -109,10 +110,6 @@ describe("gateway server chat", () => {
   beforeEach(() => {
     dispatchInboundMessageMock.mockReset();
   });
-
-  const removeTempDir = async (dir: string): Promise<void> => {
-    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-  };
 
   const buildNoReplyHistoryFixture = (includeMixedAssistant = false) => [
     createGatewayHistoryText("user", "hello", 1),
@@ -1473,8 +1470,10 @@ describe("gateway server chat", () => {
             (o) =>
               o.type === "event" &&
               o.event === "sessions.changed" &&
-              o.payload?.reason === "chat.dispatch-error" &&
-              o.payload?.sessionKey === "agent:main:main",
+              o.payload?.sessionKey === "agent:main:main" &&
+              o.payload?.status === "failed" &&
+              o.payload?.lastRunId === "idem-dispatch-error-1" &&
+              o.payload?.hasActiveRun === false,
             8_000,
           );
           messagePromises.push(sessionChangedPromise);
@@ -1688,6 +1687,27 @@ describe("gateway server chat", () => {
         { type: "message", content: JSON.stringify({ ok: true, messageId: "content-result" }) },
       ],
       visible: true,
+    },
+    {
+      name: "chat.history hides failed delivery encoded in a result text block",
+      content: [{ type: "text", text: JSON.stringify({ ok: false }) }],
+      visible: false,
+    },
+    {
+      name: "chat.history honors a dry-run result after an earlier success block",
+      content: [
+        { type: "text", text: JSON.stringify({ ok: true }) },
+        { type: "message", content: JSON.stringify({ dryRun: true }) },
+      ],
+      visible: false,
+    },
+    {
+      name: "chat.history honors suppressed delivery after an earlier success block",
+      content: [
+        { type: "text", text: JSON.stringify({ ok: true }) },
+        { type: "message", content: JSON.stringify({ deliveryStatus: "suppressed" }) },
+      ],
+      visible: false,
     },
     {
       name: "chat.history hides suppressed delivery encoded in a result text block",
@@ -3006,7 +3026,7 @@ describe("gateway server chat", () => {
     await withMainSessionStore(async () => {
       const runId = "idem-wait-chat-active-vs-stale-agent";
       const seedAgentRes = await rpcReq(ws, "agent", {
-        sessionKey: "main",
+        sessionKey: "agent:main:stale-wait-snapshot",
         message: "seed stale agent snapshot",
         idempotencyKey: runId,
       });

@@ -21,6 +21,7 @@ import {
   CHAT_HISTORY_BOUNDARY_HEIGHT_PX,
   renderChatHistoryBoundary,
 } from "./chat-history-boundary.ts";
+import "./chat-comment-pins.ts";
 import { renderChatPositionRail } from "./chat-position-rail.ts";
 import {
   handleTranscriptContextMenu,
@@ -155,11 +156,19 @@ function renderTranscriptShell(
         >${transcript.liveAnnouncementText}</span
       >
       ${renderChatPositionRail({
-        messages: projection.positionMessages,
+        positions: projection.positionIndex,
         transcript,
         requestUpdate: props.onRequestUpdate ?? (() => {}),
       })}
       ${transcriptContents}
+      ${
+        props.commentAttachments?.attachments?.some((attachment) => attachment.selectionAnnotation)
+          ? html`<openclaw-chat-comment-pins
+              .props=${props.commentAttachments}
+              .sessionKey=${props.sessionKey}
+            ></openclaw-chat-comment-pins>`
+          : nothing
+      }
     </div>
   `;
 }

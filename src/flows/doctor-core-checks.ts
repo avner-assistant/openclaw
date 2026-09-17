@@ -30,7 +30,7 @@ import {
   resolveKnownModelRefMigrationTarget,
 } from "../commands/doctor/shared/codex-route-warnings.js";
 import { isDefaultInstallIdentity } from "../config/paths.js";
-import type { ConfigValidationIssue, OpenClawConfig } from "../config/types.openclaw.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveSecretInputRef, type SecretRef } from "../config/types.secrets.js";
 import type { CronListPageResult } from "../cron/service/list-page-types.js";
 import type { CronJob } from "../cron/types.js";
@@ -44,6 +44,11 @@ import type { SecurityAuditFinding } from "../security/audit.types.js";
 import type { SkillStatusEntry } from "../skills/discovery/status.js";
 import { resolveSkillWorkshopConfig } from "../skills/workshop/config.js";
 import { detectSkillWorkshopToolPolicyDiagnostic } from "../skills/workshop/tool-policy-diagnostic.js";
+import {
+  configValidationIssuesToHealthFindings,
+  configValidationWarningsToHealthFindings,
+  FINAL_CONFIG_VALIDATION_CHECK_ID,
+} from "./doctor-config-validation-findings.js";
 import { hasActiveGatewayExecCredential } from "./doctor-gateway-exec-credential.js";
 import { removedWorkspacesStateCheck } from "./doctor-removed-workspaces-state-check.js";
 import { resolveDoctorWorkspaceSuggestionScopes } from "./doctor-workspace-suggestion-scopes.js";
@@ -58,7 +63,6 @@ import type {
 
 const BROWSER_CLAWD_PROFILE_RESIDUE_CHECK_ID = "core/doctor/browser-clawd-profile-residue";
 const CODEX_SESSION_ROUTES_CHECK_ID = "core/doctor/codex-session-routes";
-const FINAL_CONFIG_VALIDATION_CHECK_ID = "core/doctor/final-config-validation";
 const GATEWAY_DAEMON_CHECK_ID = "core/doctor/gateway-daemon";
 const GATEWAY_HEALTH_CHECK_ID = "core/doctor/gateway-health";
 const GATEWAY_SERVICES_EXTRA_CHECK_ID = "core/doctor/gateway-services/extra";
@@ -138,10 +142,10 @@ async function collectRuntimeToolSchemaFindingsWithRuntime(
       runWithPluginMetadataSnapshot?: PluginMetadataSnapshotScopeRunner;
     }
   ).runWithPluginMetadataSnapshot;
-  return runtime.collectRuntimeToolSchemaFindings(
-    ctx.cfg,
-    runWithPluginMetadataSnapshot ? { runWithPluginMetadataSnapshot } : undefined,
-  );
+  return runtime.collectRuntimeToolSchemaFindings(ctx.cfg, {
+    env: ctx.env,
+    ...(runWithPluginMetadataSnapshot ? { runWithPluginMetadataSnapshot } : {}),
+  });
 }
 
 async function collectProviderCatalogProjectionFindingsWithRuntime(
@@ -254,17 +258,6 @@ const defaultCoreHealthCheckDeps: CoreHealthCheckDeps = {
   collectGatewayDaemonFindings: collectGatewayDaemonFindingsWithRuntime,
   listGatewayCronJobs: listGatewayCronJobsWithRuntime,
 };
-
-export function configValidationIssuesToHealthFindings(
-  issues: readonly ConfigValidationIssue[],
-): readonly HealthFinding[] {
-  return issues.map((issue): HealthFinding => ({
-    checkId: FINAL_CONFIG_VALIDATION_CHECK_ID,
-    severity: "error",
-    message: issue.message,
-    path: issue.path || "<root>",
-  }));
-}
 
 const gatewayConfigCheck: HealthCheck = {
   id: "core/doctor/gateway-config",
@@ -558,7 +551,7 @@ const hooksModelCheck: HealthCheck = {
       catalog,
       ref: hooksModelRef,
       defaultProvider,
-      defaultModel,
+      defaultModel: { provider: defaultProvider, model: defaultModel },
     });
     const findings: HealthFinding[] = [];
     if (!status.allowed) {
@@ -762,7 +755,17 @@ function createModelReferenceCheck(): HealthCheck {
             },
           ];
         }
-        if (inspection.status === "unknown-model" && inspection.active) {
+        // A provider that ships no catalog rows cannot confirm or deny a model
+        // id offline; the generic advisory would be unactionable there, so only
+        // a legacy-reference migration is still worth reporting.
+        if (inspection.status === "uncatalogued-provider" && !migrationFinding) {
+          return [];
+        }
+        if (
+          (inspection.status === "unknown-model" ||
+            inspection.status === "uncatalogued-provider") &&
+          inspection.active
+        ) {
           return [
             {
               checkId: "core/doctor/model-references",
@@ -977,6 +980,18 @@ const legacyCronStoreCheck: DoctorHealthCheck = {
     const { collectLegacyCronStoreHealthFindings } =
       await import("../commands/doctor/cron/index.js");
     return collectLegacyCronStoreHealthFindings({ cfg: ctx.cfg });
+  },
+};
+
+const staleRuntimeBuildCheck: DoctorHealthCheck = {
+  id: "core/doctor/stale-runtime-build",
+  kind: "core",
+  description: "The loaded runtime was built from the checkout's current commit.",
+  source: "doctor",
+  async detect() {
+    const { collectStaleRuntimeBuildFindings } =
+      await import("../commands/doctor-stale-runtime-build.js");
+    return collectStaleRuntimeBuildFindings();
   },
 };
 
@@ -1363,18 +1378,22 @@ const browserClawdProfileResidueCheck: HealthCheck = {
   },
 };
 
-const finalConfigValidationCheck: HealthCheck = {
+const finalConfigValidationCheck: DoctorHealthCheck = {
   id: FINAL_CONFIG_VALIDATION_CHECK_ID,
+  updateReadiness: "post-plugin",
   kind: "core",
   description: "Active openclaw.jsonc parses and conforms to the config schema.",
   source: "doctor",
   async detect() {
     const { readConfigFileSnapshot } = await import("../config/config.js");
     const snap = await readConfigFileSnapshot({ observe: false });
-    if (!snap.exists || snap.valid) {
+    if (!snap.exists) {
       return [];
     }
-    return configValidationIssuesToHealthFindings(snap.issues);
+    return [
+      ...configValidationIssuesToHealthFindings(snap.issues),
+      ...configValidationWarningsToHealthFindings(snap.warnings),
+    ];
   },
 };
 
@@ -1464,6 +1483,7 @@ function createConvertedWorkflowChecks(deps: CoreHealthCheckDeps): readonly Doct
     removedWorkspacesStateCheck,
     legacyWhatsAppCrontabCheck,
     legacyCronStoreCheck,
+    staleRuntimeBuildCheck,
     codexSessionRoutesCheck,
     telegramGeneralTopicConversationsCheck,
     shellCompletionCheck,

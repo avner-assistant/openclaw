@@ -125,7 +125,17 @@ async function readLogSlice(params: {
     };
   }
 
-  const handle = await fs.open(params.file, "r");
+  const handle = await fs.open(params.file, "r").catch(missingPathToNull);
+  if (!handle) {
+    // Rotation can remove the path after stat; retain the existing missing-file contract.
+    return {
+      cursor: 0,
+      size: 0,
+      lines: [],
+      truncated: false,
+      reset: cursor != null && cursor > 0,
+    };
+  }
   try {
     let prefix = "";
     if (start > 0) {
@@ -227,9 +237,10 @@ async function readLogSlice(params: {
       }
     }
 
-    // Keep an unterminated record pending so a later read can emit it whole.
+    // Advance only through complete records actually read, not the earlier stat size:
+    // concurrent truncation can shorten the read, and later appends must remain visible.
     const lastNewline = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
-    cursor = text.endsWith("\n") ? size : start + lastNewline + 1;
+    cursor = start + lastNewline + 1;
 
     return {
       cursor,

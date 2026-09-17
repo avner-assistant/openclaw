@@ -18,6 +18,7 @@ import { t } from "../i18n/index.ts";
 import { normalizeAgentLabel, resolveAgentTextAvatar } from "../lib/agents/display.ts";
 import { resolveAgentAvatarUrl } from "../lib/avatar.ts";
 import { redactLoginFailureError } from "../lib/connection-hints.ts";
+import { renderHoverMarquee } from "../lib/hover-marquee.ts";
 import {
   formatKeyboardShortcutCombo,
   KEYBOARD_SHORTCUT_COMBOS,
@@ -50,7 +51,7 @@ import { HOME_PANEL_TOGGLE_EVENT } from "./panel-toggle-contract.ts";
 import { personActivityLink, personActivityRouting } from "./person-activity-link.ts";
 import {
   renderSessionAttentionIcon,
-  sessionAttentionSubtitle,
+  sessionAttentionTooltipLabel,
 } from "./session-attention-presentation.ts";
 import { renderSessionGlyph, renderSessionUnreadBadge } from "./session-glyph.ts";
 import {
@@ -256,7 +257,7 @@ export function renderAppSidebarHomeRow(host: AppSidebarRenderHost) {
   const mainKey = host.selectedAgentMainSessionKey(agentId);
   const mainRow = host.mainSessionRow(agentId);
   const attention = host.resolveHomeSessionAttention(mainKey, mainRow);
-  const attentionLabel = sessionAttentionSubtitle(attention);
+  const attentionLabel = sessionAttentionTooltipLabel(attention);
   const outboxAttentionCount = host.outboxAttentionCountForSession(mainKey);
   const active =
     isSessionRouteId(host.activeRouteId) &&
@@ -277,7 +278,7 @@ export function renderAppSidebarHomeRow(host: AppSidebarRenderHost) {
     content:
       attention.kind === "none"
         ? html`<span class="nav-item__icon" aria-hidden="true">${icons.home}</span>`
-        : renderSessionAttentionIcon(attention),
+        : renderSessionAttentionIcon(attention, true),
     running,
     queued,
     badge: unread && !running ? renderSessionUnreadBadge() : nothing,
@@ -306,11 +307,7 @@ export function renderAppSidebarHomeRow(host: AppSidebarRenderHost) {
         host.openMainSession(agentId);
       }}
     >
-      ${
-        attentionLabel
-          ? html`<openclaw-tooltip .content=${attentionLabel}>${homeGlyph}</openclaw-tooltip>`
-          : homeGlyph
-      }
+      ${homeGlyph}
       <span class="nav-item__text">${t("nav.home")}</span>
       ${
         outboxAttentionCount > 0 || hasComposerDraft
@@ -393,7 +390,7 @@ export function renderAppSidebarOnline(host: AppSidebarRenderHost) {
                 >${collapsed ? icons.chevronRight : icons.chevronDown}</span
               >
             </span>
-            <span class="sidebar-recent-sessions__label-text hover-marquee">${label}</span>
+            ${renderHoverMarquee(label, "sidebar-recent-sessions__label-text")}
             ${
               collapsed
                 ? html`<span class="sidebar-online__facepile">
@@ -500,7 +497,7 @@ export function renderAppSidebarFooterBar(host: AppSidebarRenderHost) {
       >
         <openclaw-viewer-avatar .user=${avatarUser} variant="footer"></openclaw-viewer-avatar>
         <span class="sidebar-identity-card__text">
-          <span class="sidebar-identity-card__name" title=${selfLabel}>${selfLabel}</span>
+          <span class="sidebar-identity-card__name">${selfLabel}</span>
           ${
             gateway
               ? html`<span class="sidebar-identity-card__gateway" aria-hidden="true">
@@ -556,6 +553,7 @@ export function renderAppSidebarZoneEntry(
   host: AppSidebarRenderHost,
   entry: SidebarZoneEntry,
   sessionRows: ReadonlyMap<string, SidebarRecentSession>,
+  pluginTabs: ReadonlyMap<string, GatewayControlUiPluginTab>,
 ) {
   if (entry.type === "route" && !host.sidebarMenus.isRouteEnabled(entry.route)) {
     return nothing;
@@ -565,17 +563,20 @@ export function renderAppSidebarZoneEntry(
     host.sessionOrganizer.sidebarZoneDropTarget?.entry === serialized
       ? host.sessionOrganizer.sidebarZoneDropTarget.position
       : null;
+  const pluginTab = entry.type === "plugin" ? pluginTabs.get(entry.key) : undefined;
   const content =
     entry.type === "route"
       ? host.sidebarMenus.renderRoute(entry.route)
-      : entry.type === "plugin"
-        ? html`<openclaw-plugin-contributions
-            .kind=${"navigation"}
-            .navigationKey=${entry.key}
-          ></openclaw-plugin-contributions>`
-        : sessionRows.has(entry.key)
-          ? host.renderPinnedSidebarSession(sessionRows.get(entry.key)!)
-          : nothing;
+      : pluginTab
+        ? renderAppSidebarPluginTab(host, pluginTab)
+        : entry.type === "plugin"
+          ? html`<openclaw-plugin-contributions
+              .kind=${"navigation"}
+              .navigationKey=${entry.key}
+            ></openclaw-plugin-contributions>`
+          : sessionRows.has(entry.key)
+            ? host.renderPinnedSidebarSession(sessionRows.get(entry.key)!)
+            : nothing;
   const draggable = entry.type === "route" || entry.type === "plugin";
   return html`
     <div
@@ -603,30 +604,21 @@ export function renderAppSidebarZoneEntry(
   `;
 }
 
-export function renderAppSidebarPluginTabEntry(
-  host: AppSidebarRenderHost,
-  tab: GatewayControlUiPluginTab,
-) {
+function renderAppSidebarPluginTab(host: AppSidebarRenderHost, tab: GatewayControlUiPluginTab) {
   const ref = { pluginId: tab.pluginId, id: tab.id };
   const key = pluginTabKey(ref);
   const routePlacement = tab.placement?.startsWith("route:")
     ? tab.placement.slice("route:".length)
     : "";
   const routeId = isRouteId(routePlacement) ? routePlacement : null;
-  return html`
-    <div class="sidebar-zone-entry" data-sidebar-entry=${`plugin:${key}`}>
-      ${
-        routeId
-          ? host.sidebarMenus.renderRoute(routeId)
-          : renderSidebarPluginTab({
-              tab,
-              basePath: host.basePath,
-              active: host.activeRouteId === "plugin" && host.activePluginTabId === key,
-              onNavigate: (location) => host.onNavigate?.("plugin", location),
-            })
-      }
-    </div>
-  `;
+  return routeId
+    ? host.sidebarMenus.renderRoute(routeId)
+    : renderSidebarPluginTab({
+        tab,
+        basePath: host.basePath,
+        active: host.activeRouteId === "plugin" && host.activePluginTabId === key,
+        onNavigate: (location) => host.onNavigate?.("plugin", location),
+      });
 }
 
 function renderAppSidebarAttention(host: AppSidebarRenderHost) {

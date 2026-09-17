@@ -7,6 +7,7 @@ import { UPDATE_RUN_PHASES } from "../../packages/gateway-protocol/src/update-ru
 import { resolveStateDir } from "../config/paths.js";
 import {
   redactPublicSupportDiagnosticLine,
+  redactPublicSupportVersion,
   redactSupportString,
 } from "../logging/diagnostic-support-redaction.js";
 import { classifyUpdateOutcome } from "../shared/update-outcome.js";
@@ -25,6 +26,8 @@ import {
   LEGACY_UPDATE_RUN_EXPIRED_REASON,
 } from "./update-run-legacy-expiry.js";
 import type { UpdateRunRecord } from "./update-run-record.js";
+import { readUpdateRunReportHealth } from "./update-run-report-health.js";
+import { formatUpdateRunCurrentHealth, formatUpdateRunIdentity } from "./update-run-report.js";
 import type { UpdateRunResult, UpdateStepResult } from "./update-runner.js";
 
 const UPDATE_REPORT_BODY_MAX_BYTES = 16_000;
@@ -41,7 +44,8 @@ export type UpdateFailureReportInput = {
   attemptId: string;
   error?: string;
   result: UpdateRunResult;
-  recordedRun?: Pick<UpdateRunRecord, "runId" | "steps">;
+  recordedRun?: Pick<UpdateRunRecord, "runId" | "steps"> &
+    Partial<Pick<UpdateRunRecord, "reason" | "target" | "after" | "verification">>;
   target?: string;
 };
 
@@ -123,8 +127,8 @@ const REPORTABLE_RECORDED_PHASES = new Set<string>([
 ]);
 type ReportedFailedStep = Pick<
   UpdateStepResult,
-  "name" | "exitCode" | "termination" | "failureFacts"
->;
+  "name" | "exitCode" | "termination" | "failureFacts" | "stderrTail"
+> & { detail?: string };
 
 function resolveFailedSteps(input: UpdateFailureReportInput): ReportedFailedStep[] {
   const direct = new Map(input.result.steps.map((step) => [step.name, step]));
@@ -147,8 +151,9 @@ function resolveFailedSteps(input: UpdateFailureReportInput): ReportedFailedStep
         ? [
             {
               name: step.step,
-              exitCode: null,
+              exitCode: step.exitCode ?? null,
               failureFacts: step.failureFacts,
+              detail: step.detail,
             },
           ]
         : [];
@@ -174,7 +179,8 @@ function resolveUpdateTarget(
   input: UpdateFailureReportInput,
   context: UpdateFailureReportContext,
 ): string {
-  const explicit = input.target?.trim();
+  const explicit =
+    input.target?.trim() || input.recordedRun?.target?.sha || input.recordedRun?.target?.version;
   if (explicit) {
     // update.run records these two display forms from validated campaign facts.
     // Revalidate their scalar payloads before adding the fixed display words.
@@ -191,15 +197,22 @@ function resolveUpdateTarget(
     return sanitizeReportField(explicit, context);
   }
   return truncateUtf8Prefix(
-    `exact target unavailable; mode: ${sanitizeReportField(input.result.mode, context)}`,
+    `exact target unavailable; mode: ${sanitizeReportField(resolveUpdateMode(input), context)}`,
     UPDATE_REPORT_FIELD_MAX_BYTES,
   );
 }
 
+function resolveUpdateMode(input: UpdateFailureReportInput): string {
+  return input.result.mode === "unknown"
+    ? (input.recordedRun?.target?.kind ?? "unknown")
+    : input.result.mode;
+}
+
 function resolveRecoveryOutcome(
-  result: UpdateRunResult,
+  input: UpdateFailureReportInput,
   context: UpdateFailureReportContext,
 ): string {
+  const { result } = input;
   if (result.recovery?.serviceRestartSafe === true) {
     if (result.recovery.service === "failed") {
       return "runtime files verified; Gateway restart failed. Run `openclaw gateway status --deep` before restarting manually.";
@@ -216,7 +229,11 @@ function resolveRecoveryOutcome(
       UPDATE_REPORT_FIELD_MAX_BYTES,
     );
   }
-  return "not recorded";
+  return input.recordedRun?.steps.some(
+    (step) => step.step === "finalize:package-rollback-not-needed" && step.status === "skipped",
+  )
+    ? "package rollback not needed: no package mutation"
+    : "not recorded";
 }
 
 async function renderBoundedDiagnostics(
@@ -226,7 +243,7 @@ async function renderBoundedDiagnostics(
 ): Promise<string[]> {
   const diagnostics = [
     `Result: ${input.result.status}`,
-    `Update mode: ${sanitizeReportField(input.result.mode, context)}`,
+    `Update mode: ${sanitizeReportField(resolveUpdateMode(input), context)}`,
     `Reason code: ${sanitizeReportField(input.result.reason ?? "unknown", context)}`,
   ];
   if (input.result.reason === LEGACY_UPDATE_RUN_EXPIRED_REASON) {
@@ -249,7 +266,22 @@ async function renderBoundedDiagnostics(
   for (const step of selectUpdateFailureReportSteps(steps)) {
     const phase = sanitizeFactIdentifier(step.name, context);
     const termination = step.termination ? `, termination ${step.termination}` : "";
-    diagnostics.push(`Failed phase ${phase}: exit ${step.exitCode ?? "unknown"}${termination}`);
+    const message = [
+      ...(step.failureFacts ?? []).flatMap((fact) => [fact.message, fact.code]),
+      step.detail,
+      step.stderrTail,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const diagnostic = redactPublicSupportDiagnosticLine(message, context);
+    const exit = `exit ${step.exitCode ?? "unknown"}`;
+    const detail =
+      diagnostic === "[redacted-diagnostic]"
+        ? exit
+        : step.exitCode == null
+          ? diagnostic
+          : `${exit} (${diagnostic})`;
+    diagnostics.push(`Failed phase ${phase}: ${detail}${termination}`);
     diagnostics.push(
       ...(await Promise.all(
         normalizeUpdateFailureFacts(step.failureFacts ?? [], context.env).map(async (fact) =>
@@ -284,15 +316,26 @@ function resolveReportPaths(
 
 /** Builds the exact sanitized body the user must review before submission. */
 export async function prepareUpdateFailureReport(
-  input: UpdateFailureReportInput,
+  request: UpdateFailureReportInput,
   options: { env?: NodeJS.ProcessEnv; stateDir?: string } = {},
 ): Promise<PreparedUpdateFailureReport> {
-  if (!input.attemptId.trim()) {
+  if (!request.attemptId.trim()) {
     throw new Error("Update report attempt identity is required.");
   }
-  if (classifyUpdateOutcome(input.result) !== "failed") {
+  if (classifyUpdateOutcome(request.result) !== "failed") {
     throw new Error("Only a final failed update can be reported.");
   }
+  const recordedRun =
+    request.recordedRun?.runId === request.attemptId ? request.recordedRun : undefined;
+  const input = {
+    ...request,
+    recordedRun,
+    result: {
+      ...request.result,
+      reason: request.result.reason ?? recordedRun?.reason ?? undefined,
+      after: request.result.after ?? recordedRun?.after,
+    },
+  };
   const env = options.env ?? process.env;
   const stateDir = options.stateDir ?? resolveStateDir(env);
   const context = { env, stateDir };
@@ -301,7 +344,14 @@ export async function prepareUpdateFailureReport(
   const target = resolveUpdateTarget(input, context);
   const steps = resolveFailedSteps(input);
   const phase = resolveFailedPhase(input.result, steps, context);
-  const recovery = resolveRecoveryOutcome(input.result, context);
+  const recovery = resolveRecoveryOutcome(input, context);
+  const verification = recordedRun?.verification;
+  const identity = verification
+    ? formatUpdateRunIdentity(verification, recordedRun?.after ?? input.result.after ?? {})
+    : undefined;
+  const currentHealth = verification
+    ? await readUpdateRunReportHealth(verification, { env })
+    : undefined;
   const bodyWithoutMarker = [
     "# OpenClaw update failure report",
     "",
@@ -313,6 +363,20 @@ export async function prepareUpdateFailureReport(
     `- Update target: ${target}`,
     `- Failed phase: ${phase}`,
     `- Recovery outcome: ${recovery}`,
+    ...(identity ? [`- Recorded verification: ${identity}`] : []),
+    ...(currentHealth
+      ? [
+          `- ${formatUpdateRunCurrentHealth(
+            currentHealth.kind === "responding"
+              ? {
+                  ...currentHealth,
+                  version: redactPublicSupportVersion(currentHealth.version),
+                }
+              : currentHealth,
+          )}`,
+          "- Recovery and verification above describe the update attempt, not a current instruction to stop or restart the Gateway.",
+        ]
+      : []),
     "",
     "## Bounded diagnostics",
     "",

@@ -265,7 +265,9 @@ const AGENT_RUNTIME_IDENTITY_METHODS = new Set<string>([
 ]);
 
 const OPTIONAL_LOCAL_AGENT_RUNTIME_IDENTITY_METHODS = new Set<string>([
+  "ui.command",
   "node.invoke",
+  "computer.invoke",
   "question.request",
 ]);
 

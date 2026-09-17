@@ -1,6 +1,7 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
 import { formatErrorMessage } from "../infra/errors.js";
 import { clearNodeSqliteKyselyCacheForDatabase } from "../infra/kysely-sync.js";
 import { openNodeSqliteDatabase, resolveImmutableSqliteFileUri } from "../infra/node-sqlite.js";
@@ -34,6 +35,7 @@ export type AgentSchemaInspection = {
   version: number;
   writerAppVersion?: string;
   reason?: string;
+  failure?: Error;
   agentSchemaMeta?: ExistingAgentSchemaMeta | null;
 };
 
@@ -44,6 +46,7 @@ export function inspectAgentDatabaseSchema(
 ): AgentSchemaInspection {
   const version = readSqliteUserVersion(database);
   const inspection: AgentSchemaInspection = { version };
+  let checkingShape = false;
   try {
     if (version > input.supportedVersion) {
       const writerAppVersion = readSqliteWriterAppVersion(database);
@@ -68,15 +71,17 @@ export function inspectAgentDatabaseSchema(
       agentId != null &&
       (!input.requireStartupMigrationReadiness || version > 0)
     ) {
+      checkingShape = true;
       assertOpenClawAgentDatabaseForMaintenance(database, {
         agentId,
         pathname: input.pathname,
+        allowStartupIndexRepair: input.requireStartupMigrationReadiness,
       });
     }
     return inspection;
   } catch (error) {
-    if (input.requireStartupMigrationReadiness) {
-      throw error;
+    if (input.requireStartupMigrationReadiness && !checkingShape) {
+      return { ...inspection, failure: toStringifiedError(error) };
     }
     // Preserve the observed version even when shape validation fails, so Doctor
     // can still report a pending migration alongside the unreadable shape.

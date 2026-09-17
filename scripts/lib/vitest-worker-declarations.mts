@@ -10,6 +10,18 @@ export const runtimeProcessDeclarationEntries = {
 };
 export const vitestWorkerDeclarationEntries = {
   ...runtimeProcessDeclarationEntries,
+  "extensions/memory-core/manager-publication-fault-entrypoint.test-support":
+    "extensions/memory-core/src/memory/manager-publication-fault-entrypoint.test-support.ts",
+  "state/openclaw-agent-worker-store.runtime.test-support":
+    "src/state/openclaw-agent-worker-store.runtime.test-support.ts",
+  "cli/update-cli/update-command-legacy-finalize-entrypoint.test-support":
+    "src/cli/update-cli/update-command-legacy-finalize-entrypoint.test-support.ts",
+  "extensions/logbook/sqlite-backend-entrypoint.test-support":
+    "extensions/logbook/src/sqlite-backend-entrypoint.test-support.ts",
+  "extensions/team-reports/sqlite-backend-entrypoint.test-support":
+    "extensions/team-reports/src/sqlite-backend-entrypoint.test-support.ts",
+  "extensions/workboard/sqlite-backend-entrypoint.test-support":
+    "extensions/workboard/src/sqlite-backend-entrypoint.test-support.ts",
   "infra/update-managed-service-handoff-runtime-assets":
     "src/infra/update-managed-service-handoff-runtime-assets.ts",
   "infra/triage-runtime.test-support": "src/infra/triage-runtime.test-support.ts",
@@ -24,13 +36,17 @@ export const vitestWorkerDeclarationEntries = {
     "extensions/qa-lab/src/gateway-child-artifacts-runtime.test-support.ts",
   "plugins/loader-sdk-bridge-artifacts.test-support":
     "src/plugins/loader-sdk-bridge-artifacts.test-support.ts",
+  "plugins/runtime-retention-entrypoint.test-support":
+    "src/plugins/runtime-retention-entrypoint.test-support.ts",
+  "system-agent/setup-inference-groq-sdk.test-support":
+    "src/system-agent/setup-inference-groq-sdk.test-support.ts",
   "agents/code-mode-retention-entrypoint.test-support":
     "src/agents/code-mode-retention-entrypoint.test-support.ts",
   "agents/command/cli-compaction-runtime.test-support":
     "src/agents/command/cli-compaction-runtime.test-support.ts",
+  "agents/sessions/bash-output-spill-entrypoints.test-support":
+    "src/agents/sessions/bash-output-spill-entrypoints.test-support.ts",
   "cron/owner-hardening-runtime.test-support": "src/cron/owner-hardening-runtime.test-support.ts",
-  "gateway/server-methods/sessions-list-cache-retention-entrypoint.test-support":
-    "src/gateway/server-methods/sessions-list-cache-retention-entrypoint.test-support.ts",
   "gateway/session-child-cache-retention-entrypoint.test-support":
     "src/gateway/session-child-cache-retention-entrypoint.test-support.ts",
   "gateway/session-title-retention.test-support":
@@ -40,5 +56,7 @@ export const vitestWorkerDeclarationEntries = {
     "src/skills/library/persistence-runtime.test-support.ts",
   "state/openclaw-state-lease-runtime.test-support":
     "src/state/openclaw-state-lease-runtime.test-support.ts",
+  "state/openclaw-agent-db-module-identity-runtime.test-support":
+    "src/state/openclaw-agent-db-module-identity-runtime.test-support.ts",
   "tui/tui-pty-runtime-test-support": "src/tui/tui-pty-runtime-test-support.ts",
 };

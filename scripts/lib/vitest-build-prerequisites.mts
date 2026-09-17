@@ -26,6 +26,15 @@ export type VitestRuntimeTestSelection = {
 // while unrelated workers may still be importing its public plugin facades.
 const runtimeConsumers = [
   {
+    file: "src/gateway/setup-inference.first-signin.integration.test.ts",
+    configs: [
+      "test/vitest/vitest.gateway-database-workers.config.ts",
+      "test/vitest/vitest.gateway.config.ts",
+    ],
+    mode: "runtime",
+    dir: "src/gateway",
+  },
+  {
     file: "src/plugins/loader.test.ts",
     configs: ["test/vitest/vitest.bundled.config.ts"],
     mode: "runtime",
@@ -52,6 +61,12 @@ const runtimeConsumers = [
   {
     file: "src/node-host/linux-node-plugin.integration.test.ts",
     configs: ["test/vitest/vitest.unit.config.ts", "test/vitest/vitest.unit-src.config.ts"],
+    mode: "runtime",
+    dir: "",
+  },
+  {
+    file: "src/entry.memory-json.test.ts",
+    configs: ["test/vitest/vitest.infra.config.ts"],
     mode: "runtime",
     dir: "",
   },
@@ -93,6 +108,7 @@ const runtimeConsumers = [
     dir: "src",
   },
   ...[
+    "src/agents/agent-command-local.test.ts",
     "src/agents/simple-completion-runtime.plugin-scope.test.ts",
     "src/agents/prepared-model-catalog-worker.integration.test.ts",
     "src/agents/runtime-plugins.context-engine.integration.test.ts",
@@ -140,6 +156,19 @@ const runtimeConsumers = [
     mode: "private-qa",
     dir: "extensions",
   },
+  // Native Codex transcript evidence runs in the packaged history Worker.
+  ...[
+    "extensions/codex/src/app-server/event-projector.verbose-hooks.test.ts",
+    "extensions/codex/src/app-server/session-history.test.ts",
+    "extensions/codex/src/app-server/settled-turn-finalizer.native.test.ts",
+    "extensions/codex/src/app-server/transcript-mirror.admission.test.ts",
+    "extensions/codex/src/app-server/transcript-mirror.test.ts",
+  ].map((file) => ({
+    file,
+    configs: ["test/vitest/vitest.extension-codex-app-server-support.config.ts"],
+    mode: "runtime" as const,
+    dir: "extensions",
+  })),
   // These Telegram tests consume real built runtime sidecars. Sticker selection
   // loads provider registrations; polling launches the production ingress Worker.
   ...[
@@ -175,6 +204,7 @@ const runtimeConsumers = [
     dir: "src",
   })),
   ...[
+    "src/commands/doctor-config-flow.legacy-composition.test.ts",
     "src/commands/doctor-config-preflight.process.test.ts",
     "src/commands/doctor-config-preflight.refusal.process.test.ts",
     "src/commands/doctor-config-preflight.v17-atomicity.process.test.ts",
@@ -203,15 +233,20 @@ const runtimeConsumers = [
     mode: "runtime",
     dir: "src",
   },
-  {
-    file: "src/gateway/server.chat-cli-auth.test.ts",
+  ...[
+    "src/gateway/server.chat-cli-auth.test.ts",
+    "src/gateway/server.cli-watchdog.test.ts",
+    "src/gateway/server.codex-failure-recovery.test.ts",
+    "src/gateway/server.xai-fallback.test.ts",
+  ].map((file) => ({
+    file,
     configs: [
       "test/vitest/vitest.gateway-server-isolated.config.ts",
       "test/vitest/vitest.gateway.config.ts",
     ],
-    mode: "runtime",
+    mode: "runtime" as const,
     dir: "",
-  },
+  })),
   ...[
     "src/gateway/server-sidecar-retention.test.ts",
     "src/gateway/server.config-patch.test.ts",
@@ -230,6 +265,7 @@ const runtimeConsumers = [
     "src/gateway/gateway-concurrent-streams.test.ts",
     "src/gateway/gateway-cron-process-identity.windows.test.ts",
     "src/gateway/gateway-route-model-reuse.test.ts",
+    "src/gateway/gateway-ssh-upload-signal.test.ts",
   ].map((file) => ({
     file,
     configs: ["test/vitest/vitest.gateway-core.config.ts", "test/vitest/vitest.gateway.config.ts"],

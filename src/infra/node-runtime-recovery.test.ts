@@ -48,7 +48,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 vi.mock("../../node-sqlite.mjs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../node-sqlite.mjs")>()),
-  detectCurrentSqliteCapabilities: () => ({
+  detectCurrentSqliteCapabilities: async () => ({
     available: true,
     version: "3.51.3",
     text: mocks.currentAdmitted,
@@ -935,6 +935,20 @@ describe("candidate admission probe", () => {
                 probe: { available: true, version: "3.51.3", text: true, blob: true, json: true },
               }),
         stderr: "",
+      });
+
+      expect(isUsableNode(candidate)).toBe(false);
+    });
+  });
+
+  it("rejects candidates when the permission model denies child processes", async () => {
+    await withRecoveryHome(async (home) => {
+      const candidate = await writeFixture(path.join(home, "bin/node"));
+      mocks.admissible.add(candidate);
+      mocks.probe.mockImplementation(() => {
+        throw Object.assign(new Error("Access to this API has been restricted"), {
+          code: "ERR_ACCESS_DENIED",
+        });
       });
 
       expect(isUsableNode(candidate)).toBe(false);

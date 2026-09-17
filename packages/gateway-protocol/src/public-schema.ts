@@ -109,6 +109,8 @@ export {
   DesktopObserveParamsSchema,
   DesktopObserveResultSchema,
   DesktopLaunchParamsSchema,
+  DesktopReleaseParamsSchema,
+  DesktopReleaseResultSchema,
   SystemInfoParamsSchema,
   SystemInfoResultSchema,
   StateVersionSchema,
@@ -409,6 +411,12 @@ export {
   WizardStartResultSchema,
   WizardStatusResultSchema,
   TalkEventSchema,
+  TalkVoiceGetParamsSchema,
+  TalkVoiceSetParamsSchema,
+  TalkVoiceSelectionSchema,
+  TalkVoiceSetResultSchema,
+  TalkVoiceCompleteParamsSchema,
+  TalkVoiceChangeEventSchema,
   TalkCatalogParamsSchema,
   TalkCatalogResultSchema,
   TalkClientCreateParamsSchema,
@@ -483,6 +491,8 @@ export {
   ModelsAuthOrderSetParamsSchema,
   ModelsAuthRefreshParamsSchema,
   ModelsAuthStatusParamsSchema,
+  ModelsAuthSetApiKeyParamsSchema,
+  ModelsAuthSetApiKeyResultSchema,
   ModelsListParamsSchema,
   AuthProbeStatusSchema,
   ModelsProbeParamsSchema,
@@ -682,3 +692,9 @@ export {
   FsListDirParamsSchema,
   FsListDirResultSchema,
 } from "./schema-modules.js";
+
+export {
+  SessionActivitySummarySchema,
+  SessionsActivitySummaryEnsureParamsSchema,
+  SessionsActivitySummaryEnsureResultSchema,
+} from "./schema/sessions-activity-summary.js";

@@ -383,9 +383,7 @@ type CodexThreadInjectItemsParams = JsonObject & {
   items: JsonValue[];
 };
 
-type CodexThreadUnsubscribeParams = JsonObject & {
-  threadId: string;
-};
+type CodexThreadUnsubscribeParams = JsonObject & { threadId: string };
 
 type CodexTurnInterruptParams = JsonObject & {
   threadId: string;
@@ -468,11 +466,14 @@ export type CodexThread = {
   preview?: string | null;
   createdAt?: number | null;
   updatedAt?: number | null;
+  recencyAt?: number | null;
   status?: CodexThreadStatus | null;
   canAcceptDirectInput?: boolean | null;
   /** Codex 0.153+: current loaded selection, otherwise latest persisted model. */
   model?: string | null;
   modelProvider?: string | null;
+  /** Native creation-time provenance; unavailable on older or incomplete records. */
+  originator?: string | null;
   cwd?: string | null;
   source?: CodexSessionSource | null;
   threadSource?: string | null;

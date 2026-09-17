@@ -15,7 +15,6 @@ import type { AgentSession } from "../../sessions/index.js";
 import { withSessionManagerWrite } from "../../sessions/session-manager-write-admission.js";
 import { ackPendingAgentSteeringItems } from "../../subagents/registry/subagent-registry.js";
 import { recordAggregateTruncation } from "../prompt-cache-observability.js";
-import { normalizeAssistantReplayContent } from "../replay-history.js";
 import { updateActiveEmbeddedRunSnapshot } from "../runs.js";
 import {
   type getEmbeddedSessionPromptState,
@@ -62,6 +61,7 @@ type PromptActiveSession = (
 type SteeringLease = {
   leaseId: string;
   runIds: readonly string[];
+  isCurrent: () => boolean;
 };
 
 type TrajectoryRecorder = ReturnType<typeof createTrajectoryRuntimeRecorder>;
@@ -100,22 +100,33 @@ export async function submitEmbeddedAttemptPrompt(input: {
   transcriptPrompt: string;
 }): Promise<void> {
   const { activeSession, attempt } = input;
+  let pendingSteering = input.leasedSteering;
+  const assertSteeringCurrent = () => {
+    if (pendingSteering && !pendingSteering.isCurrent()) {
+      throw new Error(
+        "The queued child results lost authority before requester prompt submission.",
+      );
+    }
+  };
+  assertSteeringCurrent();
   const userTurnRecorder = attempt.userTurnTranscriptRecorder;
   const persistedUserIdempotencyKey =
     attempt.skipPreparedUserTurnMessage !== true && userTurnRecorder?.hasPersisted() === true
       ? (userTurnRecorder.getPersistedMessage?.() ?? userTurnRecorder.message)?.idempotencyKey
       : undefined;
-  const normalizedReplayMessages = normalizeAssistantReplayContent(activeSession.messages);
-  if (normalizedReplayMessages !== activeSession.messages) {
-    activeSession.agent.state.messages = normalizedReplayMessages;
-  }
 
   const installProviderPromptHistoryTransform = (): (() => void) => {
     const baseStreamFn = activeSession.agent.streamFn;
     const persistThenStream: StreamFn = async (model, context, options) => {
       await input.persistToolResultProjections();
       options?.signal?.throwIfAborted();
-      return baseStreamFn(model, context, options);
+      assertSteeringCurrent();
+      const stream = await baseStreamFn(model, context, options);
+      // Pre-prompt compaction has not consumed the deferred answer.
+      if (captureCurrentPromptForModel) {
+        pendingSteering = undefined;
+      }
+      return stream;
     };
     const providerPromptStreamFn = wrapStreamFnWithMessageTransform(
       persistThenStream,
@@ -161,7 +172,7 @@ export async function submitEmbeddedAttemptPrompt(input: {
   });
   updateActiveEmbeddedRunSnapshot(attempt.sessionId, {
     transcriptLeafId: input.transcriptLeafId,
-    messages: snapshotRecentMessages(normalizedReplayMessages),
+    messages: snapshotRecentMessages(activeSession.messages),
     inFlightPrompt: input.transcriptPrompt,
   });
 

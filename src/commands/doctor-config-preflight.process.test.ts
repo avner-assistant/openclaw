@@ -9,7 +9,9 @@ import { createOpenClawTestInstance } from "../../test/helpers/openclaw-test-ins
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { resolveGatewayLockDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { cronOwnerHardeningEntrypoints } from "../cron/owner-hardening-runtime.test-support.js";
 import { loadCronJobsStoreWithConfigJobsReadOnly, loadCronQuarantinedJobs } from "../cron/store.js";
+import { resolveRuntimeWorkerUrl } from "../infra/runtime-worker-url.js";
 import { hasActiveStartupMigrationLease } from "../infra/startup-migration-checkpoint.js";
 import { getFileLockProcessStartTime } from "../shared/pid-alive.js";
 import {
@@ -24,6 +26,7 @@ import {
   runSourceRuntime,
   seedV17AdditiveRepairDatabase,
 } from "./doctor-config-preflight.process.test-support.js";
+import { doctorConfigRuntimeEntrypoints } from "./doctor-config-runtime.test-support.js";
 
 const STARTUP_REFUSAL =
   "OpenClaw startup migrations did not complete cleanly; refusing to report the gateway ready.";
@@ -495,8 +498,11 @@ describe("gateway startup-migration refusal", () => {
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(stableConfig));
     seedPluginStateConflict(stateDir);
-    const preflightUrl = new URL("./doctor-config-preflight.ts", import.meta.url).href;
-    const stateDatabaseUrl = new URL("../state/openclaw-state-db.ts", import.meta.url).href;
+    // Initialization and repair must share the same database module instance.
+    const preflightUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.preflight).href;
+    const stateDatabaseUrl = resolveRuntimeWorkerUrl(
+      cronOwnerHardeningEntrypoints.stateDatabase,
+    ).href;
     const script = `
       const fs = await import("node:fs");
       const path = await import("node:path");
@@ -629,9 +635,9 @@ describe("gateway startup-migration refusal", () => {
 
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config));
-    const configUrl = new URL("../config/io.ts", import.meta.url).href;
-    const preflightUrl = new URL("./doctor-config-preflight.ts", import.meta.url).href;
-    const checkpointUrl = new URL("../infra/startup-migration-checkpoint.ts", import.meta.url).href;
+    const configUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.configIO).href;
+    const preflightUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.preflight).href;
+    const checkpointUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.checkpoint).href;
     const script = `
       const assert = (await import("node:assert/strict")).default;
       const fs = await import("node:fs");
@@ -715,7 +721,7 @@ describe("gateway startup-migration refusal", () => {
     fs.mkdirSync(stateDir, { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config));
     const databasePath = seedOwnerlessSchemaOnlyAgentDatabase(stateDir);
-    const preflightUrl = new URL("./doctor-config-preflight.ts", import.meta.url).href;
+    const preflightUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.preflight).href;
     const script = `
       const { runDoctorConfigPreflight } = await import(${JSON.stringify(preflightUrl)});
       try {
@@ -779,7 +785,7 @@ describe("gateway startup-migration refusal", () => {
     fs.mkdirSync(path.dirname(legacyPath), { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config));
     fs.writeFileSync(legacyPath, '{"legacy":true}\n');
-    const preflightUrl = new URL("./doctor-config-preflight.ts", import.meta.url).href;
+    const preflightUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.preflight).href;
     const script = `
       const { runDoctorConfigPreflight } = await import(${JSON.stringify(preflightUrl)});
       await runDoctorConfigPreflight({
@@ -942,16 +948,15 @@ describe("gateway startup-migration refusal", () => {
       }),
     );
 
-    const configFlowUrl = new URL("./doctor-config-flow.ts", import.meta.url).href;
-    const currentSnapshotUrl = new URL(
-      "../plugins/current-plugin-metadata-snapshot.ts",
-      import.meta.url,
+    // Repair and observation must use the same metadata scope and invalidation owner.
+    const configFlowUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.configFlow).href;
+    const currentSnapshotUrl = resolveRuntimeWorkerUrl(
+      doctorConfigRuntimeEntrypoints.metadataSnapshot,
     ).href;
-    const healthRunnersUrl = new URL(
-      "../flows/doctor-health-contribution-runners.state.ts",
-      import.meta.url,
+    const healthRunnersUrl = resolveRuntimeWorkerUrl(
+      doctorConfigRuntimeEntrypoints.stateHealth,
     ).href;
-    const prompterUrl = new URL("./doctor-prompter.ts", import.meta.url).href;
+    const prompterUrl = resolveRuntimeWorkerUrl(doctorConfigRuntimeEntrypoints.prompter).href;
     const result = await runIsolatedModuleScript(
       env,
       `

@@ -3,6 +3,7 @@ import path from "node:path";
 import { normalizeStringEntries } from "@openclaw/normalization-core/string-normalization";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { emitDiagnosticEventWithTrustedTraceContext } from "../infra/diagnostic-events.js";
+import { recordDiagnosticToolExecutionDeadline } from "../infra/diagnostic-tool-execution-liveness.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import {
   type EventSessionRoutingPolicy,
@@ -705,8 +706,6 @@ export async function runExecProcess({
     notifyOnExit: opts.notifyOnExit,
     notifyOnExitEmptySuccess: opts.notifyOnExitEmptySuccess === true,
     exitNotified: false,
-    stdin: undefined,
-    pid: undefined,
     startedAt,
     cwd: opts.workdir,
     maxOutputChars: opts.maxOutput,
@@ -719,8 +718,6 @@ export async function runExecProcess({
     aggregated: "",
     tail: "",
     exited: false,
-    exitCode: undefined as number | null | undefined,
-    exitSignal: undefined as NodeJS.Signals | number | null | undefined,
     truncated: false,
     backgrounded: false,
     cursorKeyMode: opts.usePty ? "unknown" : "normal",
@@ -805,12 +802,18 @@ export async function runExecProcess({
     let finalOutcome = outcome;
     session.finalizing = true;
     try {
+      if (!opts.sandbox && managedRun?.waitForExtinction) {
+        // Root completion does not release descendants that retained the group's lineage fd.
+        managedRun.cancel();
+        await managedRun.waitForExtinction();
+      }
       await finalizeSandboxExec({
         status: outcome.status,
         exitCode: outcome.exitCode,
         timedOut: outcome.timedOut,
       });
     } catch (error) {
+      session.finalizationFailed = true;
       recordAgentCleanupFailure();
       if (outcome.status === "completed") {
         finalOutcome = buildExecRuntimeErrorOutcome({
@@ -821,7 +824,7 @@ export async function runExecProcess({
         // Background observers need the finalizer failure in the same bounded, redacted output.
         appendOutput(session, "stderr", `\n${redactToolPayloadText(formatErrorMessage(error))}\n`);
       } else {
-        logWarn(`exec: sandbox finalize after process failure failed (${String(error)}).`);
+        logWarn(`exec: finalization after process failure failed (${String(error)}).`);
       }
     } finally {
       // Finalization can release remote process/session resources. Keep the
@@ -844,6 +847,7 @@ export async function runExecProcess({
           maybeNotifyOnExit(session, finalOutcome.status);
         }
       } catch (error) {
+        session.finalizationFailed = true;
         // Recover before yielding: scope joins queued by markExited must not
         // outrun the task's failed outcome or restore its environment state.
         finalOutcome = buildExecRuntimeErrorOutcome({
@@ -1015,6 +1019,7 @@ export async function runExecProcess({
     assertSandboxCurrent = undefined;
   }
   session.processActivity = managedRun.activity;
+  recordDiagnosticToolExecutionDeadline(managedRun.activity.deadlineAtMs);
   session.stdin = managedRun.stdin;
   session.pid = managedRun.pid;
 

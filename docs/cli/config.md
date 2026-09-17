@@ -302,6 +302,8 @@ Batch parsing always uses the batch payload (`--batch-json`/`--batch-file`) as t
 
 Supplying either batch option selects batch mode. Empty or whitespace-only values are rejected; omit both options to use positional `<path> <value>` mode.
 
+`--batch-file` and `config patch --file` use the exact file path you provide, including leading or trailing spaces. Quote paths that contain spaces in your shell.
+
 Batch assignments apply in order, then validation checks the final config. A SecretRef replaced by a later assignment is not resolved or counted in dry-run output, even with `--allow-exec`. Providers that remain in a changed provider collection still receive command-path trust checks.
 
 JSON path/value mode also works for SecretRefs and providers directly:
@@ -338,7 +340,7 @@ Provider builder targets must use `secrets.providers.<alias>` as the path.
   </Accordion>
   <Accordion title="Exec provider (--provider-source exec)">
     - `--provider-command <path>` (required)
-    - `--provider-arg <arg>` (repeatable)
+    - `--provider-arg <arg>` (repeatable); each occurrence preserves one literal argument, including an empty string or surrounding whitespace. Quote these values in your shell.
     - `--provider-no-output-timeout-ms <ms>`
     - `--provider-max-output-bytes <bytes>`
     - `--provider-json-only`

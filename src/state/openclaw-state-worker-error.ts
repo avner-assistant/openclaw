@@ -4,6 +4,11 @@ import { StartupMaintenanceRequiredError } from "../infra/startup-maintenance-re
 import { OpenClawAgentDatabaseMediaMigrationRequiredError } from "./openclaw-agent-db-migration-required.js";
 import { OpenClawStateDatabaseSchemaMigrationRequiredError } from "./openclaw-state-db-schema-migration-required.js";
 import {
+  isOpenClawStateLeaseErrorCode,
+  OpenClawStateLeaseError,
+  type OpenClawStateLeaseErrorCode,
+} from "./openclaw-state-lease-error.js";
+import {
   OpenClawStateExternalOwnershipError,
   OpenClawStateOwnershipError,
   OpenClawStateOwnershipMetadataError,
@@ -23,6 +28,7 @@ type ErrorIdentity =
   | { type: "error" | "aggregate" | "ownership" | "newer-schema" }
   | { type: "ownership-metadata"; databasePath: string }
   | { type: "external-ownership"; databasePath: string; managerId: string }
+  | { type: "state-lease"; leaseCode: OpenClawStateLeaseErrorCode }
   | { type: "maintenance"; kind: MaintenanceKind }
   | { type: "state-migration"; kind: StateMigrationKind; pathname: string }
   | { type: "agent-media-migration"; pathname: string; schemaVersion: number };
@@ -42,7 +48,12 @@ export type OpenClawStateWorkerErrorPayload = {
   nodes: ErrorNode[];
 };
 
+type ErrorGraphOptions = { includeOrdinary?: boolean };
+
 function identifyError(error: Error): ErrorIdentity {
+  if (error instanceof OpenClawStateLeaseError) {
+    return { type: "state-lease", leaseCode: error.code };
+  }
   if (error instanceof OpenClawStateOwnershipMetadataError) {
     return { type: "ownership-metadata", databasePath: error.databasePath };
   }
@@ -86,6 +97,7 @@ function isScalar(value: unknown): value is string | number | boolean | null {
 
 export function encodeOpenClawStateWorkerError(
   error: unknown,
+  options: ErrorGraphOptions = {},
 ): OpenClawStateWorkerErrorPayload | undefined {
   if (!(error instanceof Error)) {
     return undefined;
@@ -125,7 +137,9 @@ export function encodeOpenClawStateWorkerError(
         ...(current instanceof AggregateError ? { errors: current.errors.map(encodeValue) } : {}),
       });
     }
-    return canonical ? { version: 1, root: 0, nodes } : undefined;
+    return canonical || options.includeOrdinary === true
+      ? { version: 1, root: 0, nodes }
+      : undefined;
   } catch {
     return undefined;
   }
@@ -157,6 +171,10 @@ function parseIdentity(node: Record<string, unknown>): ErrorIdentity | undefined
     case "external-ownership":
       return typeof node.databasePath === "string" && typeof node.managerId === "string"
         ? { type: node.type, databasePath: node.databasePath, managerId: node.managerId }
+        : undefined;
+    case "state-lease":
+      return isOpenClawStateLeaseErrorCode(node.leaseCode) && node.code === node.leaseCode
+        ? { type: node.type, leaseCode: node.leaseCode }
         : undefined;
     case "maintenance":
       return isMaintenanceKind(node.kind) ? { type: node.type, kind: node.kind } : undefined;
@@ -255,6 +273,8 @@ function createError(node: ErrorNode): Error {
       return new OpenClawStateExternalOwnershipError(node.databasePath, node.managerId);
     case "newer-schema":
       return new SqliteSchemaVersionError(node.message);
+    case "state-lease":
+      return new OpenClawStateLeaseError(node.message, { code: node.leaseCode });
     case "maintenance":
       return new StartupMaintenanceRequiredError(node.kind, node.message);
     case "state-migration":
@@ -270,6 +290,7 @@ function createError(node: ErrorNode): Error {
 
 function decodeErrorGraph(
   value: unknown,
+  options: ErrorGraphOptions,
 ): { errors: Error[]; nodes: ErrorNode[]; root: number } | undefined {
   try {
     if (
@@ -308,7 +329,7 @@ function decodeErrorGraph(
         }
       }
     }
-    if (!canonical || visited.size !== nodes.length) {
+    if ((!canonical && options.includeOrdinary !== true) || visited.size !== nodes.length) {
       return undefined;
     }
     const errors = nodes.map(createError);
@@ -366,9 +387,15 @@ export function retainOpenClawStateWorkerErrorPayload(error: Error, payload: unk
 }
 
 /** Hydrate each caller independently; never rewrite a cached opening rejection. */
-export function hydrateOpenClawStateWorkerError(value: Error): Error;
-export function hydrateOpenClawStateWorkerError(value: unknown): unknown;
-export function hydrateOpenClawStateWorkerError(value: unknown): unknown {
+export function hydrateOpenClawStateWorkerError(value: Error, options?: ErrorGraphOptions): Error;
+export function hydrateOpenClawStateWorkerError(
+  value: unknown,
+  options?: ErrorGraphOptions,
+): unknown;
+export function hydrateOpenClawStateWorkerError(
+  value: unknown,
+  options: ErrorGraphOptions = {},
+): unknown {
   if (!(value instanceof Error)) {
     return value;
   }
@@ -408,7 +435,7 @@ export function hydrateOpenClawStateWorkerError(value: unknown): unknown {
       isRecord(retained.group)
     ) {
       if (!groups.has(retained.group)) {
-        groups.set(retained.group, decodeErrorGraph(retained.payload));
+        groups.set(retained.group, decodeErrorGraph(retained.payload, options));
       }
       const graph = groups.get(retained.group);
       const index = retained.materialized ? retained.node : graph?.root;

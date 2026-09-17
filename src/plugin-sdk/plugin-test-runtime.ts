@@ -9,7 +9,7 @@ import { createAgentHarnessHostCapabilities } from "../agents/harness/host-capab
 
 type AgentHarnessHostTestAttempt = Omit<
   EmbeddedRunAttemptParams,
-  "admittedRunContext" | "hostCapabilities"
+  "admittedRunContext" | "hostCapabilities" | "disableToolSearch" | "sessionReadScopeKey"
 >;
 
 /** Builds the production admitted-run host boundary for plugin integration tests. */
@@ -71,6 +71,7 @@ export {
 export { addTestHook } from "../plugins/hooks.test-helpers.js";
 export { createPluginRecord } from "../plugins/status.test-helpers.js";
 export { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
+export { useProviderCatalogMetadata } from "./test-helpers/provider-catalog.js";
 export {
   resolveBundledExplicitWebFetchProvidersFromPublicArtifacts,
   resolveBundledExplicitWebSearchProvidersFromPublicArtifacts,
@@ -93,7 +94,6 @@ export { onTrustedInternalDiagnosticEvent } from "../infra/diagnostic-events.js"
 export {
   buildProviderPluginMethodChoice,
   resolveProviderModelPickerEntries,
-  resolveProviderWizardOptions,
   setProviderWizardProvidersResolverForTest,
 } from "../plugins/provider-wizard.js";
 export { resolveProviderPluginChoice } from "../plugins/provider-auth-choice.runtime.js";

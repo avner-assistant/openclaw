@@ -15,6 +15,14 @@ title: "Database layout"
 
 The task registry uses the shared state database. Runtime trajectory events live with their sessions in the per-agent database or a configured shared session SQLite store.
 
+### Activity session recaps
+
+[Activity](/web/control-ui/settings#activity-tab) stores one optional `activitySummary` object in the existing `session_nodes.entry_json` session metadata. This is a reconstructible cache; the transcript remains canonical. The [approved persistence design](https://github.com/openclaw/openclaw/issues/147383) adds no SQL table, column, or database schema-version change. Current and `v2026.9.4` metadata serializers preserve unknown optional fields; unknown recap payload versions are treated as cache misses.
+
+Payload version 1 records the recap text, generation time, session ID and lifecycle revision, transcript generation and leaf, chronological coverage, and whether oversized message content was omitted. The optional `formatRevision` identifies the generated prose format; revision 2 uses one to three concise sentences. Missing or older format revisions retain their text and coverage while the existing queue refreshes the prose. This adds no SQL migration or payload-version bump. A rewind or replacement invalidates an incompatible source binding. The Gateway reads bounded transcript chunks outside the metadata write and rechecks the current lifecycle and transcript branch before committing. Recap writes preserve session activity timestamps and ordering.
+
+The latest recap survives restart and archival. Deleting the session removes it; reset or replacement makes the prior lifecycle's recap unusable. Incognito sessions do not persist or generate this cache. A shared, bounded Gateway queue deduplicates generation across viewers, retains the previous recap on failure, and uses only the configured utility route. Disabling that route stops new generation. Removing or ignoring the optional field is a rollback path that leaves session and transcript data intact; removing the feature does not require reversing a database migration.
+
 ### Cold transcript archives
 
 The per-agent `session_transcript_cold_archives` table records cold transcript
@@ -271,6 +279,12 @@ metadata alone exceeds a hard limit, the write fails without changing the row.
 The CLI and Gateway share WAL-backed transactions, including while the Gateway
 is stopped. The first terminal outcome wins; subsequent verification can enrich
 its observed facts without rewriting success, failure, skip, or rollback status.
+Explicit `update repair` can correct the older package-owner refusal
+misclassification to `skipped` once the installed version satisfies its resolved
+target. This exception requires the latest run to contain only the untouched
+request and optional driver-adoption metadata, with no recovery or active update.
+It preserves the refusal detail and finish time and records the existing
+acknowledgement marker; subsequent repairs use normal finalization.
 The restart sentinel carries `stats.runId` and remains the continuation owner;
 consuming it does not delete the run row. Chat, CLI, and status reports read that
 row. See [Run history and reports](/cli/update#run-history-and-reports).
