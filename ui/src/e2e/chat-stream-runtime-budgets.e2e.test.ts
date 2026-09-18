@@ -11,7 +11,7 @@ import {
   waitForChatScrollIdle,
 } from "./chat-flow.test-support.ts";
 import { createControlUiE2eContextOptions } from "./control-ui-e2e-suite.test-support.ts";
-import { waitForCommittedComposerDraft, waitForCommittedState } from "./settle.test-support.ts";
+import { waitForCommittedComposerDraft } from "./settle.test-support.ts";
 
 // Durable runtime budgets for the chat streaming surface. Byte budgets
 // (scripts/check-control-ui-performance.mts) cannot see rendering work, so
@@ -550,25 +550,26 @@ suite.define(() => {
       await page.goto(`${suite.server.baseUrl}chat`);
       await gateway.waitForRequest("chat.startup");
       const runId = await openStreamingTurn(page, gateway, "burst coalescing probe");
-      // The delayed child roster is startup work, not a streamed delta. Wait for
-      // its committed snapshot and render boundary before measuring the burst.
+
+      // The delayed swarm child query publishes roster metadata after first paint.
+      // Observe its committed result before measuring stream-driven invalidations.
       const childList = await gateway.waitForRequest("sessions.list", {
         match: { spawnedBy: "agent:main:main" },
       });
-      await waitForCommittedState(
-        page,
-        ({ serializedQuery }) => {
-          const app = document.querySelector("openclaw-app") as HTMLElement & {
-            runtime: { context: ApplicationContext };
-          };
-          const snapshot = app.runtime.context.sessions.listSnapshot(
-            JSON.parse(String(serializedQuery)),
-          );
-          return snapshot.result !== null && !snapshot.loading && snapshot.error === null;
-        },
-        { serializedQuery: JSON.stringify(childList.params) },
-      );
-
+      const childScope = requireRecord(childList.params);
+      await expect
+        .poll(() =>
+          page.evaluate((scope) => {
+            const app = document.querySelector<
+              HTMLElement & {
+                runtime?: { context: ApplicationContext };
+              }
+            >("openclaw-app");
+            const snapshot = app?.runtime?.context.sessions.listSnapshot(scope);
+            return Boolean(snapshot?.result && !snapshot.loading && !snapshot.error);
+          }, childScope),
+        )
+        .toBe(true);
       await waitForChatScrollIdle(page);
       await installRenderProbe(page);
       await resetRenderProbe(page);
