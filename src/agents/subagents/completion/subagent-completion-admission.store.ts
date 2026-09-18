@@ -40,7 +40,7 @@ import {
   isCompletedRequesterDeliveryBlocked,
 } from "../registry/subagent-delivery-state.js";
 import { SUBAGENT_ENDED_REASON_KILLED } from "../registry/subagent-lifecycle-events.js";
-import { resolveFinalizedSubagentTaskState } from "../registry/subagent-registry-completion.js";
+import { resolveSubagentTaskTerminalStatus } from "../registry/subagent-registry-completion.js";
 import {
   loadPendingFinalDeliveryPayload,
   markRequesterSettleWakePending,
@@ -343,13 +343,13 @@ export function blockSubagentCompletionDelivery(params: {
       return false;
     }
     const successful = task.status === "succeeded" && subagent.execution.outcome?.status === "ok";
-    // A terminal non-success still owns its failed requester wake. Classify the
-    // persisted pair; a missing or superseded owner is not permission to settle.
+    // A cancelled yielded run may never capture a reply. Compare execution
+    // outcomes, not reply readiness; missing or superseded owners still refuse settlement.
     if (
       !successful &&
       (params.suspendedReason !== undefined ||
         !["cancelled", "failed", "timed_out"].includes(task.status) ||
-        resolveFinalizedSubagentTaskState(subagent)?.status !== task.status ||
+        resolveSubagentTaskTerminalStatus(subagent) !== task.status ||
         !["pending", "in_progress", "failed"].includes(subagent.delivery?.status ?? "pending"))
     ) {
       return false;

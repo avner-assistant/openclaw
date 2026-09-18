@@ -15,7 +15,10 @@ import {
   loadSubagentRegistryFromSqlite,
   upsertSubagentRunRowInDatabase,
 } from "../registry/subagent-registry.store.sqlite.js";
-import { settleSubagentCompletionDelivery } from "./subagent-completion-admission.store.js";
+import {
+  blockSubagentCompletionDelivery,
+  settleSubagentCompletionDelivery,
+} from "./subagent-completion-admission.store.js";
 import {
   armRequesterWake,
   failedRecords,
@@ -77,6 +80,69 @@ describe("persisted subagent requester wakes", () => {
     }
     ensureTaskRegistryReady();
   }
+
+  it.each([
+    { status: "failed", outcome: { status: "error" } },
+    { status: "timed_out", outcome: { status: "timeout" } },
+  ] as const)(
+    "settles an uncaptured $status wake without inventing reply capture",
+    async ({ status, outcome }) => {
+      const input = failedRecords(status, outcome);
+      input.subagent.completion = { required: true };
+      persistOwner(input);
+      const before = structuredClone(input);
+      const driver = requesterWakeDriver([input]);
+      try {
+        await driver.run();
+        expect(driver.warn).not.toHaveBeenCalledWith(
+          "failed to persist requester settle wake rejection",
+          expect.any(Object),
+        );
+        reopenOwners();
+        const restored = subagentRuns.get(input.subagent.runId)!;
+        expect(restored.requesterSettleWake).toBeUndefined();
+        expect(restored.execution).toEqual(before.subagent.execution);
+        expect(restored.completion).toEqual(before.subagent.completion);
+        expect(getTaskById(input.task.taskId)).toMatchObject({
+          ...before.task,
+          deliveryStatus: "failed",
+          lastEventAt: expect.any(Number),
+        });
+        expect(systemEvents()).toEqual([]);
+        expect(driver.wake).toHaveBeenCalledOnce();
+      } finally {
+        driver.controller.clearScheduledResumeTimers();
+      }
+    },
+  );
+
+  it.each(["missing outcome", "paused", "mismatched task"] as const)(
+    "does not settle uncaptured completion with %s evidence",
+    (change) => {
+      const input = failedRecords("failed", { status: "error" });
+      input.subagent.completion = { required: true };
+      if (change === "missing outcome") {
+        input.subagent.execution.outcome = undefined;
+      } else if (change === "paused") {
+        input.subagent.pauseReason = "sessions_yield";
+      } else {
+        input.task.status = "timed_out";
+      }
+      persistOwner(input);
+      const before = structuredClone(input);
+      expect(
+        blockSubagentCompletionDelivery({
+          subagent: input.subagent,
+          taskId: input.task.taskId,
+          reason: "requester unavailable",
+        }),
+      ).toBe(false);
+      reopenOwners();
+      expect(subagentRuns.get(input.subagent.runId)).toEqual(before.subagent);
+      expect(getTaskById(input.task.taskId)).toMatchObject(before.task);
+      expect(systemEvents()).toEqual([]);
+    },
+  );
 
   it.each([
     { delivered: false, retireAfterSettle: false },
