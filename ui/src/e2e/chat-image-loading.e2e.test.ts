@@ -171,13 +171,22 @@ suite.define(() => {
                 name: style.animationName,
                 duration: Number.parseFloat(style.animationDuration),
                 iterations: style.animationIterationCount,
+                running: element
+                  .getAnimations({ subtree: true })
+                  .some((animation) => animation.playState === "running"),
+                transform: style.transform,
+                width: element.clientWidth,
               };
             });
-            expect(motion.name).toBe("shimmer");
             if (reducedMotion === "reduce") {
+              expect(motion.name).toBe("none");
               expect(motion.duration).toBeLessThan(0.001);
               expect(motion.iterations).toBe("1");
+              expect(motion.running).toBe(false);
+              const highlightX = Number.parseFloat(motion.transform.split(",")[4] ?? "NaN");
+              expect(Math.abs(highlightX + motion.width)).toBeLessThanOrEqual(1);
             } else {
+              expect(motion.name).toBe("shimmer");
               expect(motion.duration).toBe(2.4);
               expect(motion.iterations).toBe("infinite");
             }
