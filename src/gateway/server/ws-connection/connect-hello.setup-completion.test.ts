@@ -83,6 +83,7 @@ describe("sendGatewayHello setup completion ordering", () => {
 
           const handoffStarted = createDeferred();
           const releaseHandoff = createDeferred();
+          const onHelloDelivered = vi.fn();
           const broadcast = vi.fn((event: string) => {
             if (presenceFails && event === "presence") {
               throw new Error("test presence publication failure");
@@ -124,6 +125,7 @@ describe("sendGatewayHello setup completion ordering", () => {
               handoffStarted.resolve();
               await releaseHandoff.promise;
             }),
+            onHelloDelivered,
             pendingNodePairingCleanup: {},
             releasePendingNodePairingCleanup: vi.fn(async () => undefined),
           };
@@ -167,6 +169,10 @@ describe("sendGatewayHello setup completion ordering", () => {
             deliveryState: "uncertain",
           });
           expect(completionAfterHandoff).toMatchObject({ deliveryState: "confirmed" });
+          expect(onHelloDelivered).toHaveBeenCalledOnce();
+          expect(onHelloDelivered.mock.invocationCallOrder[0]).toBeLessThan(
+            broadcast.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+          );
           expect(broadcast).toHaveBeenCalledWith(
             "device.pair.setup.completed",
             expect.objectContaining({ setupId: issued.setupId }),
@@ -211,6 +217,7 @@ describe("sendGatewayHello setup completion ordering", () => {
 
         const broadcast = vi.fn();
         const close = vi.fn();
+        const onHelloDelivered = vi.fn();
         const context = {
           handler: {
             getClient: () => null,
@@ -235,6 +242,7 @@ describe("sendGatewayHello setup completion ordering", () => {
           sendFrame: vi.fn(async () => {
             throw new Error("socket closed");
           }),
+          onHelloDelivered,
           pendingNodePairingCleanup: {},
           releasePendingNodePairingCleanup: vi.fn(async () => undefined),
         };
@@ -258,6 +266,7 @@ describe("sendGatewayHello setup completion ordering", () => {
         await sendGatewayHello(context as never, state as never, {});
 
         expect(close).toHaveBeenCalled();
+        expect(onHelloDelivered).not.toHaveBeenCalled();
         expect(broadcast).toHaveBeenCalledWith(
           "device.pair.setup.deliveryUncertain",
           expect.objectContaining({ setupId: issued.setupId, deviceId: paired.deviceId }),
@@ -341,6 +350,7 @@ describe("sendGatewayHello setup completion ordering", () => {
           },
           configSnapshot: {},
           sendFrame: vi.fn(async () => undefined),
+          onHelloDelivered: vi.fn(),
           pendingNodePairingCleanup: {},
           releasePendingNodePairingCleanup: vi.fn(async () => undefined),
         };
@@ -433,6 +443,7 @@ describe("sendGatewayHello setup completion ordering", () => {
           sendFrame: vi.fn(async () => {
             throw new Error("socket closed");
           }),
+          onHelloDelivered: vi.fn(),
           pendingNodePairingCleanup: {},
           releasePendingNodePairingCleanup: vi.fn(async () => undefined),
         };

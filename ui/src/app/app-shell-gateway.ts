@@ -18,6 +18,7 @@ import {
   resetServerUiPrefsSync,
   resolveServerUiPrefState,
 } from "./server-prefs.ts";
+import { invalidateUserPreferences } from "./user-prefs-cache.ts";
 
 const AGENT_ROSTER_REFRESH_DEBOUNCE_MS = 100;
 
@@ -188,6 +189,9 @@ export class ShellGatewayOwner {
         "profileId" in payload &&
         payload.profileId === profileId
       ) {
+        if (context.gateway.snapshot.client) {
+          invalidateUserPreferences(context.gateway.snapshot.client);
+        }
         void this.refreshProfileAppearancePrefs(context, true).catch(() => undefined);
       }
       return;
@@ -272,7 +276,7 @@ export class ShellGatewayOwner {
       next.agents.length > 0 &&
       !nextIds.has(activeAgentId)
     ) {
-      context.agentSelection.set(next.defaultId);
+      context.agentSelection.set(next.defaultId, { background: true });
     }
   }
 

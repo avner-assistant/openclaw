@@ -1,4 +1,6 @@
+import { html } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { REDACTED_SENTINEL } from "../../lib/config-form-utils.ts";
 import { PluginSettingsEditor } from "./settings-editor.ts";
 import type { PluginSettingsEditorModel } from "./settings-model.ts";
 
@@ -55,6 +57,28 @@ async function mount(overrides: Partial<PluginSettingsEditorModel> = {}) {
 }
 afterEach(() => document.body.replaceChildren());
 describe("grouped plugin settings", () => {
+  it("keeps a retired menu bound to the setting action that rendered it", async () => {
+    const { editor, model } = await mount();
+    const original = vi.fn();
+    editor.onAskSetting = original;
+    await editor.updateComplete;
+    const menu = editor.querySelector('[data-setting="enabled"] wa-dropdown')!;
+    const replacement = vi.fn();
+    editor.onAskSetting = replacement;
+    editor.model = {
+      ...model,
+      pluginId: "replacement",
+      configHints: {},
+      configSchema: { type: "object", properties: { limit: { type: "number" } } },
+    };
+    await editor.updateComplete;
+    expect(menu.isConnected).toBe(false);
+    menu.dispatchEvent(new CustomEvent("wa-select", { detail: { item: { value: "ask" } } }));
+    expect(replacement).not.toHaveBeenCalled();
+    expect(original).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ path: ["plugins", "entries", "fixture", "config", "enabled"] }),
+    );
+  });
   it("shows every group and remaining field once, with names instead of raw keys or counts", async () => {
     const { editor, model } = await mount();
     expect([...editor.querySelectorAll("h2")].map((e) => e.textContent?.trim())).toEqual([
@@ -177,6 +201,64 @@ describe("grouped plugin settings", () => {
       [],
     );
   });
+  it.each([
+    { schema: { type: "string" }, value: REDACTED_SENTINEL, replacement: "replacement-key" },
+    {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          source: { type: "string" },
+          provider: { type: "string" },
+          id: { type: "string" },
+        },
+      },
+      value: { source: "env", provider: "default", id: "SEARCH_API_KEY" },
+      replacement: { source: "file", provider: "team", id: "/key" },
+    },
+  ])(
+    "keeps a configured nested $schema.type credential as one specialized editor",
+    async ({ schema, value, replacement }) => {
+      const { editor, model } = await mount({
+        configHints: { [`${prefix}.search.apiKey`]: { sensitive: true } },
+        configValue: {
+          plugins: { entries: { fixture: { config: { search: { apiKey: value, mode: "web" } } } } },
+        },
+        configSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            search: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                apiKey: { ...schema, title: "API key" },
+                mode: { type: "string", title: "Mode" },
+              },
+            },
+          },
+        },
+      });
+      editor.renderCredential = (field) =>
+        field.path.at(-1) === "apiKey"
+          ? html`<button @click=${() => field.onPatch(field.path, replacement)}>
+              Replace credential
+            </button>`
+          : undefined;
+      await editor.updateComplete;
+      const credential = [...editor.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Replace credential",
+      );
+      expect(credential).toBeDefined();
+      expect(editor.textContent).not.toContain(REDACTED_SENTINEL);
+      expect(editor.querySelector('input[aria-label="Search: Mode"]')).not.toBeNull();
+      credential!.click();
+      expect(model.onConfigPatch).toHaveBeenCalledExactlyOnceWith(
+        ["plugins", "entries", "fixture", "config", "search", "apiKey"],
+        replacement,
+      );
+    },
+  );
   it("activates a checkbox row once and keeps read-only rows inert", async () => {
     const { editor, model } = await mount();
     const row = editor.querySelector<HTMLElement>('[data-setting="enabled"]')!;

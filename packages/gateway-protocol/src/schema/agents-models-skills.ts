@@ -1,9 +1,14 @@
 // Gateway Protocol schema module defines protocol validation shapes.
 import type { Static } from "typebox";
 import { Type } from "typebox";
+import { AgentDatabaseAdmissionRefusalSchema } from "./agent-database-admission.js";
 import { closedObject } from "./closed-object.js";
-import { WorkerExecutionModeSchema } from "./environments.js";
 import { ChatAccountSelectionSchema, ModelAuthProfileIdSchema } from "./model-account-selection.js";
+import {
+  GatewayAgentRuntimeSchema,
+  GatewayContextWindowOptionSchema,
+  GatewayThinkingLevelOptionSchema,
+} from "./model-runtime-options.js";
 import { NonEmptyString } from "./primitives.js";
 import { GitHubSetupHandleSchema } from "./secrets.js";
 import { SessionPermissionModeSchema } from "./sessions-row.js";
@@ -16,45 +21,6 @@ import { SessionPermissionModeSchema } from "./sessions-row.js";
  * discovery. Keep public request/result schemas documented because they are
  * shared by gateway RPC, CLI, and UI clients.
  */
-
-/** Model option shown in selectors and model catalog results. */
-const GatewayAgentRuntimeSchema = closedObject({
-  id: NonEmptyString,
-  fallback: Type.Optional(Type.Union([Type.Literal("openclaw"), Type.Literal("none")])),
-  cloudPlacementSupported: Type.Optional(Type.Boolean()),
-  cloudPlacementExecutionMode: Type.Optional(WorkerExecutionModeSchema),
-  devicePlacement: Type.Optional(
-    closedObject({
-      requiredNodeCommands: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
-        maxItems: 32,
-        uniqueItems: true,
-      }),
-      consumesWorkerSlot: Type.Boolean(),
-    }),
-  ),
-  devicePlacementSupported: Type.Optional(Type.Boolean()),
-  source: Type.Union([
-    Type.Literal("env"),
-    Type.Literal("agent"),
-    Type.Literal("defaults"),
-    Type.Literal("model"),
-    Type.Literal("provider"),
-    Type.Literal("implicit"),
-    Type.Literal("session"),
-    Type.Literal("session-key"),
-  ]),
-});
-
-const GatewayThinkingLevelOptionSchema = closedObject({
-  id: NonEmptyString,
-  label: NonEmptyString,
-});
-
-const GatewayContextWindowOptionSchema = closedObject({
-  id: NonEmptyString,
-  label: NonEmptyString,
-  contextWindow: Type.Integer({ minimum: 1 }),
-});
 
 const ModelUnavailableReasonSchema = Type.Union([
   Type.Literal("missing-auth"),
@@ -127,17 +93,10 @@ const AgentCreatedViaSchema = Type.Union([
 /** Condensed agent record returned by list APIs. */
 export const AgentSummarySchema = closedObject({
   id: NonEmptyString,
+  /** Effective explicit utility model; absent for automatic or disabled utility routing. */
+  utilityModel: Type.Optional(NonEmptyString),
   status: Type.Optional(Type.Literal("degraded")),
-  admissionRefusal: Type.Optional(
-    closedObject({
-      agentId: NonEmptyString,
-      paths: Type.Array(NonEmptyString),
-      embeddedOwnerId: NonEmptyString,
-      code: Type.Literal("agent-database-ownership-mismatch"),
-      reason: NonEmptyString,
-      repairHint: NonEmptyString,
-    }),
-  ),
+  admissionRefusal: Type.Optional(AgentDatabaseAdmissionRefusalSchema),
   kind: Type.Optional(AgentKindSchema),
   createdVia: Type.Optional(AgentCreatedViaSchema),
   creatorAgentId: Type.Optional(Type.Union([NonEmptyString, Type.Null()])),

@@ -122,6 +122,7 @@ function makeContext(role: "operator" | "node", scopes: string[]) {
     },
     configSnapshot: {},
     sendFrame: vi.fn(async () => undefined),
+    onHelloDelivered: vi.fn(),
     pendingNodePairingCleanup: {},
     releasePendingNodePairingCleanup: vi.fn(async () => undefined),
   };

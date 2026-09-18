@@ -7,11 +7,13 @@ import {
 } from "../../components/config-form-structured-draft.ts";
 import { renderMapField } from "../../components/config-form.node.collection-map.ts";
 import { resolveConfigObjectFields } from "../../components/config-form.node.collection.ts";
-import type { ConfigNodeRenderParams } from "../../components/config-form.node.shared.ts";
+import {
+  isSecretRefObject,
+  type ConfigNodeRenderParams,
+} from "../../components/config-form.node.shared.ts";
 import { matchesNodeSearch, resolveConfigFieldMeta } from "../../components/config-form.search.ts";
 import {
   configFieldId,
-  hasSensitiveConfigData,
   hintForPath,
   pathKey,
   schemaType,
@@ -42,6 +44,7 @@ function flattenFields(
   const { label, help } = resolveConfigFieldMeta(params.path, params.schema, params.hints);
   const labels = [...ancestors, label];
   const initial = structuredDraftInitialValue(params);
+  // SecretRef metadata stays atomic; source/provider/id are not child settings.
   if (
     schemaType(params.schema) === "object" &&
     params.schema.properties &&
@@ -50,8 +53,8 @@ function flattenFields(
     !params.schema.anyOf &&
     !params.schema.oneOf &&
     !params.schema.enum &&
+    !isSecretRefObject(params.value) &&
     !params.unsupported.has(pathKey(params.path)) &&
-    !hasSensitiveConfigData(params.value, params.path, params.hints) &&
     !shouldStageStructuredDraft(params, initial)
   ) {
     return resolveConfigObjectFields(params).fields.flatMap((field) =>
@@ -80,6 +83,8 @@ export class PluginSettingsEditor extends OpenClawLightDomElement {
 
   private renderField(field: PluginSettingsField) {
     const { label, help, path, disabled } = field;
+    // A retired dropdown keeps the callback that owns its rendered plugin selection.
+    const onAskSetting = this.onAskSetting;
     const effective = field.value === undefined ? field.schema.default : field.value;
     const isBoolean =
       !hintForPath(path, field.hints)?.placeholder &&
@@ -127,7 +132,7 @@ export class PluginSettingsEditor extends OpenClawLightDomElement {
               );
             }
             if (event.detail.item.value === "ask") {
-              this.onAskSetting?.(field);
+              onAskSetting?.(field);
             }
           }}
         >
@@ -144,7 +149,7 @@ export class PluginSettingsEditor extends OpenClawLightDomElement {
             ?disabled=${disabled || field.value === undefined || (field.isRequired && field.schema.default === undefined)}
             >${t("pluginsPage.editor.reset")}</wa-dropdown-item
           >
-          ${this.onAskSetting ? html`<wa-dropdown-item value="ask">${t("pluginsPage.editor.ask")}</wa-dropdown-item>` : nothing}
+          ${onAskSetting ? html`<wa-dropdown-item value="ask">${t("pluginsPage.editor.ask")}</wa-dropdown-item>` : nothing}
         </wa-dropdown>
       </div>
       <div class="plugin-editor__copy">

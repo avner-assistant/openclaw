@@ -219,8 +219,8 @@ yield only if external work still requires waiting. This applies even when the
 tool has already finished and its result appears in the transcript.
 
 Use the optional `message` field for private context that the resumed turn
-should receive. Use `acknowledgment` for a waiting reply when an interactive
-parent turn would otherwise end silently. The acknowledgment is not sent from
+should receive. OpenClaw sends a default waiting reply when an interactive
+parent turn would otherwise end silently; `acknowledgment` overrides its text. It is not sent from
 sub-agent, heartbeat, or silent turns, and it does not replace a reply or
 message already delivered during the turn. This host-owned waiting status
 bypasses message-tool-only source suppression; ordinary model replies remain
@@ -335,8 +335,17 @@ child session key. An authorized operator or integration must send that
 continuation; merely yielding does not schedule one.
 
 Use `action: "cancel"` with a `taskId` returned by `action: "list"` to stop
-a task. Cancellation is confined to the controlled session tree; a leaf
-sub-agent cannot cancel work owned by another session.
+a task. Native subagent cancellation requires current controller authority;
+retained task history and completion-recipient read/wait access do not grant
+that control. A leaf sub-agent cannot cancel work owned by another session.
+
+A canonical ACP task's recorded owner retains cancellation of its own exact
+execution after a session-parent change. Core task cancellation refuses retained ACP tasks
+without execution-instance metadata; select the current task or use ACP session
+controls instead. Control over descendants follows the child's current
+spawning session, or its current parent when no spawning session is recorded.
+Moving a normally spawned child's navigation parent does not transfer descendant
+control.
 
 Messages and control have distinct effects. `sessions_send` with
 `mode: "steer"` injects guidance into an active supported run and rejects an

@@ -149,6 +149,22 @@ function resolveCommand(command: string): string {
   throw new Error(`command not found in test PATH: ${command}`);
 }
 
+function seedReadyReview(fixture: ReturnType<typeof makeMismatchedWrapperRepo>) {
+  const reviewRoot = join(fixture.canonical, ".worktrees", "pr-123");
+  fixture.git(fixture.canonical, [
+    "worktree",
+    "add",
+    "--detach",
+    reviewRoot,
+    fixture.localRevision,
+  ]);
+  const review = validReview(fixture.localRevision);
+  review.pr.number = 123;
+  review.recommendation = "READY FOR /prepare-pr";
+  review.issueValidation.status = "valid";
+  writeReviewArtifacts(reviewRoot, review, { prNumber: 123, headSha: fixture.localRevision });
+}
+
 function parseSubcommandClassifications(script: string): Map<string, string> {
   const start = script.indexOf("# PR_SUBCOMMAND_CLASSIFICATIONS_BEGIN");
   const end = script.indexOf("# PR_SUBCOMMAND_CLASSIFICATIONS_END");
@@ -556,6 +572,9 @@ describe("scripts/pr wrappers", () => {
     "routes mismatched %s to the canonical wrapper despite opt-in",
     (command) => {
       const fixture = makeMismatchedWrapperRepo();
+      if (command === "prepare-run") {
+        seedReadyReview(fixture);
+      }
       const result = spawnSync(
         join(fixture.linked, "scripts", "pr"),
         [
@@ -821,7 +840,7 @@ fi
             'script_parent_dir="$1/scripts"',
             'source "$script_parent_dir/pr-lib/review.sh"',
             'node "$(review_artifacts_helper_path)" template "$2" "$3"',
-            'node "$(review_artifacts_helper_path)" validate .local/review.json .local/review.md .local/pr-meta.json',
+            'node "$(review_artifacts_helper_path)" validate .local/review.json .local/pr-meta.json',
           ].join("\n"),
           "anchor-review",
           anchor,
@@ -866,6 +885,27 @@ fi
         expect.soft(result.status, `${entry}\n${result.stdout}\n${result.stderr}`).toBe(exitCode);
         expect.soft(result.stderr, entry).toContain(message);
       }
+      // Import the actual adapter closure before it rejects missing arguments.
+      // Real provisioning and allocation-lease renewal have separate flows.
+      const provision = spawnSync(
+        process.execPath,
+        [
+          "--import",
+          join(anchor, "scripts/tsx.mjs"),
+          join(anchor, "scripts/pr-lib/worktree-provision.mts"),
+        ],
+        {
+          cwd: fixture.linked,
+          encoding: "utf8",
+          env: { ...fixture.env, TSX_TSCONFIG_PATH: join(anchor, "tsconfig.json") },
+        },
+      );
+      expect.soft(provision.status, provision.stderr).toBe(1);
+      expect.soft(provision.stderr).toContain("Usage: worktree-provision.mts");
+      expect.soft(provision.stderr).toContain("[pr-worktree-provision] FAILED (exit 1)");
+      expect
+        .soft(fixture.git(fixture.canonical, ["for-each-ref", "refs/openclaw"]).stdout)
+        .toBe("");
       // A later install may remove or redirect the canonical package aliases.
       // The materialized owner must keep its original installed dependency.
       const canonicalYaml = join(fixture.canonical, "node_modules/yaml");
@@ -957,9 +997,16 @@ fi
     },
   );
 
-  itPosix.each(["tampered", "missing"])(
-    "refuses an extracted anchor with a %s dependency",
-    (fault) => {
+  itPosix.each(
+    [
+      "scripts/lib/anchor-review-record.mjs",
+      "src/agents/worktrees/checkout.ts",
+      "src/state/openclaw-state-schema.sql",
+      "tsconfig.json",
+    ].flatMap((resource) => ["tampered", "missing"].map((fault) => ({ resource, fault }))),
+  )(
+    "refuses an extracted anchor with a $fault source/resource $resource",
+    ({ resource, fault }) => {
       const fixture = makeMismatchedWrapperRepo({ realModules: true });
       advanceAnchorReviewDependency(fixture);
       parkCanonicalOffAnchor(fixture);
@@ -971,9 +1018,9 @@ fi
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-C" ]; then
     if [ "$OPENCLAW_TEST_FAULT" = missing ]; then
-      rm "$2/scripts/lib/anchor-review-record.mjs"
+      rm "$2/$OPENCLAW_TEST_FAULT_PATH"
     else
-      printf '\\n// tampered\\n' >> "$2/scripts/lib/anchor-review-record.mjs"
+      printf '\\n// tampered\\n' >> "$2/$OPENCLAW_TEST_FAULT_PATH"
     fi
     exit
   fi
@@ -990,6 +1037,7 @@ exit 99
           ...fixture.env,
           OPENCLAW_TEST_TAR: resolveCommand("tar"),
           OPENCLAW_TEST_FAULT: fault,
+          OPENCLAW_TEST_FAULT_PATH: resource,
         },
       });
       expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(1);
@@ -1003,6 +1051,7 @@ exit 99
 
   it("routes a mismatched landing subcommand through the materialized anchor", () => {
     const fixture = makeMismatchedWrapperRepo();
+    seedReadyReview(fixture);
     parkCanonicalOffAnchor(fixture);
     const result = spawnSync(join(fixture.linked, "scripts", "pr"), ["prepare-run", "123"], {
       cwd: fixture.linked,
@@ -1064,9 +1113,7 @@ exit 99
       number: 123,
       headSha: fixture.localRevision,
     });
-    expect(readScript(join(reviewRoot, ".local", "review.md")).split("\n")[0]).toBe(
-      `Review artifact for PR #123 at ${fixture.localRevision}`,
-    );
+    expect(existsSync(join(reviewRoot, ".local", "review.md"))).toBe(false);
   });
 
   it.each([
@@ -1225,8 +1272,8 @@ exit 99
   });
 
   it.each(
-    ["tsx", "zod", "minimatch", "yaml"].flatMap((dependency) =>
-      [false, true].map((matching) => ({ dependency, matching })),
+    ["tsx", "zod", "minimatch", "yaml", "@openclaw/fs-safe", "jiti", "kysely"].flatMap(
+      (dependency) => [false, true].map((matching) => ({ dependency, matching })),
     ),
   )(
     "refuses missing $dependency before handoff (matching=$matching) without installing",

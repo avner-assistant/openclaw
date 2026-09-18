@@ -48,6 +48,8 @@ const repositoryScriptEntries = [
   "scripts/dev/computer-use-macos-live-proof.ts!",
   "scripts/dev/ios-node-e2e.ts!",
   "scripts/diffs-shiki-curated.ts!",
+  // The Doctor migration guide invokes this source-checkout replay by path.
+  "scripts/doctor-config-upgrade-replay.mjs!",
   // Reusable Docker workflows invoke this from the downloaded .release-harness tree.
   "scripts/docker-e2e.mts!",
   // Docker and package-install harnesses invoke this verifier by path.
@@ -169,6 +171,7 @@ const repositoryScriptEntries = [
   // merge.sh invokes this native review-authority parser by path.
   "scripts/pr-lib/clawsweeper-review-gate.mjs!",
   "scripts/pr-lib/gh-api-preflight.mjs!",
+  "scripts/pr-lib/materialize-dependencies.mjs!",
   "scripts/pr-lib/merge-body.mjs!",
   // merge.sh executes legacy capture qualification as a standalone Node CLI.
   "scripts/pr-lib/merge-legacy-refusal.mjs!",
@@ -176,6 +179,8 @@ const repositoryScriptEntries = [
   // worktree.sh invokes this journal-state validator by path before native replay.
   "scripts/pr-lib/review-transition-state.mjs!",
   "scripts/pr-lib/process-group-runner.mjs!",
+  // worktree.sh launches the locked cold-worktree adapter by path.
+  "scripts/pr-lib/worktree-provision.mts!",
   "scripts/pre-commit/filter-staged-files.mjs!",
   "scripts/print-live-docker-plugin-selection.mjs!",
   "scripts/qa-coverage-report.ts!",
@@ -300,6 +305,7 @@ const rootEntries = [
   "src/plugins/build-smoke-entry.ts!",
   // Required metadata readers load this tsdown entry by computed source/dist path.
   "src/plugins/plugin-metadata-readers.runtime.ts!",
+  "src/commands/doctor/shared/legacy-config-binding-repair.runtime.ts!",
   // Released Gateways still import this stable entry after an on-disk update.
   "src/gateway/plugin-channel-reload-targets.ts!",
   // Package-script owners invoke these generated-artifact modules directly.
