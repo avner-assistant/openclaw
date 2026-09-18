@@ -21,6 +21,7 @@ import {
   retryAssistantAttachmentAvailability,
 } from "./chat-message-attachment-availability.ts";
 import { renderAssistantAttachmentStatusCard } from "./chat-message-attachment-status.ts";
+import { chatImageFrameStyle } from "./chat-message-image-frame.ts";
 import { openResolvedImage } from "./chat-message-image-open.ts";
 import {
   buildAssistantAttachmentUrl,
@@ -49,7 +50,6 @@ import {
 const MANAGED_OUTGOING_IMAGE_FETCH_TIMEOUT_MS = 30_000;
 const MANAGED_OUTGOING_IMAGE_RETRY_MS = 5_000;
 const CANONICAL_IMAGE_HANDOFF_TIMEOUT_MS = 30_000;
-const MIN_CHAT_IMAGE_PREVIEW_WIDTH = 160;
 type ManagedImageVariant = "full" | "thumbnail";
 
 type RetainedInlineImage = {
@@ -312,23 +312,8 @@ class MessageImageResourceDirective extends AsyncDirective {
       this.options,
       this.frameSlot,
     );
-    this.frameStyle ??= frame?.style;
-    if (this.frameStyle === undefined) {
-      const sized =
-        Number.isFinite(img.width) &&
-        img.width! > 0 &&
-        Number.isFinite(img.height) &&
-        img.height! > 0;
-      const ratio = sized ? img.width! / img.height! : 3 / 2;
-      const width = sized
-        ? img.width! < MIN_CHAT_IMAGE_PREVIEW_WIDTH
-          ? MIN_CHAT_IMAGE_PREVIEW_WIDTH
-          : Math.min(img.width!, 400, 360 * ratio)
-        : 400;
-      const height = Math.min(360, width / ratio);
-      // Late facts and canonical handoff must not resize already presented pixels.
-      this.frameStyle = `--chat-image-width: ${width}px; --chat-image-ratio: ${width} / ${height}`;
-    }
+    // Late facts and canonical handoff must not resize already presented pixels.
+    this.frameStyle ??= frame?.style ?? chatImageFrameStyle(img);
     if (frame) {
       frame.style = this.frameStyle;
     }
