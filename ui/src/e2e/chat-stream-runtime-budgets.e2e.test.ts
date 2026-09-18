@@ -3,6 +3,7 @@ import path from "node:path";
 import { beforeEach, expect, it } from "vitest";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import {
+  chatSessionListResponse,
   createChatFlowE2eSuite,
   installMockGateway,
   requireRecord,
@@ -545,7 +546,20 @@ function buildLongTranscriptFixture(messageCount: number): Array<Record<string, 
 suite.define(() => {
   it("commits a streamed delta burst in frame-bound transcript batches", async () => {
     await suite.withPage(createControlUiE2eContextOptions(), async ({ page }) => {
-      const gateway = await installMockGateway(page);
+      const gateway = await installMockGateway(page, {
+        methodResponses: {
+          // The parent has no children. Returning it from a child-only read would
+          // publish an unrelated roster update during the streaming measurement.
+          "sessions.list": {
+            cases: [
+              {
+                match: { spawnedBy: "agent:main:main" },
+                response: chatSessionListResponse([]),
+              },
+            ],
+          },
+        },
+      });
       await page.goto(`${suite.server.baseUrl}chat`);
       await gateway.waitForRequest("chat.startup");
       const runId = await openStreamingTurn(page, gateway, "burst coalescing probe");
