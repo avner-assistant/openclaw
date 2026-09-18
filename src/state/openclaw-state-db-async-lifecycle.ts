@@ -86,6 +86,11 @@ export function getOpenClawDatabaseMaintenanceScope():
   return maintenanceResources.current.getStore()?.scope;
 }
 
+/** Delayed work acquires its own resources instead of inheriting the completed scope. */
+export function runOutsideOpenClawDatabaseMaintenanceScope<T>(operation: () => T): T {
+  return maintenanceResources.current.exit(operation);
+}
+
 export function isOpenClawDatabaseMaintenanceResourceOwned(
   resource: object,
   scope: OpenClawDatabaseMaintenanceScope,
@@ -282,7 +287,7 @@ export function createOpenClawStateDatabaseAsyncLifecycle() {
   const resolve = (pathname: string, preparedIdentity?: DatabasePathIdentity): IdentityRecord => {
     const resolvedPath = path.resolve(pathname);
     const cached = known(resolvedPath);
-    if (cached) {
+    if (cached && (!preparedIdentity || cached.identity.key === preparedIdentity.key)) {
       return cached;
     }
     const identity = preparedIdentity ?? readDatabasePathIdentitySync(resolvedPath);
@@ -344,9 +349,9 @@ export function createOpenClawStateDatabaseAsyncLifecycle() {
 
   return {
     identity(pathname: string): DatabasePathIdentity | undefined {
-      return resolveForNative(pathname)?.identity;
+      return known(pathname)?.identity ?? inspectDatabasePathIdentitySync(pathname);
     },
-    knownIdentity(pathname: string): DatabasePathIdentity | undefined {
+    knownIdentity(this: void, pathname: string): DatabasePathIdentity | undefined {
       return known(pathname)?.identity;
     },
     publish(pathname: string): DatabasePathIdentity {
@@ -367,8 +372,7 @@ export function createOpenClawStateDatabaseAsyncLifecycle() {
         }
       }
       if (!record) {
-        record = { identity, paths: new Set(), generation: {} };
-        records.set(identity.key, record);
+        record = resolve(resolvedPath, identity);
       }
       record.paths.add(resolvedPath).add(identity.canonicalPath);
       return identity;
@@ -389,7 +393,7 @@ export function createOpenClawStateDatabaseAsyncLifecycle() {
         resources.delete(resource);
       };
     },
-    capture(pathname: string): OpenClawStateDatabaseReadAdmission {
+    capture(this: void, pathname: string): OpenClawStateDatabaseReadAdmission {
       const databasePath = path.resolve(pathname);
       const record = resolve(databasePath);
       assertOpen(record);

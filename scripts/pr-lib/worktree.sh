@@ -216,7 +216,7 @@ checkout_pr_worktree_target() {
 }
 
 fetch_canonical_ref() {
-  local refspec="$1" root source git_dir
+  local refspec="$1" root source git_dir promisor filter=""
   shift
   root=$(repo_root) || return 1
   source=$(git -C "$root" remote get-url origin) || return 1
@@ -224,7 +224,19 @@ fetch_canonical_ref() {
   # Resolve relative URLs at the canonical root; ignore worktree origin/refmaps.
   # Other PRs and ordinary fetches own shared refs and the root FETCH_HEAD.
   # Automatic maintenance can prune unrelated worktree metadata, even on fetch.
-  git -C "$root" --git-dir="$git_dir" fetch --no-auto-maintenance --no-tags --refmap= "$@" "$source" "$refspec"
+  set -- fetch --no-auto-maintenance --no-tags --refmap= "$@" "$source" "$refspec"
+  promisor=$(git -C "$root" config --bool remote.origin.promisor) || [ "$?" -eq 1 ] || return 1
+  if [ "$promisor" = true ]; then
+    filter=$(git -C "$root" config --get remote.origin.partialclonefilter) || [ "$?" -eq 1 ] || return 1
+    if [ -n "$filter" ]; then
+      # Literal URLs lose origin's filter; --filter would persist a new remote.
+      # Project the canonical promisor settings only for this fetch.
+      set -- "--config-env=remote.$source.promisor=PR_CANONICAL_FETCH_PROMISOR" \
+        "--config-env=remote.$source.partialclonefilter=PR_CANONICAL_FETCH_FILTER" "$@"
+    fi
+  fi
+  PR_CANONICAL_FETCH_PROMISOR="$promisor" PR_CANONICAL_FETCH_FILTER="$filter" \
+    git -C "$root" --git-dir="$git_dir" "$@"
 }
 
 fetch_canonical_main() {
@@ -284,6 +296,21 @@ refresh_main_snapshot() {
   PR_MAIN_SHA="$sha"
 }
 
+provision_pr_worktree() {
+  local root="$1" pr="$2" seed_sha="$3" provisioner_dir
+  provisioner_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P) || return 1
+  # Runtime code and workspace aliases follow the wrapper's selected trust anchor.
+  # Pass current shell lock facts; the adapter consumes the owner's live predicate.
+  (
+    # The trusted wrapper pins installed packages; caller module-dir overrides
+    # must not redirect this source loader or reconcile its dependency links.
+    unset PNPM_CONFIG_MODULES_DIR pnpm_config_modules_dir npm_config_modules_dir
+    TSX_TSCONFIG_PATH="$provisioner_dir/../../tsconfig.json" \
+      node --import "$provisioner_dir/../tsx.mjs" "$provisioner_dir/worktree-provision.mts" \
+        "$root" "$pr" "$seed_sha" "$PR_OPERATION_LOCK_REF" "$PR_OPERATION_LOCK_OWNER_OID"
+  ) || return 1
+}
+
 enter_worktree() {
   # OR-list callers disable errexit throughout this function; guard required steps explicitly.
   local pr="$1"
@@ -320,7 +347,9 @@ enter_worktree() {
     # The PR lock owns this existing temp branch, not shared origin/main or FETCH_HEAD.
     PR_MAIN_SHA=""
     fetch_canonical_main "refs/heads/temp/pr-$pr" || return 1
-    git -C "$root" worktree add -B "temp/pr-$pr" "$dir" "refs/heads/temp/pr-$pr" || return 1
+    local seed_sha
+    seed_sha=$(GIT_NO_LAZY_FETCH=1 git -C "$root" rev-parse --verify "refs/heads/temp/pr-$pr^{commit}") || return 1
+    provision_pr_worktree "$root" "$pr" "$seed_sha" || return 1
     resolved_parent=$(resolve_existing_dir_path "$(dirname "$dir")") || return 1
     resolved_dir="$resolved_parent/pr-$pr"
     initialized_sha=$(git -C "$dir" rev-parse --verify HEAD) || return 1

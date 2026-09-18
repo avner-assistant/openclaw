@@ -1,4 +1,6 @@
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
+import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { parseAgentSessionKey } from "../routing/session-key.js";
 import type { JsonValue, TaskRecord, TaskRuntime, TaskScopeKind } from "./task-registry.types.js";
 
 const TASK_BACKING_DETAIL_KIND = "task_backing_instance";
@@ -53,12 +55,10 @@ export function sameTaskBackingInstance(
       : false;
 }
 
-export function selectCurrentCanonicalTaskBacking(params: {
+export function selectLatestCanonicalTaskBacking(params: {
   runtime: TaskRuntime;
   scopeKind: TaskScopeKind;
-  ownerKey: string;
   childSessionKey: string;
-  runId: string;
   candidates: readonly TaskRecord[];
   isTaskMirroredFlow: (flowId: string) => boolean;
 }): { task: TaskRecord; instance: TaskBackingInstance } | undefined {
@@ -84,7 +84,64 @@ export function selectCurrentCanonicalTaskBacking(params: {
         right.task.taskId.localeCompare(left.task.taskId)
       );
     });
-  const current = candidates[0];
+  return candidates[0];
+}
+
+/** Exclude replaced ACP instances without changing each lookup owner's tie order. */
+export function filterCurrentTaskRunBackings(
+  matches: readonly TaskRecord[],
+  isTaskMirroredFlow: (flowId: string) => boolean,
+): TaskRecord[] {
+  const acpScopes = new Map<
+    string,
+    { childSessionKey: string; scopeKind: TaskScopeKind; candidates: TaskRecord[] }
+  >();
+  for (const task of matches) {
+    const childSessionKey = normalizeOptionalString(task.childSessionKey);
+    if (task.runtime !== "acp" || !childSessionKey) {
+      continue;
+    }
+    const scope = JSON.stringify([
+      task.scopeKind,
+      normalizeOptionalString(task.agentId) ?? parseAgentSessionKey(task.childSessionKey)?.agentId,
+      childSessionKey,
+    ]);
+    const group = acpScopes.get(scope);
+    if (group) {
+      group.candidates.push(task);
+    } else {
+      acpScopes.set(scope, { childSessionKey, scopeKind: task.scopeKind, candidates: [task] });
+    }
+  }
+  const superseded = new Set<string>();
+  for (const { childSessionKey, scopeKind, candidates } of acpScopes.values()) {
+    const current = selectLatestCanonicalTaskBacking({
+      runtime: "acp",
+      scopeKind,
+      childSessionKey,
+      candidates,
+      isTaskMirroredFlow,
+    });
+    if (!current) {
+      continue;
+    }
+    for (const candidate of candidates) {
+      const backing = readTaskBackingInstance(candidate.detail);
+      if (!backing || !sameTaskBackingInstance(backing, current.instance)) {
+        superseded.add(candidate.taskId);
+      }
+    }
+  }
+  return matches.filter((candidate) => !superseded.has(candidate.taskId));
+}
+
+export function selectCurrentCanonicalTaskBacking(
+  params: Parameters<typeof selectLatestCanonicalTaskBacking>[0] & {
+    ownerKey: string;
+    runId: string;
+  },
+): ReturnType<typeof selectLatestCanonicalTaskBacking> {
+  const current = selectLatestCanonicalTaskBacking(params);
   return current?.task.ownerKey === params.ownerKey && current.task.runId?.trim() === params.runId
     ? current
     : undefined;

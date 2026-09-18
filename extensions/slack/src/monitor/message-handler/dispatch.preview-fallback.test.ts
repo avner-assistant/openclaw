@@ -15,6 +15,7 @@ import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { slackSetupPlugin } from "../../channel.setup.js";
 import { getSlackSessionRuns } from "../session-run-targets.js";
+import { emitCompactProgressScenario } from "./dispatch.compact-progress.test-support.js";
 
 const FINAL_REPLY_TEXT = "final answer";
 const THREAD_TS = "thread-1";
@@ -4246,6 +4247,44 @@ describe("dispatchPreparedSlackMessage preview fallback", () => {
     );
   });
 
+  it("clears a queued quiet preamble after its original dispatch has returned", async () => {
+    const draftStream = createDraftStreamStub();
+    createSlackDraftStreamMock.mockReturnValueOnce(draftStream);
+    mockedSlackStreamingMode = "progress";
+    mockedSlackDraftMode = "status_final";
+    mockedDispatchSequence = [];
+
+    await dispatchPreparedSlackMessage(
+      createPreparedSlackMessage({
+        accountConfig: {
+          streaming: {
+            mode: "progress",
+            progress: { label: false, commentary: true, toolProgress: false, maxLines: 1 },
+          },
+        },
+      }),
+    );
+    await capturedReplyOptions?.onQueuedFollowupAdmitted?.();
+    await requireCapturedItemEventHandler()({
+      kind: "preamble",
+      itemId: "queued-preamble",
+      progressText: "Checking the followup",
+    });
+    expectLastDraftUpdateText(draftStream, "_Checking the followup_");
+    const clearCallsBeforeSettlement = draftStream.clear.mock.calls.length;
+    const dropCallsBeforeSettlement = draftStream.dropDetachedMessages.mock.calls.length;
+
+    await capturedReplyOptions?.onQueuedFollowupSettled?.();
+
+    expect(draftStream.clear).toHaveBeenCalledTimes(clearCallsBeforeSettlement + 1);
+    expect(draftStream.dropDetachedMessages).toHaveBeenCalledTimes(dropCallsBeforeSettlement + 1);
+    expect(draftStream.clear.mock.invocationCallOrder.at(-1)).toBeGreaterThan(
+      draftStream.update.mock.invocationCallOrder.at(-1) ?? Number.POSITIVE_INFINITY,
+    );
+    // Settlement removes temporary presentation; it must not create another reply.
+    expect(deliverRepliesMock).not.toHaveBeenCalled();
+  });
+
   it("clears interrupted partial previews when the turn finishes silently", async () => {
     const draftStream = createDraftStreamStub();
     createSlackDraftStreamMock.mockReturnValueOnce(draftStream);
@@ -4523,7 +4562,7 @@ describe("dispatchPreparedSlackMessage preview fallback", () => {
   });
 
   it.each([undefined, "compact"] as const)(
-    "buffers the first notifying preamble but streams later edits (style=%s)",
+    "keeps complete preambles visible between streamed updates (style=%s)",
     async (style) => {
       const checkpoint = vi.fn();
       let postedMessageId: string | undefined;
@@ -4593,7 +4632,12 @@ describe("dispatchPreparedSlackMessage preview fallback", () => {
           kind: "checkpoint",
           run: async () => {
             checkpoint();
-            expectLastDraftUpdateText(draftStream, "_The result_");
+            // A human reply can rotate the preview at this point. Keeping the
+            // last complete preamble prevents an abandoned word fragment.
+            expectLastDraftUpdateText(draftStream, "_I will check the result._");
+            expect(draftStream.update.mock.calls.at(-1)?.[0]).toMatchObject({
+              allowNewMessage: true,
+            });
           },
         },
         {
@@ -4626,6 +4670,9 @@ describe("dispatchPreparedSlackMessage preview fallback", () => {
       // prove that Slack never received a first-token notification.
       expect(checkpoint).toHaveBeenCalledTimes(4);
       expectLastDraftUpdateText(draftStream, "_The result is ready._");
+      expect(draftStream.update.mock.calls.at(-1)?.[0]).toMatchObject({
+        allowNewMessage: true,
+      });
       expect(finalizeSlackPreviewEditMock).not.toHaveBeenCalled();
       expectDeliverReplyCall(0, FINAL_REPLY_TEXT);
       expect(draftStream.clear).toHaveBeenCalledOnce();
@@ -4827,14 +4874,15 @@ describe("dispatchPreparedSlackMessage preview fallback", () => {
     expect(draftUpdateTexts(draftStream).join("\n")).not.toMatch(/Working|💬|•|⏱️/u);
   });
 
-  it.each([
-    ["compact", false],
-    ["compact", true],
-    [undefined, false],
-    [undefined, true],
-  ] as const)(
-    "keeps compact progress authored text without tool diagnostics (style=%s, native=%s)",
-    async (style, native) => {
+  it.each(
+    [true, false, undefined].flatMap((commentary) =>
+      (["compact", undefined] as const).flatMap((style) =>
+        [false, true].map((native) => ({ commentary, style, native })),
+      ),
+    ),
+  )(
+    "keeps only preambles through reasoning and failed tools (style=$style, native=$native, commentary=$commentary)",
+    async ({ style, native, commentary }) => {
       const draftStream = createDraftStreamStub();
       createSlackDraftStreamMock.mockReturnValueOnce(draftStream);
       finalizeSlackPreviewEditMock.mockResolvedValueOnce(undefined);
@@ -4843,61 +4891,13 @@ describe("dispatchPreparedSlackMessage preview fallback", () => {
       mockedDispatchSequence = [{ kind: "final", payload: { text: FINAL_REPLY_TEXT } }];
       mockedReplyOptionEvents = [
         {
-          kind: "plan",
-          phase: "update",
-          steps: [
-            { step: "Inspect", status: "in_progress" },
-            { step: "Patch", status: "pending" },
-            { step: "Verify", status: "pending" },
-          ],
-        },
-        {
-          kind: "item",
-          itemKind: "preamble",
-          itemId: "preamble-1",
-          progressText: "Checking the current Slack behavior.",
-        },
-        {
-          kind: "tool_start",
-          itemId: "tool-1",
-          name: "bash",
-          phase: "start",
-          args: { command: "pnpm test" },
-        },
-        {
-          kind: "command_output",
-          itemId: "tool-1",
-          name: "bash",
-          phase: "end",
-          title: "pnpm test",
-          exitCode: 0,
-        },
-        { kind: "reasoning", text: "Considering the transport choice." },
-        {
-          kind: "plan",
-          phase: "update",
-          explanation: "Running the checklist.",
-          steps: [{ step: "Patch", status: "in_progress" }],
-        },
-        {
-          kind: "item",
-          itemKind: "preamble",
-          itemId: "preamble-2",
-          progressText: "The fix is ready; I’m checking the result.",
-        },
-        {
-          kind: "command_output",
-          itemId: "tool-2",
-          name: "bash",
-          phase: "end",
-          title: "pnpm test",
-          exitCode: 1,
-        },
-        {
-          kind: "plan",
-          phase: "update",
-          explanation: "Finishing the checklist.",
-          steps: [{ step: "Verify", status: "completed" }],
+          kind: "checkpoint",
+          run: async () => {
+            if (!capturedReplyOptions) {
+              throw new Error("expected Slack reply options");
+            }
+            await emitCompactProgressScenario(capturedReplyOptions);
+          },
         },
       ];
 
@@ -4910,7 +4910,7 @@ describe("dispatchPreparedSlackMessage preview fallback", () => {
                 style,
                 nativeTaskCards: true,
                 label: false,
-                commentary: true,
+                commentary,
                 toolProgress: false,
                 maxLines: 1,
               },
@@ -4923,14 +4923,16 @@ describe("dispatchPreparedSlackMessage preview fallback", () => {
       expect(startSlackStreamMock).not.toHaveBeenCalled();
       expect(appendSlackStreamMock).not.toHaveBeenCalled();
       expect(stopSlackStreamMock).not.toHaveBeenCalled();
-      expect(draftStream.update.mock.calls.every(([update]) => typeof update === "string")).toBe(
-        true,
+      expect(
+        draftStream.update.mock.calls.every(
+          ([update]) => typeof update === "string" || !("blocks" in update),
+        ),
+      ).toBe(true);
+      expect(draftUpdateTexts(draftStream)).toEqual(
+        ["Checking the current Slack behavior.", "The fix is ready; I’m checking the result."].map(
+          (text) => (commentary ? `_${text}_` : text),
+        ),
       );
-      expect(draftUpdateTexts(draftStream)).toEqual([
-        "_Checking the current Slack behavior._",
-        "🧠 _Considering the transport choice._",
-        "_The fix is ready; I’m checking the result._",
-      ]);
       expect(finalizeSlackPreviewEditMock).not.toHaveBeenCalled();
       expect(deliverRepliesMock).toHaveBeenCalledOnce();
       expectDeliverReplyCall(0, FINAL_REPLY_TEXT);

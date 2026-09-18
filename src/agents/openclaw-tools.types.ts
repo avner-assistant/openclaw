@@ -53,9 +53,12 @@ export type OpenClawToolsOptions = {
   messageActionTurnCapability?: string;
   /** Message-only authority from a CLI grant; does not authorize plugin delivery. */
   messageToolTurnCapability?: { token: string; sessionKey: string };
+  /** Private factory admission for a new scheduled message invocation. */
+  admitScheduledMessageInvocation?: () => OpenClawConfig;
   sandboxRoot?: string;
   sandboxContainerWorkdir?: string;
   sandboxFsBridge?: SandboxFsBridge;
+  sandboxReadOnlyResourceMounts?: readonly { hostPath: string; containerPath: string }[];
   /** Producer-authored bare upload handles mapped to exact sandbox paths. */
   stagedMediaPaths?: ReadonlyMap<string, string>;
   /** Prepared effective read authorization for exporting sandbox workspace media. */

@@ -211,6 +211,8 @@ export const validateWorkerDesktopLaunchResult = compile(S.WorkerDesktopLaunchRe
 export const validateDesktopObserveParams = compile(S.DesktopObserveParamsSchema);
 export const validateDesktopObserveResult = compile(S.DesktopObserveResultSchema);
 export const validateDesktopLaunchParams = compile(S.DesktopLaunchParamsSchema);
+export const validateDesktopReleaseParams = compile(S.DesktopReleaseParamsSchema);
+export const validateDesktopReleaseResult = compile(S.DesktopReleaseResultSchema);
 export const validateSystemInfoParams = compile(S.SystemInfoParamsSchema);
 export const validateSystemInfoResult = compile(S.SystemInfoResultSchema);
 export const validateNodePendingAckParams = compile(S.NodePendingAckParamsSchema);
@@ -370,6 +372,7 @@ export const validateSystemAgentSetupAuthStartParams = compile(
   S.SystemAgentSetupAuthStartParamsSchema,
 );
 export const validateWizardStartParams = compile(S.WizardStartParamsSchema);
+export const validateMcpAuthLoginParams = compile(S.McpAuthLoginParamsSchema);
 export const validateWizardNextParams = compile(S.WizardNextParamsSchema);
 export const validateWizardCancelParams = compile(S.WizardCancelParamsSchema);
 export const validateWizardStatusParams = compile(S.WizardStatusParamsSchema);

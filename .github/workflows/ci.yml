@@ -317,6 +317,49 @@ jobs:
               set_job = bind("SetInformationJobObject", w.BOOL, w.HANDLE, c.c_int, c.c_void_p, w.DWORD)
               query_job = bind("QueryInformationJobObject", w.BOOL, w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.c_void_p)
               terminate_job = bind("TerminateJobObject", w.BOOL, w.HANDLE, w.UINT)
+              open_process = bind("OpenProcess", w.HANDLE, w.DWORD, w.BOOL, w.DWORD)
+              in_job = bind("IsProcessInJob", w.BOOL, w.HANDLE, w.HANDLE, c.POINTER(w.BOOL))
+              wait_process = kernel.WaitForSingleObject
+              wait_process.argtypes, wait_process.restype = [w.HANDLE, w.DWORD], w.DWORD
+
+              def job_members(job, deadline):
+                  # PIDs are discovery hints only. Hold query/synchronize handles and verify
+                  # job membership before using them; never signal a process found by PID.
+                  before = Accounting()
+                  query_job(job, 1, c.byref(before), c.sizeof(before), None)
+                  capacity = max(16, before.ActiveProcesses + 1)
+                  while True:
+                      if time.monotonic() >= deadline or capacity > 65536:
+                          raise RuntimeError("Job member census did not complete")
+                      class Members(c.Structure):
+                          _fields_ = [("assigned", w.DWORD), ("count", w.DWORD),
+                                      ("pids", c.c_size_t * capacity)]
+                      members = Members()
+                      try:
+                          query_job(job, 3, c.byref(members), c.sizeof(members), None)
+                          break
+                      except OSError as error:
+                          if error.winerror != 234:  # ERROR_MORE_DATA: retry the census, not cleanup.
+                              raise
+                          capacity *= 2
+                  handles = []
+                  try:
+                      for pid in members.pids[:members.count]:
+                          handle = open_process(0x00100000 | 0x1000, False, pid)
+                          handles.append(handle)
+                          member = w.BOOL()
+                          in_job(handle, job, c.byref(member))
+                          if not member.value:
+                              raise RuntimeError("Job member identity changed during census")
+                      after = Accounting()
+                      query_job(job, 1, c.byref(after), c.sizeof(after), None)
+                      if after.TotalProcesses != before.TotalProcesses:
+                          raise RuntimeError("Job membership grew during census")
+                      return handles, after.TotalProcesses
+                  except BaseException:
+                      for handle in handles:
+                          close_handle(handle)
+                      raise
               bootstrap = windows_api + '\'''\'''\''
           job = int(sys.argv[1])
           assign = bind("AssignProcessToJobObject", w.BOOL, w.HANDLE, w.HANDLE)
@@ -391,15 +434,36 @@ jobs:
                   # an empty Job alone cannot prove that no Git will start afterwards.
                   child.kill()
                   child.wait(timeout=max(0.001, deadline - time.monotonic()))
-                  terminate_job(job, 1)
-                  accounting = Accounting()
-                  while True:
-                      query_job(job, 1, c.byref(accounting), c.sizeof(accounting), None)
-                      if accounting.ActiveProcesses == 0:
-                          return
-                      if time.monotonic() >= deadline:
-                          raise RuntimeError("Job cleanup did not complete")
-                      time.sleep(0.05)
+                  handles = []
+                  terminated = False
+                  try:
+                      handles, total = job_members(job, deadline)
+                      terminate_job(job, 1)
+                      terminated = True
+                      accounting = Accounting()
+                      while True:
+                          settled = True
+                          for handle in handles:
+                              status = wait_process(handle, 0)
+                              if status == 258:  # WAIT_TIMEOUT: accounting can reach zero first.
+                                  settled = False
+                              elif status != 0:
+                                  raise c.WinError(c.get_last_error())
+                          query_job(job, 1, c.byref(accounting), c.sizeof(accounting), None)
+                          if accounting.TotalProcesses != total:
+                              raise RuntimeError("Job membership grew during cleanup")
+                          if accounting.ActiveProcesses == 0 and settled:
+                              return
+                          if time.monotonic() >= deadline:
+                              raise RuntimeError("Job cleanup did not complete")
+                          time.sleep(0.05)
+                  finally:
+                      try:
+                          if not terminated:
+                              terminate_job(job, 1)
+                      finally:
+                          for handle in handles:
+                              close_handle(handle)
               else:
                   # The group remains ours after leader exit. Reserve half the existing
                   # cleanup allowance for KILL and extinction verification after TERM.
@@ -1374,7 +1438,11 @@ jobs:
             ].every(([file, capability]) => existsSync(file) && readFileSync(file, "utf8").includes(capability))) {
             const lanes = await import("./scripts/changed-lanes.mts");
             if (typeof lanes.getChangedCoreTestPaths === "function") {
-              changedCoreTestPaths = lanes.getChangedCoreTestPaths(lanes.detectChangedLanes(changedPaths));
+              const coreTestPaths = lanes.getChangedCoreTestPaths(lanes.detectChangedLanes(changedPaths));
+              // Deleted leaves need the full plan before hosted stripes are scheduled.
+              if (coreTestPaths?.length && coreTestPaths.every((path) => existsSync(path))) {
+                changedCoreTestPaths = coreTestPaths;
+              }
             }
           }
 
@@ -1935,7 +2003,6 @@ jobs:
             // Eligible hybrid preflight already runs on Blacksmith.
             hybridHostedBaseRows = Object.values({
               "ci-gate": 1,
-              "pnpm-store-warmup": count(manifest.run_node || manifest.run_check_docs),
               "control-ui-performance": count(manifest.run_control_ui_performance),
               "native-i18n": count(manifest.run_native_i18n),
               "control-ui-i18n": count(manifest.run_control_ui_i18n),
@@ -2185,33 +2252,6 @@ jobs:
       - name: Audit production dependencies
         run: node scripts/pre-commit/pnpm-audit-prod.mjs --audit-level=high
 
-  # Prime the lockfile- and pnpm-pinned store for fork PRs, manual runs, the
-  # GitHub backend, and docs-only same-repo PRs. This job restores only; the
-  # trusted cache warmer owns publication.
-  pnpm-store-warmup:
-    permissions:
-      contents: read
-    needs: [preflight]
-    if: ${{ (needs.preflight.outputs.run_node == 'true' || needs.preflight.outputs.run_check_docs == 'true') && (needs.preflight.outputs.runner_profile == 'github' || needs.preflight.outputs.runner_profile == 'hybrid' || (!(github.repository == 'openclaw/openclaw' && github.event_name == 'push' && github.ref == 'refs/heads/main') && !(github.repository == 'openclaw/openclaw' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.preflight.outputs.run_node == 'true'))) }}
-    runs-on: ${{ (vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' || vars.OPENCLAW_CI_RUNNER_BACKEND == 'hybrid') && 'ubuntu-24.04' || (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && github.run_attempt > 1)) && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)) && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
-    timeout-minutes: 20
-    steps:
-      - &linux_node_checkout_step
-        name: Checkout
-        shell: bash
-        env:
-          CHECKOUT_REPO: ${{ github.repository }}
-          CHECKOUT_TOKEN: ${{ github.token }}
-          CHECKOUT_SHA: ${{ needs.preflight.outputs.checkout_revision }}
-          WORKFLOW_SHA: ${{ github.workflow_sha }}
-        run: *owned_checkout_run
-
-      - name: Setup Node environment
-        uses: ./.ci-harness/.github/actions/setup-node-env
-        with:
-          cache-mode: ${{ needs.preflight.outputs.cache_mode }}
-          install-bun: "false"
-
   # Build dist once for Node-relevant changes and share it with downstream jobs.
   # Keep this overlapping with the fast correctness lanes so green PRs get heavy
   # test/build feedback sooner instead of waiting behind a full `check` pass.
@@ -2224,7 +2264,15 @@ jobs:
     runs-on: ${{ vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' && 'ubuntu-24.04' || (vars.OPENCLAW_CI_RUNNER_BACKEND == 'hybrid' && github.run_attempt > 1) && 'ubuntu-24.04' || (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && github.run_attempt > 1)) && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)) && 'blacksmith-16vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
     timeout-minutes: ${{ (vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' || (vars.OPENCLAW_CI_RUNNER_BACKEND == 'hybrid' && github.run_attempt > 1) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository)) && 35 || 20 }}
     steps:
-      - *linux_node_checkout_step
+      - &linux_node_checkout_step
+        name: Checkout
+        shell: bash
+        env:
+          CHECKOUT_REPO: ${{ github.repository }}
+          CHECKOUT_TOKEN: ${{ github.token }}
+          CHECKOUT_SHA: ${{ needs.preflight.outputs.checkout_revision }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: *owned_checkout_run
       - name: Setup Node environment
         uses: ./.ci-harness/.github/actions/setup-node-env
         with:
@@ -2884,9 +2932,9 @@ jobs:
     if: needs.preflight.outputs.run_ui_e2e == 'true' && needs.preflight.outputs.compatibility_target != 'true'
     # Contributor trust controls Blacksmith eligibility; manual runs and PR retries
     # stay hosted. Hybrid also uses hosted capacity on push retries.
-    # Actual remaining memory gates SDK compiler overlap on the available
-    # 16-class, with unchanged browser worker limits.
-    runs-on: ${{ vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' && 'ubuntu-24.04' || (vars.OPENCLAW_CI_RUNNER_BACKEND == 'hybrid' && github.run_attempt > 1) && 'ubuntu-24.04' || (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.run_attempt > 1)) && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)) && 'blacksmith-16vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
+    # Restore eight-CPU capacity for the fixed 20-minute budget; actual
+    # remaining memory still gates SDK overlap, with unchanged browser workers.
+    runs-on: ${{ vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' && 'ubuntu-24.04' || (vars.OPENCLAW_CI_RUNNER_BACKEND == 'hybrid' && github.run_attempt > 1) && 'ubuntu-24.04' || (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.run_attempt > 1)) && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)) && 'blacksmith-32vcpu-ubuntu-2404' || 'ubuntu-24.04') }}
     # Hosted preparation and the complete suite need a larger job budget; test deadlines stay fixed.
     timeout-minutes: ${{ (vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' || (vars.OPENCLAW_CI_RUNNER_BACKEND == 'hybrid' && github.run_attempt > 1) || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.run_attempt > 1) || github.repository != 'openclaw/openclaw' || (github.event_name == 'pull_request' && !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association))) && 40 || 20 }}
     steps:
@@ -3233,13 +3281,40 @@ jobs:
       - name: Check startup corpus
         # Main owns full coverage. PRs need an exact-tree coverage receipt from
         # their admitted Node plan; release gates retain their separate merge tree.
+        # State cases mutate process-global config and database state, so keep each
+        # process serial while distributing the corpus across four processes.
         if: matrix.task == 'baseline-ratchets' && !(github.repository == 'openclaw/openclaw' && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.preflight.outputs.run_check == 'true') && !(github.repository == 'openclaw/openclaw' && github.event_name == 'pull_request' && needs.preflight.outputs.startup_corpus_node_revision && needs.preflight.outputs.startup_corpus_node_revision == needs.preflight.outputs.checkout_revision)
         run: |
-          reporter_args=()
-          if [[ "${{ needs.preflight.outputs.frozen_target }}" != "true" ]]; then
-            reporter_args=(--reporter verbose --reporter github-actions --reporter ./scripts/lib/vitest-resource-reporter.mts)
-          fi
-          node scripts/run-vitest.mjs run --config test/vitest/vitest.runtime-config.config.ts "${reporter_args[@]}" src/config/config-startup-corpus.test.ts src/config/state-startup-corpus.test.ts
+          set -euo pipefail
+          # Prepare once before five Vitest launchers compete for the build heap.
+          pnpm build qaRuntime
+          run_startup_corpus() {
+            if [[ "${{ needs.preflight.outputs.frozen_target }}" == "true" ]]; then
+              node scripts/run-vitest.mjs run --config test/vitest/vitest.runtime-config.config.ts "$@"
+            else
+              node scripts/run-vitest.mjs run --config test/vitest/vitest.runtime-config.config.ts \
+                --reporter verbose --reporter github-actions --reporter ./scripts/lib/vitest-resource-reporter.mts "$@"
+            fi
+          }
+          pids=()
+          labels=()
+          run_startup_corpus src/config/config-startup-corpus.test.ts &
+          pids+=("$!")
+          labels+=("config corpus")
+          for shard in {1..4}; do
+            OPENCLAW_TEST_STARTUP_CORPUS_SHARD="${shard}/4" \
+              run_startup_corpus src/config/state-startup-corpus.test.ts &
+            pids+=("$!")
+            labels+=("state corpus ${shard}/4")
+          done
+          status=0
+          for index in "${!pids[@]}"; do
+            if ! wait "${pids[$index]}"; then
+              echo "::error::${labels[$index]} failed"
+              status=1
+            fi
+          done
+          exit "$status"
 
   qa-smoke-ci-profile:
     permissions:
@@ -3553,8 +3628,8 @@ jobs:
     name: ${{ matrix.check_name || 'checks-node-core-test-nondist-shard' }}
     needs: [preflight]
     if: needs.preflight.outputs.run_checks_node_core_nondist == 'true'
-    # Apply selected transitions only: numbered bins can use another class in other profiles.
-    runs-on: ${{ vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' && 'ubuntu-24.04' || (vars.OPENCLAW_CI_RUNNER_BACKEND == 'hybrid' && github.run_attempt > 1) && 'ubuntu-24.04' || (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && github.run_attempt > 1)) && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)) && ((matrix.runner == 'blacksmith-8vcpu-ubuntu-2404' && contains(fromJSON('["checks-node-changed-extensions-bundle-16","checks-node-compact-large-9","checks-node-changed-extensions-bundle-25","checks-node-compact-large-5"]'), matrix.check_name) || matrix.runner == 'blacksmith-32vcpu-ubuntu-2404' && contains(fromJSON('["checks-node-compact-small-4","checks-node-compact-small-3","checks-node-compact-small-10"]'), matrix.check_name)) && 'blacksmith-16vcpu-ubuntu-2404' || matrix.runner || 'blacksmith-4vcpu-ubuntu-2404') || 'ubuntu-24.04') }}
+    # Keep planner capacity; apply only the selected 8-to-16 promotions.
+    runs-on: ${{ vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' && 'ubuntu-24.04' || (vars.OPENCLAW_CI_RUNNER_BACKEND == 'hybrid' && github.run_attempt > 1) && 'ubuntu-24.04' || (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && github.run_attempt > 1)) && 'ubuntu-24.04' || (github.repository == 'openclaw/openclaw' && (github.event_name != 'pull_request' || contains(fromJSON('["OWNER","MEMBER","COLLABORATOR","CONTRIBUTOR"]'), github.event.pull_request.author_association)) && ((matrix.runner == 'blacksmith-8vcpu-ubuntu-2404' && contains(fromJSON('["checks-node-changed-extensions-bundle-16","checks-node-compact-large-9","checks-node-changed-extensions-bundle-25","checks-node-compact-large-5"]'), matrix.check_name)) && 'blacksmith-16vcpu-ubuntu-2404' || matrix.runner || 'blacksmith-4vcpu-ubuntu-2404') || 'ubuntu-24.04') }}
     timeout-minutes: ${{ matrix.timeout_minutes || 60 }}
     strategy:
       fail-fast: false
@@ -4790,6 +4865,19 @@ jobs:
       MACOS_PRIMARY_PHASE: ${{ github.event_name == 'workflow_dispatch' && !inputs.release_gate && needs.preflight.outputs.release_scope == 'full' && 'release' || 'tests' }}
       OPENCLAWKIT_TEST_EXECUTION: ${{ (github.event_name == 'workflow_dispatch' || github.run_attempt > 1) && 'serial' || 'parallel' }}
     steps:
+      # Start before checkout/setup so their time counts against optional cache work.
+      - name: Start Swift cache clock
+        id: swift-cache-clock
+        continue-on-error: true
+        timeout-minutes: 1
+        run: |
+          python3 -I -S - <<'PYTHON'
+          import os
+          import time
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"started={time.monotonic()}", file=output)
+          PYTHON
+
       - *platform_checkout_step
 
       - name: Setup Node environment for Apple assets
@@ -4799,7 +4887,19 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache-mode: ${{ needs.preflight.outputs.cache_mode }}
           install-bun: "false"
-          install-deps: "true"
+          install-deps: "false"
+
+      - name: Install Mermaid renderer dependencies
+        if: hashFiles('scripts/prepare-apple-mermaid.mjs') != ''
+        env:
+          CI: "true"
+        run: >-
+          pnpm install --frozen-lockfile --prefer-offline --optional
+          --filter '@openclaw/mermaid-renderer...'
+          --config.ignore-scripts=false
+          --config.engine-strict=false
+          --config.enable-pre-post-scripts=true
+          --config.side-effects-cache=true
 
       - name: Setup Node.js for native test tooling
         if: hashFiles('scripts/prepare-apple-mermaid.mjs') == ''
@@ -5092,8 +5192,35 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Cache writes are optional and must not inherit the remaining job lifetime.
+      # Admit the whole tail before minute 20: its gate/save/metadata/save bounds
+      # total five minutes, leaving five for runner startup, cancellation and cleanup.
+      - name: Check Swift cache save budget
+        id: swift-cache-budget
+        if: needs.preflight.outputs.cache_write_allowed == 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        env:
+          CACHE_STARTED: ${{ steps.swift-cache-clock.outputs.started }}
+        run: |
+          python3 -I -S - <<'PYTHON'
+          import os
+          import time
+          try:
+              elapsed = time.monotonic() - float(os.environ.get("CACHE_STARTED", ""))
+              allowed = 0 <= elapsed < 20 * 60
+          except ValueError:
+              allowed = False
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"allowed={str(allowed).lower()}", file=output)
+          if not allowed:
+              print("::notice::Skipping optional Swift cache saves: insufficient or unknown job budget.")
+          PYTHON
+
       - name: Save SwiftPM cache
-        if: matrix.phase == env.MACOS_PRIMARY_PHASE && needs.preflight.outputs.cache_write_allowed == 'true' && steps.swiftpm-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        if: matrix.phase == env.MACOS_PRIMARY_PHASE && needs.preflight.outputs.cache_write_allowed == 'true' && steps.swiftpm-cache.outputs.cache-hit != 'true' && steps.swift-cache-budget.outputs.allowed == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/org.swift.swiftpm
@@ -5102,11 +5229,16 @@ jobs:
       # Each phase leaves its source inputs unchanged. Record
       # their actual metadata with the successful products immediately before save.
       - name: Record Swift build input timestamps
-        if: needs.preflight.outputs.cache_write_allowed == 'true' && steps.swift-build-cache.outputs.cache-hit != 'true' && env.HISTORICAL_TARGET != 'true'
+        id: record-swift-build-cache-metadata
+        continue-on-error: true
+        timeout-minutes: 1
+        if: needs.preflight.outputs.cache_write_allowed == 'true' && steps.swift-build-cache.outputs.cache-hit != 'true' && steps.swift-cache-budget.outputs.allowed == 'true' && env.HISTORICAL_TARGET != 'true'
         run: python3 -I -S scripts/swift-build-cache-metadata.py record
 
       - name: Save Swift build directory cache
-        if: needs.preflight.outputs.cache_write_allowed == 'true' && steps.swift-build-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 2
+        if: needs.preflight.outputs.cache_write_allowed == 'true' && steps.swift-build-cache.outputs.cache-hit != 'true' && steps.swift-cache-budget.outputs.allowed == 'true' && (env.HISTORICAL_TARGET == 'true' || steps.record-swift-build-cache-metadata.outcome == 'success')
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: apps/macos/.build
@@ -5445,7 +5577,7 @@ jobs:
       - *platform_checkout_step
 
       - name: Setup Ruby
-        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1.321.0
         with:
           ruby-version: "3.4.10"
           bundler: "2.6.9"
@@ -5965,7 +6097,6 @@ jobs:
     needs:
       - preflight
       - security-fast
-      - pnpm-store-warmup
       - build-artifacts
       - control-ui-performance
       - native-i18n
@@ -6006,7 +6137,6 @@ jobs:
           JOB_RESULTS: |
             preflight=${{ needs.preflight.result }}|true
             security-fast=${{ needs.security-fast.result }}|true
-            pnpm-store-warmup=${{ needs.pnpm-store-warmup.result }}|${{ (needs.preflight.outputs.run_node == 'true' || needs.preflight.outputs.run_check_docs == 'true') && (needs.preflight.outputs.runner_profile == 'github' || needs.preflight.outputs.runner_profile == 'hybrid' || (!(github.repository == 'openclaw/openclaw' && github.event_name == 'push' && github.ref == 'refs/heads/main') && !(github.repository == 'openclaw/openclaw' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.preflight.outputs.run_node == 'true'))) }}
             build-artifacts=${{ needs.build-artifacts.result }}|${{ needs.preflight.outputs.run_build_artifacts }}
             control-ui-performance=${{ needs.control-ui-performance.result }}|${{ needs.preflight.outputs.run_control_ui_performance }}
             native-i18n=${{ needs.native-i18n.result }}|${{ needs.preflight.outputs.run_native_i18n }}

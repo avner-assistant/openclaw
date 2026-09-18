@@ -10,7 +10,7 @@ import {
   registerBundledHealthChecks,
   resolveBundledHealthCheckPluginStateMode,
 } from "../flows/bundled-health-checks.js";
-import { configValidationIssuesToHealthFindings } from "../flows/doctor-core-checks.js";
+import { configValidationIssuesToHealthFindings } from "../flows/doctor-config-validation-findings.js";
 import { scrubDoctorErrorMessage } from "../flows/doctor-error-message.js";
 import { resolveDoctorContributionHealthChecks } from "../flows/doctor-health-contributions.js";
 import {
@@ -57,6 +57,7 @@ interface DoctorLintCliOptions {
 }
 
 type DoctorLintStateView = {
+  cleanupWarnings?: HealthFinding[];
   pluginMetadataEnv: NodeJS.ProcessEnv;
   readConfigSnapshot: () => ReturnType<typeof readConfigFileSnapshot>;
   sourceEnv: NodeJS.ProcessEnv;
@@ -77,6 +78,7 @@ const RUNTIME_TOOL_SCHEMA_CHECK_ID = "core/doctor/runtime-tool-schemas";
 const PROJECT_CLONE_SHAPE_CHECK_ID = "core/doctor/project-clone-shape";
 const SKILLS_READINESS_CHECK_ID = "core/doctor/skills-readiness";
 const AUTH_PROFILE_CHECK_ID = "core/doctor/auth-profiles";
+const DOCTOR_LINT_JSON_SCHEMA_VERSION = 1;
 
 class DoctorLintStateSnapshotError extends Error {
   constructor(cause: unknown) {
@@ -133,6 +135,9 @@ async function prepareDoctorLintExecution(
   }
   maybeLoadDotEnvForConfig(process.env);
   const sourceEnv = { ...process.env };
+  const cleanupWarnings: HealthFinding[] | undefined = isUpdateDoctorLintPass(sourceEnv)
+    ? []
+    : undefined;
   const updateReadiness = isPostCoreConvergencePass(sourceEnv) ? "post-plugin" : undefined;
   const effectiveOpts: DoctorLintCliOptions = updateReadiness ? { ...opts, updateReadiness } : opts;
   const pluginStateMode = resolveBundledHealthCheckPluginStateMode(effectiveOpts);
@@ -147,16 +152,18 @@ async function prepareDoctorLintExecution(
           deferredPluginMigrations,
         }).readConfigFileSnapshot();
   const stateView: DoctorLintStateView = {
+    cleanupWarnings,
     pluginMetadataEnv: sourceEnv,
     sourceEnv,
     readConfigSnapshot,
-    runWithPluginStateSnapshot: async (run) => withReadOnlyPluginStateSnapshot(sourceEnv, run),
+    runWithPluginStateSnapshot: async (run) =>
+      withReadOnlyPluginStateSnapshot(sourceEnv, run, cleanupWarnings),
   };
   if (pluginStateMode !== "isolated") {
     return await executeDoctorLint(runtime, effectiveOpts, sevMin, stateView);
   }
   try {
-    return await withReadOnlyPluginStateSnapshot(sourceEnv, async (pluginMetadataEnv) => {
+    return await stateView.runWithPluginStateSnapshot(async (pluginMetadataEnv) => {
       const pending = readDeferredPluginMigrations({ env: pluginMetadataEnv });
       return executeDoctorLint(runtime, effectiveOpts, sevMin, {
         ...stateView,
@@ -228,14 +235,14 @@ async function executeDoctorLint(
     allowExecSecretRefs: opts.allowExec === true,
     ...(snapshot.path !== undefined ? { configPath: snapshot.path } : {}),
   };
-  registerBundledHealthChecks({
+  const availabilityFindings = registerBundledHealthChecks({
     cfg: snapshot.config,
     cwd: ctx.cwd,
     env: stateView.pluginMetadataEnv,
     runWithPluginStateSnapshot: stateView.runWithPluginStateSnapshot,
     updateReadiness: opts.updateReadiness,
   });
-  const registeredExtensionChecks = listExtensionHealthChecksForDoctor([]);
+  const registeredExtensionChecks = listExtensionHealthChecksForDoctor([], availabilityFindings);
   const onlyRegisteredExtensionChecks =
     opts.onlyIds !== undefined &&
     opts.onlyIds.length > 0 &&
@@ -245,7 +252,7 @@ async function executeDoctorLint(
     : await resolveDoctorContributionHealthChecks();
   const extensionChecks = onlyRegisteredExtensionChecks
     ? registeredExtensionChecks
-    : listExtensionHealthChecksForDoctor(coreChecks);
+    : listExtensionHealthChecksForDoctor(coreChecks, availabilityFindings);
   const runWithPrivateStateSnapshot: DoctorLintStateRunner = async (run) =>
     await stateView.runWithPluginStateSnapshot(async () => await run());
   // Update readiness keeps every declared check private until restart.
@@ -259,7 +266,7 @@ async function executeDoctorLint(
   };
 
   const checks = [
-    ...coreChecks.map((check) => withCoreLintContext(check, coreCtx)),
+    ...coreChecks.map((check) => withCoreLintContext(check, coreCtx, availabilityFindings)),
     ...extensionChecks,
   ];
   const runOpts: DoctorLintRunOptions = {
@@ -289,18 +296,20 @@ async function executeDoctorLint(
           checksRun: result.checksRun,
           checksSkipped: result.checksSkipped,
           findings: visible,
-          warnings,
+          // The enclosing snapshot retires after checks finish, before output is written.
+          warnings: [...warnings, ...(stateView.cleanupWarnings ?? [])],
         });
         return;
       }
+      const displayed = [...visible, ...(stateView.cleanupWarnings ?? [])];
       process.stdout.write(
-        `doctor --lint: ran ${result.checksRun} check(s), ${visible.length} finding(s)\n`,
+        `doctor --lint: ran ${result.checksRun} check(s), ${displayed.length} finding(s)\n`,
       );
-      if (visible.length === 0) {
+      if (displayed.length === 0) {
         process.stdout.write("  no findings\n");
         return;
       }
-      for (const f of visible) {
+      for (const f of displayed) {
         const where = f.path !== undefined ? ` ${f.path}` : "";
         const line = f.line !== undefined ? `:${f.line}` : "";
         process.stdout.write(`  [${f.severity}] ${f.checkId}${where}${line} - ${f.message}\n`);
@@ -315,6 +324,7 @@ async function executeDoctorLint(
 async function withReadOnlyPluginStateSnapshot<T>(
   sourceEnv: NodeJS.ProcessEnv,
   run: (pluginMetadataEnv: NodeJS.ProcessEnv) => Promise<T>,
+  cleanupWarnings?: HealthFinding[],
 ): Promise<T> {
   const sourceDatabasePath = resolveOpenClawStateSqlitePath(sourceEnv);
   let cleanup: () => Promise<boolean>;
@@ -382,7 +392,19 @@ async function withReadOnlyPluginStateSnapshot<T>(
       // before restoring the ambient state or deleting files; failed retirement retains files.
       await closeOpenClawStateDatabaseByPathAsync(privateDatabasePath);
       if (!(await cleanup())) {
-        throw new Error("Temporary doctor lint state snapshot cleanup did not complete.");
+        const message = "Temporary doctor lint state snapshot cleanup did not complete.";
+        if (!cleanupWarnings) {
+          throw new Error(message);
+        }
+        // Only disposal of private bytes is advisory. Preserve the detector's outcome;
+        // filtering its later error would lose real findings hidden by cleanup failure.
+        cleanupWarnings.push({
+          checkId: "core/doctor/lint-state-inspection",
+          severity: "warning",
+          requirement: "temporary-snapshot-cleanup",
+          message,
+          fixHint: "Rerun `openclaw doctor --lint` after the update to check snapshot cleanup.",
+        });
       }
     } catch (error) {
       throw new DoctorLintStateSnapshotError(error);
@@ -471,11 +493,15 @@ function withCoreLintContext(
     readonly runWithPrivateStateSnapshot: DoctorLintStateRunner;
     readonly runWithSourceState: DoctorLintStateRunner;
   },
+  availabilityFindings: readonly HealthFinding[],
 ): HealthCheck {
   return {
     ...check,
     detect(_ctx, scope) {
-      const detect = async () => await check.detect(ctx, scope);
+      const detect = async () => [
+        ...(await check.detect(ctx, scope)),
+        ...availabilityFindings.filter((finding) => finding.checkId === check.id),
+      ];
       if (check.id === SKILLS_READINESS_CHECK_ID) {
         // Discovery needs source-profile eligibility; generated links use the private install roots.
         return ctx.runWithPrivateStateSnapshot(() => ctx.runWithSourceState(detect));
@@ -498,6 +524,7 @@ function writeJsonResult(result: {
 }): void {
   process.stdout.write(
     JSON.stringify({
+      schemaVersion: DOCTOR_LINT_JSON_SCHEMA_VERSION,
       ok: result.ok,
       checksRun: result.checksRun,
       checksSkipped: result.checksSkipped,
@@ -514,6 +541,7 @@ function toJsonFinding(f: HealthFinding): Record<string, unknown> {
     severity: f.severity,
     message: f.message,
     ...(f.source !== undefined ? { source: f.source } : {}),
+    ...(f.errorCode !== undefined ? { errorCode: f.errorCode } : {}),
     ...(f.path !== undefined ? { path: f.path } : {}),
     ...(f.line !== undefined ? { line: f.line } : {}),
     ...(f.column !== undefined ? { column: f.column } : {}),

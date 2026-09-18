@@ -194,7 +194,7 @@ export function extractQuickSettingsSecurity(config: unknown): SecurityOverview 
       execPolicy: "unknown",
       browserEnabled: true,
       browserEnabledOverridden: false,
-      toolProfile: "full",
+      toolProfile: "",
       toolProfileOverridden: false,
     };
   }
@@ -223,7 +223,7 @@ export function extractQuickSettingsSecurity(config: unknown): SecurityOverview 
     execPolicy: typeof security === "string" && security.trim() ? security.trim() : "allowlist",
     browserEnabled: browser?.enabled !== false,
     browserEnabledOverridden: browser !== null && Object.hasOwn(browser, "enabled"),
-    toolProfile: typeof profile === "string" && profile.trim() ? profile.trim() : "full",
+    toolProfile: typeof profile === "string" ? profile.trim() : "",
     toolProfileOverridden: tools !== null && Object.hasOwn(tools, "profile"),
   };
 }
@@ -798,17 +798,16 @@ export class ConfigPage extends OpenClawLightDomElement {
   }
 
   private currentSyncedPref<K extends ResettableServerUiPrefKey>(key: K) {
+    const appearance = isAppearancePref(key);
     return resolveServerUiPrefState(
       this.context.runtimeConfig.state.configSnapshot?.config,
       key,
       this.context.gateway.connection.gatewayUrl,
       this.settings,
-      isAppearancePref(key)
-        ? {
-            canSync: this.serverUiPrefsCanSync(key),
-            profileId: this.context.gateway.snapshot?.selfUser?.id,
-          }
-        : { canSync: this.serverUiPrefsCanSync() },
+      {
+        canSync: this.serverUiPrefsCanSync(appearance ? key : undefined),
+        profileId: appearance ? this.context.gateway.snapshot?.selfUser?.id : undefined,
+      },
     );
   }
 
@@ -855,6 +854,7 @@ export class ConfigPage extends OpenClawLightDomElement {
       key,
       this.currentSyncedPref(key),
       this.context.gateway.connection.gatewayUrl,
+      this.context.gateway.snapshot?.selfUser?.id,
     );
     this.context.theme.refresh();
   }
@@ -1377,10 +1377,6 @@ export class ConfigPage extends OpenClawLightDomElement {
           runtimeConfig.patchForm(["browser", "enabled"], false);
         },
         onToolProfileChange: (profile) => {
-          if (profile === "full") {
-            runtimeConfig.removeFormValue(["tools", "profile"]);
-            return;
-          }
           runtimeConfig.patchForm(["tools", "profile"], profile);
         },
         editor: renderConfig({ ...props, embeddedEditor: true }),
