@@ -1585,7 +1585,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
             shard.groups.find((group) => group.shard_name === original.shard_name),
             "retained ordinary group",
           );
-          if (originalHybridJob.planConcurrency === 2) {
+          if (usesTwoWorkerPacking(originalHybridJob)) {
             expect(retained).toEqual({
               ...original,
               env: { OPENCLAW_VITEST_MAX_WORKERS: "2", ...original.env },
