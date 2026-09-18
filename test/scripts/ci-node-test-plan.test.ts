@@ -1584,7 +1584,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
             shard.groups.find((group) => group.shard_name === original.shard_name),
             "retained ordinary group",
           );
-          if (originalHybridJob.planConcurrency === 2) {
+          if (usesTwoWorkerPacking(originalHybridJob)) {
             expect(retained).toEqual({
               ...original,
               env: { OPENCLAW_VITEST_MAX_WORKERS: "2", ...original.env },
@@ -3910,7 +3910,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
       const inheritedGroupsFor = (admission: typeof before) =>
         new Map(
           admission.flatMap((job) =>
-            job.planConcurrency === 2
+            usesTwoWorkerPacking(job)
               ? job.groups
                   .filter((group) => group.env?.OPENCLAW_VITEST_MAX_WORKERS === undefined)
                   .map((group): [string, Group] => [group.shard_name, group])
@@ -3928,7 +3928,11 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         const job = plan.find((entry) =>
           entry.groups.some((candidate) => candidate.shard_name === group.shard_name),
         );
-        if (original && job?.planConcurrency === 1) {
+        if (
+          original &&
+          job?.planConcurrency === 1 &&
+          job.env?.OPENCLAW_VITEST_MAX_WORKERS !== "2"
+        ) {
           const env = expectDefined(group.env, "materialized serial worker cap");
           expect(env.OPENCLAW_VITEST_MAX_WORKERS).toBe("2");
           const { OPENCLAW_VITEST_MAX_WORKERS: _workers, ...otherEnv } = env;
@@ -4060,6 +4064,34 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
           expect(() => expectTimingFamilies(promoted, beforeInherited)).toThrow();
           expect(() =>
             expect(policies(promoted, beforeInherited)).toEqual(policies(before, beforeInherited)),
+          ).toThrow();
+        }
+        const serialized = structuredClone(before);
+        const gatewayJob = expectDefined(
+          serialized.find(
+            (job) =>
+              job.planConcurrency === 1 &&
+              job.env?.OPENCLAW_VITEST_MAX_WORKERS === "2" &&
+              job.groups.some(
+                (group) =>
+                  beforeInherited.has(group.shard_name) &&
+                  group.env?.OPENCLAW_VITEST_MAX_WORKERS === undefined,
+              ),
+          ),
+          "serial Gateway job with inherited worker ceiling",
+        );
+        const jobEnv = gatewayJob.env;
+        for (const workers of [undefined, "3"]) {
+          gatewayJob.env = { ...jobEnv };
+          if (workers === undefined) {
+            delete gatewayJob.env.OPENCLAW_VITEST_MAX_WORKERS;
+          } else {
+            gatewayJob.env.OPENCLAW_VITEST_MAX_WORKERS = workers;
+          }
+          expect(() =>
+            expect(policies(serialized, beforeInherited)).toEqual(
+              policies(before, beforeInherited),
+            ),
           ).toThrow();
         }
       }
