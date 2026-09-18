@@ -2,8 +2,8 @@
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { configureFsSafeNative, getFsSafeNativeConfig } from "@openclaw/fs-safe/config";
 import { vi } from "vitest";
+import { configureFsSafeNative, getFsSafeNativeConfig } from "../infra/fs-safe-defaults.js";
 
 /** Repoints a symlink or junction to a new target for realpath race tests. */
 export async function createRebindableDirectoryAlias(params: {
