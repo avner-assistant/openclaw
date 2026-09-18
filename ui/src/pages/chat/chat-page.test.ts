@@ -20,7 +20,7 @@ import { SESSION_DRAG_MIME } from "../../lib/sessions/drag.ts";
 import { sessionNavigationTarget } from "../../lib/sessions/route-navigation.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import {
-  createChatPageSessions,
+  createSessionTitleSource,
   setNavigationContext,
   setViewerPresenceContext,
 } from "./chat-page.test-support.ts";
@@ -59,31 +59,6 @@ type RenderedPane = HTMLElement & {
 };
 
 type RenderedDivider = HTMLElement & { orientation: "horizontal" | "vertical" };
-
-function createSessionTitleSource() {
-  const listeners = new Set<() => void>();
-  const state: {
-    result: { sessions: Array<{ key: string; displayName?: string }> } | null;
-  } = { result: null };
-  return {
-    sessions: {
-      ...createChatPageSessions(),
-      state,
-      presentation: state,
-      subscribe(listener: () => void) {
-        listeners.add(listener);
-        return () => listeners.delete(listener);
-      },
-    },
-    listeners,
-    publish(key: string, displayName: string) {
-      state.result = { sessions: [{ key, displayName }] };
-      for (const listener of listeners) {
-        listener();
-      }
-    },
-  };
-}
 
 function createSplitLayout(sessionKey: string): ChatSplitLayout {
   const singlePane: ChatSplitLayout = {
@@ -784,7 +759,7 @@ describe("chat page split layout host", () => {
     ).toBe(activePane);
   });
 
-  it("refreshes split toolbar titles after the shared list loads", async () => {
+  it("coalesces shared list publications and commits split toolbar titles inside a frame", async () => {
     const page = new ChatPage();
     const source = createSessionTitleSource();
     const navigation = setNavigationContext(page);
@@ -828,10 +803,38 @@ describe("chat page split layout host", () => {
       },
       subscribe: () => () => undefined,
     };
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) =>
+      frames.push(callback),
+    );
+    let insideFrame = false;
+    const offFrameUpdates: string[] = [];
+    const originalRequestUpdate = page.requestUpdate.bind(page);
+    vi.spyOn(page, "requestUpdate").mockImplementation((...args) => {
+      if (!insideFrame) {
+        offFrameUpdates.push("page");
+      }
+      originalRequestUpdate(...args);
+    });
+    const originalRender = page.render.bind(page);
+    vi.spyOn(page, "render").mockImplementation(() => {
+      if (!insideFrame) {
+        offFrameUpdates.push("pane bindings");
+      }
+      return originalRender();
+    });
+    source.publish("agent:dev:main", "Loading desk");
     source.publish("agent:dev:main", "Main desk");
+    expect(offFrameUpdates).toEqual([]);
+    expect(paneTitles()).toEqual(["Main Session", "Main Session"]);
+    expect(frames).toHaveLength(1);
+    insideFrame = true;
+    frames[0](0);
+    insideFrame = false;
     await page.updateComplete;
 
     expect(paneTitles()).toEqual(["Main desk", "Main desk"]);
+    expect(offFrameUpdates).toEqual([]);
 
     page.remove();
     expect(source.listeners.size).toBe(0);
@@ -861,6 +864,7 @@ describe("chat page split layout host", () => {
     const paneTitles = () =>
       [...page.querySelectorAll<RenderedPane>("openclaw-chat-pane")].map((pane) => pane.paneTitle);
     first.publish("agent:main:main", "First desk");
+    await new Promise(requestAnimationFrame);
     await page.updateComplete;
     expect(paneTitles()).toEqual(["First desk", "First desk"]);
 
@@ -879,6 +883,7 @@ describe("chat page split layout host", () => {
     expect(requestUpdate).not.toHaveBeenCalled();
     expect(paneTitles()).toEqual(["Second desk", "Second desk"]);
     second.publish("agent:main:main", "Updated desk");
+    await new Promise(requestAnimationFrame);
     await page.updateComplete;
     expect(paneTitles()).toEqual(["Updated desk", "Updated desk"]);
 

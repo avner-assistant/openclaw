@@ -602,7 +602,7 @@ export function renderApplicationShell(host: ShellViewHost) {
           .router=${runtime.router}
           .retryContext=${context}
           .retentionScope=${gatewayPresentationScope(context.gateway)}
-          .onNotFound=${() => host.recoverNotFoundRoute()}
+          .onNotFound=${host.recoverNotFoundRoute}
           .notFoundRecoveryReady=${gatewayConnected}
         ></openclaw-router-outlet>
       </main>
