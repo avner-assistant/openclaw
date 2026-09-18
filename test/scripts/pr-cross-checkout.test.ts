@@ -10,6 +10,7 @@ import {
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
+import { validReview, writeReviewArtifacts } from "./pr-review-artifact-fixture.js";
 import { copyPrWrapperSources } from "./pr-wrapper.test-support.js";
 
 const temps = useAutoCleanupTempDirTracker(afterEach);
@@ -201,6 +202,10 @@ describePosix("native PR wrapper repository ownership", () => {
       expect(f.git(f.caller, ["show-ref"])).toBe(callerRefs);
       expect(f.git(f.owner, ["for-each-ref", "--format=%(refname)", lockRef])).toBe("");
       expect(f.readCalls()).toHaveLength(4);
+      expect(f.readCalls().slice(0, 2)).toEqual([
+        `${f.owner}\trepo view --json nameWithOwner,url`,
+        `${f.owner}\tapi --hostname github.com repos/fixture/repo -H Cache-Control: max-age=0`,
+      ]);
       expect(f.readCalls().every((call) => call.startsWith(`${f.owner}\t`))).toBe(true);
       expect(f.readCalls().some((call) => call.includes("pr merge") || call.includes("POST"))).toBe(
         false,
@@ -238,6 +243,13 @@ describePosix("native PR wrapper repository ownership", () => {
     "uses owner repository metadata for early %s validation",
     (command) => {
       const f = fixture();
+      if (command === "prepare-run") {
+        const review = validReview(f.head);
+        review.pr.number = 123;
+        review.recommendation = "READY FOR /prepare-pr";
+        review.issueValidation.status = "valid";
+        writeReviewArtifacts(f.worktree, review, { prNumber: 123, headSha: f.head });
+      }
       const result = f.run(f.caller, [
         command,
         "123",

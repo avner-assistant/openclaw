@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { expectDefined } from "@openclaw/normalization-core";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveTestGitCommits } from "../../.github/actions/git-owner/test-prerequisites.mjs";
-import { resolveShardPlans } from "../../scripts/ci-run-node-test-shard.mts";
+import { resolveShardPlans, runShardPlans } from "../../scripts/ci-run-node-test-shard.mts";
 import { listAvailableExtensionIds } from "../../scripts/lib/changed-extensions.mts";
 import * as changedExtensions from "../../scripts/lib/changed-extensions.mts";
 import {
@@ -36,6 +36,7 @@ import {
   resolveChangedTestTargetPlan,
 } from "../../scripts/test-projects.test-support.mts";
 import { listGitTrackedFiles } from "../../src/test-utils/repo-files.js";
+import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import {
   databaseWorkerExtensionTestFiles,
   databaseWorkerExtensionTestRoots,
@@ -44,6 +45,49 @@ import { isGatewayServerTestFile } from "../vitest/vitest.gateway-server-paths.m
 import { boundaryTestFiles } from "../vitest/vitest.unit-paths.mjs";
 
 const CODEX_TEST_PROCESS_FILE_LIMIT = 12;
+const argvTempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+it.each([
+  ["test/vitest/vitest.extensions.config.ts", "extensions/copilot/index.ts"],
+  ["test/vitest/vitest.extension-qa.config.ts", "extensions/qa-lab/src/cli.runtime.ts"],
+  ["test/vitest/vitest.extension-providers.config.ts", "extensions/anthropic/index.ts"],
+])("emits the changed-extension partition exactly once for %s", async (config, changedPath) => {
+  const partitions = createChangedExtensionFallbackShards([changedPath]).filter((shard) =>
+    shard.configs.includes(config),
+  );
+  expect(partitions.length).toBeGreaterThan(1);
+  const shard = expectDefined(partitions[0], "first native extension partition");
+  const env = {
+    OPENCLAW_NODE_TEST_CONFIGS_JSON: JSON.stringify(shard.configs),
+    OPENCLAW_NODE_TEST_ENV_JSON: JSON.stringify(shard.env),
+    OPENCLAW_NODE_TEST_PLAN_CONCURRENCY: String(shard.planConcurrency),
+    OPENCLAW_NODE_TEST_VITEST_ARGS_JSON: '["--hookTimeout=600000"]',
+    OPENCLAW_VITEST_SHARD_NAME: shard.shardName,
+  };
+  const argv: string[][] = [];
+  expect(
+    await runShardPlans(resolveShardPlans(env), {
+      env,
+      scratchDir: argvTempDirs.make("changed-extension-argv-"),
+      runChild: async (args) => {
+        argv.push(args);
+        return 0;
+      },
+    }),
+  ).toBe(0);
+  expect(argv).toEqual([[config, "--", "--hookTimeout=600000", `--shard=1/${partitions.length}`]]);
+});
+
+it("keeps precise first-signin targets under exclusive Gateway admission", () => {
+  const target = "src/gateway/setup-inference.first-signin.integration.test.ts";
+  const jobs = createChangedNodeTestShards([target], { runnerBackend: "hybrid" });
+  expect(jobs).not.toBeNull();
+  const owner = jobs?.find((job) =>
+    job.groups?.some((group) => group.includePatterns?.includes(target)),
+  );
+  expect(owner).toMatchObject({ planConcurrency: 1 });
+  expect(jobs?.flatMap((job) => job.targets ?? [])).not.toContain(target);
+});
 const githubActivityHelper = ".agents/skills/openclaw-pr-maintainer/scripts/github-activity.sh";
 const gitToolingTargets = [
   "ci-git-owner",
@@ -389,12 +433,13 @@ describe("CI changed Node test plan", () => {
     "keeps the complete Git tooling family in canonical serial owners (%s)",
     (runnerBackend) => {
       const changedPaths = ["test/scripts/ci-linux-git.test.ts"];
+      const expectedTargets = [...gitToolingTargets, "test/scripts/test-projects.test.ts"];
       const shards = createChangedNodeTestShards(changedPaths, { runnerBackend });
       expect(shards).not.toBeNull();
       const groups = shards?.flatMap((shard) => shard.groups ?? []) ?? [];
       const tooling = groups.filter((group) => !group.requiresDist);
       expect(tooling.flatMap((group) => group.includePatterns ?? []).toSorted()).toEqual(
-        gitToolingTargets.toSorted(),
+        expectedTargets.toSorted(),
       );
       expect(shards?.every((shard) => shard.planConcurrency === 1)).toBe(true);
       const full = createNodeTestShardBundles({
@@ -456,7 +501,7 @@ describe("CI changed Node test plan", () => {
       }
       expect(new Set((shards ?? []).flatMap(resolveTestGitCommits))).toEqual(
         new Set([
-          ...gitToolingTargets.flatMap((target) => resolveTestGitCommits({ targets: [target] })),
+          ...expectedTargets.flatMap((target) => resolveTestGitCommits({ targets: [target] })),
           ...full.filter((shard) => shard.requiresDist).flatMap(resolveTestGitCommits),
         ]),
       );
@@ -610,11 +655,37 @@ describe("CI changed Node test plan", () => {
       source: "extensions/anthropic/openclaw.plugin.json",
       targets: ["src/agents/model-ref-shared.test.ts"],
     },
+    {
+      source: "src/test-utils/symlink-rebind-race.ts",
+      targets: expect.arrayContaining(["src/infra/fs-safe-import-boundary.test.ts"]),
+    },
   ])("routes $source through source-scanning policy tests", ({ source, targets: expected }) => {
     const shards = createChangedNodeTestShards([source]);
     const targets = shards?.flatMap((shard) => shard.targets ?? []) ?? [];
 
     expect(targets).toEqual(expected);
+  });
+
+  it.each([
+    {
+      source: "test/scripts/openclaw-npm-plugin-recovery-workflow.test.ts",
+      targets: [
+        "test/scripts/openclaw-npm-plugin-recovery-workflow.test.ts",
+        "test/scripts/test-projects.test.ts",
+      ],
+    },
+    ...[
+      "extensions/codex/src/app-server/run-attempt.native-config.test.ts",
+      "extensions/codex/src/app-server/run-attempt.subscription.test.ts",
+    ].map((source) => ({
+      source,
+      targets: expect.arrayContaining([source, "test/vitest-projects-config.test.ts"]),
+    })),
+  ])("selects inventory guards alongside $source", ({ source, targets: expected }) => {
+    const shards = createChangedNodeTestShards([source]);
+    expect(shards).not.toBeNull();
+    const targets = fallbackGroups(shards ?? []).flatMap((group) => group.includePatterns ?? []);
+    expect(targets.toSorted()).toEqual(expected);
   });
 
   it("routes cron alert sanitization changes through alert policy suites", () => {

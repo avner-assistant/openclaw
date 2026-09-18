@@ -33,7 +33,11 @@ type ResolvedSqliteSessionEntry = {
 /** Resolves one exact canonical entry without materializing the store. */
 export function resolveSessionEntry(
   scope: SessionAccessScope,
-  options: { readOnly?: boolean; databaseAgentId?: string } = {},
+  options: {
+    readOnly?: boolean;
+    databaseAgentId?: string;
+    projection?: SessionEntryReadScope["projection"];
+  } = {},
 ): ResolvedSqliteSessionEntry {
   const resolved = resolveSqliteScope(scope);
   if (options.databaseAgentId) {
@@ -42,7 +46,11 @@ export function resolveSessionEntry(
   const read = (
     database: Pick<OpenClawAgentDatabase, "agentId" | "db" | "path">,
   ): ResolvedSqliteSessionEntry => {
-    const selected = readSessionEntryRow(database, resolved.sessionKey);
+    const selected = readSessionEntryRow(
+      database,
+      resolved.sessionKey,
+      options.readOnly ? options.projection : "full",
+    );
     return {
       existing: selected?.entry,
       legacyKeys: [],
@@ -130,7 +138,7 @@ export type ExactSessionEntryBatchScope = Omit<SessionEntryReadScope, "sessionKe
   onReadSource?: (source: SessionEntryReadSource) => void;
 };
 
-export function groupExactSessionEntryReadRequests(scopes: readonly ExactSessionEntryBatchScope[]) {
+function groupExactSessionEntryReadRequests(scopes: readonly ExactSessionEntryBatchScope[]) {
   const results: Array<Result<ExactSessionEntry[], unknown>> = scopes.map(() => ok([]));
   const targetCache: SessionSqliteTargetResolutionCache = new Map();
   const groups = new Map<

@@ -7,26 +7,21 @@ import { sql } from "kysely";
 import {
   GATEWAY_OWNER_PROFILE_ID,
   type UserProfile as UserProfileListItem,
-  type UserProfileGitHubIdentity,
 } from "../../packages/gateway-protocol/src/schema/users.js";
 import { executeSqliteQuerySync, executeSqliteQueryTakeFirstSync } from "../infra/kysely-sync.js";
 import { generateSecureUuid } from "../infra/secure-random.js";
-import { deferSqlitePostCommitPublication } from "../infra/sqlite-post-commit.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
   type OpenClawStateDatabaseOptions,
 } from "./openclaw-state-db.js";
-import { mergeUserGitHubConnection } from "./user-github-connections.js";
-import { mergeUserModelAccounts } from "./user-model-accounts.js";
-import { ensureUserPreferencesSchema, mergeUserPreferences } from "./user-preferences.store.js";
-import { emitUserProfilesChanged, publishUserProfileAliasChange } from "./user-profile-events.js";
+import { ensureUserPreferencesSchema } from "./user-preferences.store.js";
 import {
   applyVerifiedGitHubIdentity,
   githubAuthenticationSubject,
-  prepareUserProfileGitHubMerge,
   selectUserProfileGitHubIdentities,
 } from "./user-profile-github-identity.js";
+import { publishUserProfilesChange } from "./user-profile-list.js";
 import {
   normalizeUserProfileAvatarMime,
   requireResolvedUserProfileById,
@@ -37,6 +32,7 @@ import {
   userProfileAvatarPresence,
   userProfilesDb,
 } from "./user-profiles-internal.js";
+import { mergeUserProfiles } from "./user-profiles-merge.js";
 import { ensureGatewayOwnerProfileRow } from "./user-profiles-owner.js";
 import {
   ensureUserProfileRoleSchema,
@@ -77,14 +73,6 @@ type UserProfileAvatarError =
 
 export { UserProfileNotFoundError };
 
-type UserProfileListRow = Pick<
-  UserProfileRow,
-  "id" | "display_name" | "avatar_mime" | "merged_into" | "created_at" | "updated_at"
-> & {
-  role?: string | null;
-  has_avatar: unknown;
-};
-
 const MAX_USER_PROFILE_DISPLAY_NAME_LENGTH = 256;
 
 function normalizeEmail(email: string): string {
@@ -100,7 +88,7 @@ function normalizeInitialDisplayName(name: string | null | undefined): string | 
   return normalized ? truncateUtf16Safe(normalized, MAX_USER_PROFILE_DISPLAY_NAME_LENGTH) : null;
 }
 
-function toUserProfile(row: UserProfileMetadataRow): UserProfile {
+function toUserProfile(row: Omit<UserProfileMetadataRow, "avatar_sha256">): UserProfile {
   return {
     id: row.id,
     displayName: row.display_name,
@@ -129,25 +117,6 @@ function insertUserProfile(
   };
   executeSqliteQuerySync(db, userProfilesDb(db).insertInto("user_profiles").values(row));
   return row;
-}
-
-function toUserProfileListItem(
-  row: UserProfileListRow,
-  emails: string[],
-  githubIdentity: UserProfileGitHubIdentity | null,
-): UserProfileListItem {
-  return {
-    id: row.id,
-    displayName: row.display_name,
-    avatarMime: normalizeUserProfileAvatarMime(row.avatar_mime),
-    mergedInto: row.merged_into,
-    ...(row.role ? { role: row.role } : {}),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    emails,
-    githubIdentity,
-    hasAvatar: row.has_avatar === 1,
-  };
 }
 
 function selectUserProfileListItemById(db: DatabaseSync, profileId: string): UserProfileListItem {
@@ -179,11 +148,12 @@ function selectUserProfileListItemById(db: DatabaseSync, profileId: string): Use
       .where("profile_id", "=", profileId)
       .orderBy("email", "asc"),
   ).rows;
-  return toUserProfileListItem(
-    profile,
-    emails.map((alias) => alias.email),
-    selectUserProfileGitHubIdentities(db, [profileId]).get(profileId) ?? null,
-  );
+  return {
+    ...toUserProfile(profile),
+    emails: emails.map((alias) => alias.email),
+    githubIdentity: selectUserProfileGitHubIdentities(db, [profileId]).get(profileId) ?? null,
+    hasAvatar: profile.has_avatar === 1,
+  };
 }
 
 /** Resolves a durable profile reference to its current one-hop merge head. */
@@ -238,7 +208,7 @@ export function setUserProfileRole(
           .set({ role, updated_at: now })
           .where("id", "=", profile.id),
       );
-      deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+      publishUserProfilesChange(db, profile.id);
       return selectUserProfileListItemById(db, profile.id);
     },
     options,
@@ -283,7 +253,7 @@ function ensureProfileForEmailWithInitialName(
           created_at: now,
         }),
       );
-      deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+      publishUserProfilesChange(db, row.id);
       return toUserProfile(row);
     },
     options,
@@ -338,7 +308,7 @@ function ensureProfileForProviderIdentity(params: {
               .where("provider", "=", params.provider)
               .where("subject", "=", existingIdentity.subject),
           );
-          deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+          publishUserProfilesChange(db, existingIdentity.profile_id);
         }
         return toUserProfile(
           requireResolvedUserProfileMetadataById(db, existingIdentity.profile_id),
@@ -355,63 +325,12 @@ function ensureProfileForProviderIdentity(params: {
           created_at: now,
         }),
       );
-      deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+      publishUserProfilesChange(db, row.id);
       return toUserProfile(row);
     },
     params.options,
     { operationLabel: "user-profiles.ensure-identity" },
   );
-}
-
-function mergeUserProfiles(
-  db: DatabaseSync,
-  sourceProfileId: string,
-  targetProfileId: string,
-  now: number,
-): void {
-  if (sourceProfileId === targetProfileId) {
-    return;
-  }
-  const kysely = userProfilesDb(db);
-  const sourceProfileIds = [
-    sourceProfileId,
-    ...executeSqliteQuerySync(
-      db,
-      kysely.selectFrom("user_profiles").select("id").where("merged_into", "=", sourceProfileId),
-    ).rows.map((row) => row.id),
-  ];
-  prepareUserProfileGitHubMerge(db, sourceProfileIds, targetProfileId);
-  mergeUserModelAccounts(db, sourceProfileId, targetProfileId);
-  mergeUserGitHubConnection(db, sourceProfileId, targetProfileId);
-  for (const mergedProfileId of sourceProfileIds) {
-    mergeUserPreferences(db, mergedProfileId, targetProfileId);
-  }
-  executeSqliteQuerySync(
-    db,
-    kysely
-      .updateTable("user_profile_emails")
-      .set({ profile_id: targetProfileId })
-      .where("profile_id", "in", sourceProfileIds),
-  );
-  executeSqliteQuerySync(
-    db,
-    kysely
-      .updateTable("user_profile_identities")
-      .set({ profile_id: targetProfileId })
-      .where("profile_id", "in", sourceProfileIds),
-  );
-  executeSqliteQuerySync(
-    db,
-    kysely
-      .updateTable("user_profiles")
-      .set({ merged_into: targetProfileId, updated_at: now })
-      .where("id", "in", sourceProfileIds),
-  );
-  executeSqliteQuerySync(
-    db,
-    kysely.updateTable("user_profiles").set({ updated_at: now }).where("id", "=", targetProfileId),
-  );
-  deferSqlitePostCommitPublication(db, publishUserProfileAliasChange);
 }
 
 function adoptDisplayNameIfEmpty(
@@ -437,7 +356,7 @@ function adoptDisplayNameIfEmpty(
           .set({ display_name: displayName, updated_at: now })
           .where("id", "=", profile.id),
       );
-      deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+      publishUserProfilesChange(db, profile.id);
       return toUserProfile({ ...profile, display_name: displayName, updated_at: now });
     },
     options,
@@ -497,11 +416,10 @@ async function adoptAvatarIfEmpty(params: {
           })
           .where("id", "=", profile.id),
       );
-      deferSqlitePostCommitPublication(transactionDb, emitUserProfilesChanged);
+      publishUserProfilesChange(transactionDb, profile.id);
       return toUserProfile({
         ...profile,
         avatar_mime: avatar.mime,
-        avatar_sha256: sha256,
         updated_at: now,
       });
     },
@@ -586,7 +504,7 @@ export function linkEmail(
           db,
           kysely.updateTable("user_profiles").set({ updated_at: now }).where("id", "=", target.id),
         );
-        deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+        publishUserProfilesChange(db, target.id);
         return selectUserProfileListItemById(db, target.id);
       }
       if (existingAlias.profile_id === target.id) {
@@ -621,7 +539,7 @@ export function linkEmail(
             .where("id", "=", existingAlias.profile_id),
         );
       }
-      deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+      publishUserProfilesChange(db, target.id, existingAlias.profile_id);
       return selectUserProfileListItemById(db, target.id);
     },
     options,
@@ -646,7 +564,7 @@ export function setDisplayName(
           .set({ display_name: name, updated_at: now })
           .where("id", "=", profile.id),
       );
-      deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+      publishUserProfilesChange(db, profile.id);
       return selectUserProfileListItemById(db, profile.id);
     },
     options,
@@ -702,7 +620,7 @@ export function syncGitHubIdentity(
           .set({ display_name: displayName, updated_at: now })
           .where("id", "=", canonicalProfileId),
       );
-      deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+      publishUserProfilesChange(db, canonicalProfileId);
       return { ...profile, displayName, updatedAt: now };
     },
     options,
@@ -736,7 +654,7 @@ export function setAvatar(
           .set({ avatar: bytes, avatar_mime: mime, avatar_sha256: sha256, updated_at: now })
           .where("id", "=", profile.id),
       );
-      deferSqlitePostCommitPublication(db, emitUserProfilesChanged);
+      publishUserProfilesChange(db, profile.id);
       return selectUserProfileListItemById(db, profile.id);
     },
     options,

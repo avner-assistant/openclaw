@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { delimiter, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterAll } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 import { copyPrWrapperSources, linkPrWrapperDependencies } from "./pr-wrapper.test-support.js";
@@ -95,7 +96,7 @@ function createMainRefreshTemplate(directory: string, perWorktreeConfig: boolean
 // transport faults, and GitHub responses are synthetic.
 export function createMainRefreshFixture(
   directory: string,
-  options: { perWorktreeConfig?: boolean } = {},
+  options: { perWorktreeConfig?: boolean; partialCloneFilter?: string } = {},
 ) {
   // Existing regression fixtures retain worktreeConfig; acceleration starts with
   // a distinct pristine fixture, never a shared-config reset after sparse use.
@@ -116,11 +117,28 @@ export function createMainRefreshFixture(
   mkdirSync(bin);
   const { env, realGit, git } = createFixtureGit(root);
   const { main, head, sameTreeHead, movedMain, gateMain } = template;
-  // Copy complete object stores (including sameTreeHead), never shared refs or
-  // hardlinks. Create worktrees afterward so their absolute back-links stay local.
   const copyOptions = { recursive: true, mode: fsConstants.COPYFILE_FICLONE };
-  cpSync(template.canonical, canonical, copyOptions);
   cpSync(template.origin, origin, copyOptions);
+  if (options.partialCloneFilter) {
+    git(origin, "config", "uploadpack.allowFilter", "true");
+    git(
+      root,
+      "clone",
+      `--filter=${options.partialCloneFilter}`,
+      pathToFileURL(origin).href,
+      canonical,
+    );
+    git(canonical, "config", "user.name", "OpenClaw Test");
+    git(canonical, "config", "user.email", "test@example.invalid");
+    git(canonical, "config", "core.hooksPath", "/dev/null");
+    if (perWorktreeConfig) {
+      git(canonical, "config", "extensions.worktreeConfig", "true");
+    }
+  } else {
+    // Copy complete object stores (including sameTreeHead), never shared refs or
+    // hardlinks. Create worktrees afterward so their absolute back-links stay local.
+    cpSync(template.canonical, canonical, copyOptions);
+  }
   git(canonical, "remote", "set-url", "origin", origin);
   git(canonical, "config", `url.${origin}.insteadOf`, "https://github.com/fixture/repo");
   git(
@@ -445,7 +463,13 @@ if (args[0] === 'pr' && args[1] === 'view') {
       throw new Error('Unexpected GraphQL request');
     }
   } else if (endpoint === 'repos/fixture/repo') {
-    value = { id: 123, node_id: 'fixture-repo', full_name: 'fixture/repo', html_url: 'https://github.com/fixture/repo' };
+    if (JSON.stringify(args) !== JSON.stringify([
+      'api', '--hostname', 'github.com', 'repos/fixture/repo', '-H', 'Cache-Control: max-age=0',
+    ])) throw new Error('Unexpected repository identity request');
+    value = {
+      id: 123, node_id: 'fixture-repo', full_name: 'fixture/repo',
+      html_url: 'https://github.com/fixture/repo',
+    };
   } else if (endpoint === 'repos/fixture/repo/commits/${head}') {
     const [name, email] = runGit(['-C', origin, 'show', '-s', '--format=%an%n%ae', ${JSON.stringify(head)}]).split('\\n');
     value = { commit: { author: { name, email } }, author: { ...control.metadata.author, type: 'User' } };
