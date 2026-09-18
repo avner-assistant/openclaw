@@ -374,7 +374,34 @@ def run_scenario(recorder, driver_obj, sut, actions, seconds, barrier_dir=""):
             ):
                 if action["type"] == "send":
                     text, _run = driver.apply_template(action["text"], sut)
-                    result = driver_obj.send_text(recorder.chat_id, text)
+                    # replyToPrevious targets the newest message this scenario sent.
+                    reply_to = sent_ids[-1] if action.get("replyToPrevious") and sent_ids else None
+                    photo = action.get("photo")
+                    try:
+                        if photo:
+                            results = driver_obj.send_photos(
+                                recorder.chat_id,
+                                [photo],
+                                text,
+                                reply_to=reply_to,
+                                forum_topic_id=action.get("forumTopicId"),
+                            )
+                            result = results[0] if results else None
+                        else:
+                            result = driver_obj.send_text(
+                                recorder.chat_id,
+                                text,
+                                reply_to=reply_to,
+                                forum_topic_id=action.get("forumTopicId"),
+                            )
+                    except driver.DriverError as error:
+                        recorder._append(
+                            "action", None, actionType="send", status="failed", error=str(error)
+                        )
+                        # A confirmation timeout can follow an accepted send. Keep
+                        # observing without resending or claiming a sent receipt.
+                        recorder.pump(max(0, deadline - time.time()))
+                        raise
                     message_id = (result or {}).get("id")
                     sent_ids.append(message_id)
                     recorder._append(
@@ -383,6 +410,8 @@ def run_scenario(recorder, driver_obj, sut, actions, seconds, barrier_dir=""):
                         actionType="send",
                         status="completed",
                         text=text,
+                        **({"photo": photo} if photo else {}),
+                        **({"replyToMessageId": reply_to} if reply_to else {}),
                     )
                     next_action += 1
                     continue
