@@ -1,9 +1,15 @@
 // Fixture adapter for native plutil output on non-macOS test hosts. Only the
 // generated XML fixture subset is supported; native validation is tested separately.
-export function decodeLaunchAgentPlistFixture(input: string | Uint8Array, format?: string) {
+export function decodeLaunchAgentPlistFixture(
+  input: string | Uint8Array,
+  format: string | undefined,
+) {
   const xml = typeof input === "string" ? input : Buffer.from(input).toString("utf8");
   if (format === "xml1") {
     return { stdout: xml, stderr: "" };
+  }
+  if (format !== "json") {
+    throw new Error(`Unsupported plist fixture format: ${format}`);
   }
   const decode = (value: string) =>
     value
