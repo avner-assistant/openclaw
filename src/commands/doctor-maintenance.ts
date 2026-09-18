@@ -245,6 +245,12 @@ export async function beginDoctorMaintenance(params: {
           requireRunningService: true,
         }),
       );
+      if (health.waitOutcome === "still-starting") {
+        const warning = renderRestartDiagnostics(health).join(" ");
+        warnings.push(warning);
+        params.runtime.log(warning);
+        return;
+      }
       if (!health.healthy) {
         throw new Error(
           `Doctor repaired state, but the managed Gateway did not become ready: ${renderRestartDiagnostics(health).join(" ")}. Run ${formatCliCommand("openclaw gateway status --deep", env)}.`,

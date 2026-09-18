@@ -368,10 +368,11 @@ export async function waitForGatewayHealthyRestart(params: {
     Math.ceil(stoppedFreeEarlyExitGraceMs() / delayMs),
     Math.floor(attempts / 2),
   );
-  let migrationDeadlineMs: number | undefined;
-  let postMigrationDeadlineMs: number | undefined;
   let migrationActive = false;
   let nextMigrationActivityPollMs = 0;
+  let migrationActivity: { owner: string; heartbeatAt: number | null } | undefined;
+  let furthestStartupPhase: number | undefined;
+  let lastStartupProgressMs = 0;
   let healthyStreak: { snapshot: GatewayRestartSnapshot; probes: number } | undefined;
   let updateStartupDeadlineMs: number | undefined;
   let observedOwner: string | undefined;
@@ -394,7 +395,7 @@ export async function waitForGatewayHealthyRestart(params: {
     const expiredOutcome = generationChanged ? "generation-changed" : "timeout";
     // Health probes and state-DB reads are part of the operator-visible wait. A monotonic clock
     // keeps both the normal deadline and migration watchdog bounded when those operations stall.
-    const elapsedMs = Math.max(0, performance.now() - startedAtMs);
+    let elapsedMs = Math.max(0, performance.now() - startedAtMs);
     if (updateInProgress && snapshot.runtime.status === "running") {
       // Old updaters invoke the candidate CLI without forwarding their budget. A live
       // process earns the startup watchdog; later phases never reset its finite cap.
@@ -474,6 +475,7 @@ export async function waitForGatewayHealthyRestart(params: {
       consecutiveStoppedFreeCount = 0;
     }
 
+    let migrationProgress = false;
     if (snapshot.runtime.status !== "running") {
       migrationActive = false;
     } else if (elapsedMs >= nextMigrationActivityPollMs) {
@@ -481,36 +483,85 @@ export async function waitForGatewayHealthyRestart(params: {
         try {
           return (params.isStartupMigrationActive ?? hasActiveStartupMigrationLease)({
             env: params.env,
+            onActivity: (activity) => {
+              // A live lease alone can be stalled; only this process's renewed heartbeat
+              // demonstrates work. Replacing the lease cannot manufacture progress.
+              migrationProgress =
+                activity.pid !== undefined &&
+                activity.pid === snapshot.runtime.pid &&
+                activity.owner === migrationActivity?.owner &&
+                activity.heartbeatAt !== null &&
+                migrationActivity.heartbeatAt !== null &&
+                activity.heartbeatAt > migrationActivity.heartbeatAt;
+              migrationActivity = activity;
+            },
           });
         } catch {
           return false;
         }
       })();
       nextMigrationActivityPollMs = elapsedMs + STARTUP_MIGRATION_ACTIVITY_POLL_MS;
-      if (migrationActive && migrationDeadlineMs === undefined) {
-        // Startup owns migration truth through its renewable shared-state lease. Extend only
-        // while the supervisor still reports the process running, and cap the extension at one
-        // lease TTL so a wedged migration cannot hold restart/update callers indefinitely.
-        migrationDeadlineMs = elapsedMs + STARTUP_MIGRATION_LEASE_TTL_MS;
-      } else if (!migrationActive && migrationDeadlineMs !== undefined) {
-        postMigrationDeadlineMs ??= elapsedMs + standardDeadlineMs;
-      }
+    }
+    if (boundedDeadlineMs === undefined) {
+      elapsedMs = Math.max(0, performance.now() - startedAtMs);
     }
 
     if (migrationActive) {
       snapshot.startupPhase = "startup migration";
     }
-    if (elapsedMs >= standardDeadlineMs || migrationDeadlineMs !== undefined) {
-      // Explicit update budgets win. Older update children use the startup watchdog;
-      // standalone restarts retain their migration and post-migration windows.
+    const runtimePid = snapshot.runtime.pid;
+    const ownsListener =
+      snapshot.portUsage.status === "busy" &&
+      runtimePid !== undefined &&
+      snapshot.portUsage.listeners.some((listener) =>
+        listenerOwnedByRuntimePid({ listener, runtimePid }),
+      );
+    const startupPhase =
+      snapshot.runtime.status !== "running"
+        ? 0
+        : migrationActive
+          ? 1
+          : snapshot.gatewayBootId
+            ? 4
+            : ownsListener
+              ? 3
+              : 2;
+    const stableRunning =
+      snapshot.runtime.status === "running" &&
+      (snapshot.runtime.pid !== undefined || snapshot.gatewayBootId !== undefined) &&
+      !generationChanged;
+    if (
+      !healthy &&
+      stableRunning &&
+      (migrationProgress ||
+        (furthestStartupPhase !== undefined && startupPhase > furthestStartupPhase))
+    ) {
+      lastStartupProgressMs = elapsedMs;
+    }
+    // A returning listener or replayed hello is not a new phase of startup.
+    furthestStartupPhase = Math.max(furthestStartupPhase ?? startupPhase, startupPhase);
+    if (elapsedMs >= standardDeadlineMs) {
+      const startupCapMs = Math.max(standardDeadlineMs, STARTUP_MIGRATION_LEASE_TTL_MS);
+      // Explicit budgets and the shipped updater marker keep their existing behavior.
       const deadlineMs =
         boundedDeadlineMs !== undefined
           ? boundedDeadlineMs + settleDurationMs
-          : migrationActive
-            ? migrationDeadlineMs
-            : (postMigrationDeadlineMs ?? standardDeadlineMs) + settleDurationMs;
-      if (deadlineMs === undefined || elapsedMs >= deadlineMs) {
-        return withWaitContext(snapshot, expiredOutcome, elapsedMs);
+          : Math.min(
+              (stableRunning ? lastStartupProgressMs : 0) + standardDeadlineMs + settleDurationMs,
+              startupCapMs,
+            );
+      if (elapsedMs >= deadlineMs) {
+        const stillStarting =
+          boundedDeadlineMs === undefined &&
+          stableRunning &&
+          lastStartupProgressMs > 0 &&
+          elapsedMs - lastStartupProgressMs < standardDeadlineMs &&
+          elapsedMs >= startupCapMs;
+        return withWaitContext(
+          snapshot,
+          stillStarting ? "still-starting" : expiredOutcome,
+          elapsedMs,
+        );
       }
     }
     await sleep(delayMs, params.signal);

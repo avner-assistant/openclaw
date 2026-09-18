@@ -214,7 +214,11 @@ export function readStartupMigrationVersion(env: NodeJS.ProcessEnv = process.env
 
 /** Returns whether the canonical automatic-migration lease is still live. */
 export function hasActiveStartupMigrationLease(
-  params: { env?: NodeJS.ProcessEnv; nowMs?: number } = {},
+  params: {
+    env?: NodeJS.ProcessEnv;
+    nowMs?: number;
+    onActivity?: (activity: { owner: string; pid?: number; heartbeatAt: number | null }) => void;
+  } = {},
 ): boolean {
   const env = params.env ?? process.env;
   const nowMs = params.nowMs ?? Date.now();
@@ -226,16 +230,24 @@ export function hasActiveStartupMigrationLease(
           db,
           stateDb
             .selectFrom("state_leases")
-            .select("payload_json as payloadJson")
+            .select(["payload_json as payloadJson", "owner", "heartbeat_at as heartbeatAt"])
             .where("scope", "=", STARTUP_MIGRATION_LEASE_SCOPE)
             .where("lease_key", "=", STARTUP_MIGRATION_LEASE_KEY)
             .where("expires_at", ">", nowMs),
         );
-        return Boolean(
-          lease &&
-          readStateLeaseProcessOwnerStatus(parseStateLeaseProcessOwner(lease.payloadJson)) !==
-            "dead",
-        );
+        if (!lease) {
+          return false;
+        }
+        const owner = parseStateLeaseProcessOwner(lease.payloadJson);
+        if (readStateLeaseProcessOwnerStatus(owner) === "dead") {
+          return false;
+        }
+        params.onActivity?.({
+          owner: lease.owner,
+          pid: owner?.host === hostname() ? owner.pid : undefined,
+          heartbeatAt: lease.heartbeatAt,
+        });
+        return true;
       },
       { env },
     ) ?? false

@@ -4,6 +4,7 @@ import type { GatewayService } from "../../daemon/service.js";
 import { gatewayHealthResponse } from "../../gateway/health-response.test-support.js";
 import {
   inspectPortUsage,
+  createStartupMigrationActivityProbe,
   makeGatewayService,
   monotonicClock,
   callGateway,
@@ -261,6 +262,7 @@ describe("restart health", () => {
     {
       name: "does not report an unsettled healthy snapshot as recovered at timeout",
       pids: [8000, 8000, 8000, 8000, 8000],
+      bootIds: ["boot-a", "boot-a", "boot-a", "boot-a", "boot-a"],
       reachable: [false, false, false, true, true],
       attempts: 2,
       outcome: "timeout",
@@ -410,7 +412,7 @@ describe("restart health", () => {
         hints: [],
       };
     });
-    const isStartupMigrationActive = vi.fn(() => true);
+    const isStartupMigrationActive = createStartupMigrationActivityProbe(() => true);
 
     const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
     const snapshot = await waitForGatewayHealthyRestart({
@@ -442,7 +444,7 @@ describe("restart health", () => {
           };
     });
     let migrationPolls = 0;
-    const isStartupMigrationActive = vi.fn(() => {
+    const isStartupMigrationActive = createStartupMigrationActivityProbe(() => {
       migrationPolls += 1;
       return migrationPolls < 7;
     });
@@ -469,7 +471,7 @@ describe("restart health", () => {
       hints: [],
     });
     let migrationPolls = 0;
-    const isStartupMigrationActive = vi.fn(() => {
+    const isStartupMigrationActive = createStartupMigrationActivityProbe(() => {
       migrationPolls += 1;
       return migrationPolls < 4;
     });
@@ -495,7 +497,7 @@ describe("restart health", () => {
       listeners: [],
       hints: [],
     });
-    const isStartupMigrationActive = vi.fn(() => false);
+    const isStartupMigrationActive = createStartupMigrationActivityProbe(() => false);
 
     const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
     const snapshot = await waitForGatewayHealthyRestart({
@@ -535,14 +537,14 @@ describe("restart health", () => {
     },
   );
 
-  it("bounds a startup migration that never reaches readiness", async () => {
+  it("reports a renewing startup migration as still starting at the cap", async () => {
     inspectPortUsage.mockResolvedValue({
       port: 18789,
       status: "free",
       listeners: [],
       hints: [],
     });
-    const isStartupMigrationActive = vi.fn(() => true);
+    const isStartupMigrationActive = createStartupMigrationActivityProbe(() => true);
 
     const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
     const snapshot = await waitForGatewayHealthyRestart({
@@ -554,36 +556,46 @@ describe("restart health", () => {
     });
 
     expect(snapshot.healthy).toBe(false);
-    expect(snapshot.waitOutcome).toBe("timeout");
+    expect(snapshot.waitOutcome).toBe("still-starting");
     expect(snapshot.elapsedMs).toBe(300_000);
     expect(sleep).toHaveBeenCalledTimes(5);
   });
 
-  it("includes slow health inspections in the migration watchdog", async () => {
-    inspectPortUsage.mockImplementation(async () => {
-      monotonicClock.nowMs += 90_000;
-      return {
+  it.each(["health inspection", "migration activity poll"])(
+    "includes slow %s in the readiness budget",
+    async (slowOperation) => {
+      inspectPortUsage.mockImplementation(async () => {
+        if (slowOperation === "health inspection") {
+          monotonicClock.nowMs += 90_000;
+        }
+        return {
+          port: 18789,
+          status: "free",
+          listeners: [],
+          hints: [],
+        };
+      });
+      const isStartupMigrationActive = createStartupMigrationActivityProbe(() => {
+        if (slowOperation === "migration activity poll") {
+          monotonicClock.nowMs += 90_000;
+        }
+        return true;
+      });
+
+      const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
+      const snapshot = await waitForGatewayHealthyRestart({
+        service: makeGatewayService({ status: "running", pid: 8000 }),
         port: 18789,
-        status: "free",
-        listeners: [],
-        hints: [],
-      };
-    });
-    const isStartupMigrationActive = vi.fn(() => true);
+        attempts: 1,
+        delayMs: 10_000,
+        isStartupMigrationActive,
+      });
 
-    const { waitForGatewayHealthyRestart } = await import("./restart-health.js");
-    const snapshot = await waitForGatewayHealthyRestart({
-      service: makeGatewayService({ status: "running", pid: 8000 }),
-      port: 18789,
-      attempts: 1,
-      delayMs: 10_000,
-      isStartupMigrationActive,
-    });
-
-    expect(snapshot.waitOutcome).toBe("timeout");
-    expect(snapshot.elapsedMs).toBe(390_000);
-    expect(sleep).toHaveBeenCalledTimes(3);
-  });
+      expect(snapshot.waitOutcome).toBe("timeout");
+      expect(snapshot.elapsedMs).toBe(90_000);
+      expect(sleep).not.toHaveBeenCalled();
+    },
+  );
 
   it("annotates stopped-free early exits with the actual elapsed time", async () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
