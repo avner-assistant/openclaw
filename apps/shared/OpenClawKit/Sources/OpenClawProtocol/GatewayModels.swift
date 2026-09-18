@@ -339,6 +339,88 @@ public enum SessionMovePlacementState: String, Codable, Sendable {
     case active = "active"
 }
 
+public struct AgentActivityItem: Codable, Sendable {
+    public let itemid: String
+    public let phase: AnyCodable
+    public let kind: String
+    public let title: String
+    public let status: AnyCodable?
+    public let name: String?
+    public let meta: String?
+    public let commandbearing: Bool?
+    public let toolcallid: String?
+    public let startedat: Double?
+    public let endedat: Double?
+    public let error: String?
+    public let summary: String?
+    public let progresstext: String?
+    public let suppresschannelprogress: Bool?
+    public let hidefromchannelprogress: Bool?
+    public let approvalid: String?
+    public let approvalslug: String?
+
+    public init(
+        itemid: String,
+        phase: AnyCodable,
+        kind: String,
+        title: String,
+        status: AnyCodable? = nil,
+        name: String? = nil,
+        meta: String? = nil,
+        commandbearing: Bool? = nil,
+        toolcallid: String? = nil,
+        startedat: Double? = nil,
+        endedat: Double? = nil,
+        error: String? = nil,
+        summary: String? = nil,
+        progresstext: String? = nil,
+        suppresschannelprogress: Bool? = nil,
+        hidefromchannelprogress: Bool? = nil,
+        approvalid: String? = nil,
+        approvalslug: String? = nil)
+    {
+        self.itemid = itemid
+        self.phase = phase
+        self.kind = kind
+        self.title = title
+        self.status = status
+        self.name = name
+        self.meta = meta
+        self.commandbearing = commandbearing
+        self.toolcallid = toolcallid
+        self.startedat = startedat
+        self.endedat = endedat
+        self.error = error
+        self.summary = summary
+        self.progresstext = progresstext
+        self.suppresschannelprogress = suppresschannelprogress
+        self.hidefromchannelprogress = hidefromchannelprogress
+        self.approvalid = approvalid
+        self.approvalslug = approvalslug
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case itemid = "itemId"
+        case phase
+        case kind
+        case title
+        case status
+        case name
+        case meta
+        case commandbearing = "commandBearing"
+        case toolcallid = "toolCallId"
+        case startedat = "startedAt"
+        case endedat = "endedAt"
+        case error
+        case summary
+        case progresstext = "progressText"
+        case suppresschannelprogress = "suppressChannelProgress"
+        case hidefromchannelprogress = "hideFromChannelProgress"
+        case approvalid = "approvalId"
+        case approvalslug = "approvalSlug"
+    }
+}
+
 public struct AgentEvent: Codable, Sendable {
     public let runid: String
     public let seq: Int
@@ -3932,9 +4014,28 @@ public struct ChatFinalEvent: Codable, Sendable {
     }
 }
 
+public struct ChatHistoryActivity: Codable, Sendable {
+    public let messageid: String
+    public let items: [AgentActivityItem]
+
+    public init(
+        messageid: String,
+        items: [AgentActivityItem])
+    {
+        self.messageid = messageid
+        self.items = items
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case messageid = "messageId"
+        case items
+    }
+}
+
 public struct ChatHistoryDeltaResult: Codable, Sendable {
     public let kind: String
     public let messages: [AnyCodable]
+    public let activity: [ChatHistoryActivity]?
     public let deltacursor: String
     public let sessioninfo: AnyCodable
     public let agentslist: AnyCodable?
@@ -3947,6 +4048,7 @@ public struct ChatHistoryDeltaResult: Codable, Sendable {
     public init(
         kind: String,
         messages: [AnyCodable],
+        activity: [ChatHistoryActivity]? = nil,
         deltacursor: String,
         sessioninfo: AnyCodable,
         agentslist: AnyCodable? = nil,
@@ -3958,6 +4060,7 @@ public struct ChatHistoryDeltaResult: Codable, Sendable {
     {
         self.kind = kind
         self.messages = messages
+        self.activity = activity
         self.deltacursor = deltacursor
         self.sessioninfo = sessioninfo
         self.agentslist = agentslist
@@ -3971,6 +4074,7 @@ public struct ChatHistoryDeltaResult: Codable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case kind
         case messages
+        case activity
         case deltacursor = "deltaCursor"
         case sessioninfo = "sessionInfo"
         case agentslist = "agentsList"
@@ -21378,18 +21482,22 @@ public struct TasksHistoryParams: Codable, Sendable {
 
 public struct TasksHistoryResult: Codable, Sendable {
     public let messages: [AnyCodable]
+    public let activity: [ChatHistoryActivity]?
     public let nextcursor: String?
 
     public init(
         messages: [AnyCodable],
+        activity: [ChatHistoryActivity]? = nil,
         nextcursor: String? = nil)
     {
         self.messages = messages
+        self.activity = activity
         self.nextcursor = nextcursor
     }
 
     private enum CodingKeys: String, CodingKey {
         case messages
+        case activity
         case nextcursor = "nextCursor"
     }
 }

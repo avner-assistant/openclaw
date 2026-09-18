@@ -8,17 +8,19 @@ public typealias OpenClawChatToolActivityHandler = @MainActor @Sendable (
 
 extension OpenClawChatViewModel {
     public func endPendingToolActivities() {
-        self.pendingToolCallsById = [:]
+        self.turnToolCallsById = [:]
     }
 
     func reportToolActivityChanges(
         from previous: [String: OpenClawChatPendingToolCall],
         to current: [String: OpenClawChatPendingToolCall])
     {
-        for (id, call) in previous where current[id] == nil {
+        let priorActive = previous.filter { !$0.value.isComplete && $0.value.activity?.isVisible != false }
+        let currentActive = current.filter { !$0.value.isComplete && $0.value.activity?.isVisible != false }
+        for (id, call) in priorActive where currentActive[id] == nil {
             self.onToolActivity?(id, call.name, false, self.sessionKey)
         }
-        for (id, call) in current where previous[id] == nil {
+        for (id, call) in currentActive where priorActive[id] == nil {
             self.onToolActivity?(id, call.name, true, self.sessionKey)
         }
     }

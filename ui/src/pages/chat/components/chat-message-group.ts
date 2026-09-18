@@ -21,10 +21,10 @@ import {
 import {
   groupToolCards,
   summarizeToolGroup,
+  readPreparedActivity,
   type ToolCardGroup,
 } from "../../../lib/chat/tool-call-grouping.ts";
-import { resolveToolCallView } from "../../../lib/chat/tool-call-view.ts";
-import { extractToolCardsCached, isToolCardError } from "../../../lib/chat/tool-cards.ts";
+import { extractToolCardsCached } from "../../../lib/chat/tool-cards.ts";
 import { fnv1aUtf16 } from "../../../lib/fnv1a.ts";
 import { gatewayClientKind } from "../../../lib/gateway-client-kind.ts";
 import { resolveIdentityHue } from "../../../lib/identity-avatar.ts";
@@ -56,10 +56,8 @@ import type { AssistantMessageDisclosure } from "./chat-message-text.ts";
 import { extractGroupMeta, renderMessageMeta } from "./chat-message-timestamp.ts";
 import type { SidebarContent, SidebarFullMessageLoader } from "./chat-sidebar.ts";
 import {
-  isRunningToolCard,
   renderBrowserTabPreviews,
   renderToolCard,
-  resolveToolRowText,
   shouldToggleSelectableDisclosure,
   syncToolDisclosureOverflow,
 } from "./chat-tool-cards.ts";
@@ -208,29 +206,18 @@ export function renderActivityGroup(
   const cards = groups.flatMap((group) =>
     group.messages.flatMap((item) => extractToolCardsCached(item.message)),
   );
-  const latestGroup = groups[groups.length - 1] ?? firstGroup;
-  const latestCards = latestGroup.messages.flatMap((item) => extractToolCardsCached(item.message));
-  // While a run is live, the newest still-running call names the group so
-  // the collapsed header reads like a status line; afterwards it aggregates.
-  const runningCard = opts.runActive
-    ? latestCards.findLast((card) => isRunningToolCard(card, opts.runActive))
+  const activity = groups.flatMap((group) =>
+    group.messages.flatMap((entry) => readPreparedActivity(entry.message)),
+  );
+  const visibleActivity = activity.filter(
+    (item) => !item.hideFromChannelProgress && !item.suppressChannelProgress,
+  );
+  const running = opts.runActive
+    ? visibleActivity.findLast((item) => item.status === "running")
     : undefined;
   const cardGroups = groupToolCards(cards);
-  let runningOperation = runningCard;
-  if (runningCard?.parentToolCallId) {
-    for (const root of cardGroups) {
-      const pending = [...root.children];
-      for (const child of pending) {
-        if (child.card === runningCard && resolveToolCallView(root.card).title) {
-          runningOperation = root.card;
-        }
-        pending.push(...child.children);
-      }
-    }
-  }
-  const groupSummaryLabel = runningCard
-    ? `${resolveToolRowText(runningOperation ?? runningCard, opts.runActive)}…`
-    : summarizeToolGroup(cards.map((card) => ({ ...card, isError: isToolCardError(card) })));
+  const groupSummaryLabel = running ? `${running.title}…` : summarizeToolGroup(visibleActivity);
+  const visibleCalls = new Set(visibleActivity.map((item) => item.toolCallId ?? item.itemId));
   const activityDisclosureId = `activity:${firstGroup.key}`;
   const activityBodyId = `activity-body-${fnv1aUtf16(firstGroup.key).toString(16)}`;
   const activityExpanded = opts.isToolMessageExpanded?.(activityDisclosureId) ?? false;
@@ -330,7 +317,7 @@ export function renderActivityGroup(
               >`
             : nothing
         }
-        ${activityExpanded ? nothing : renderToolOutcomeSummary(cards)}
+        ${activityExpanded ? nothing : renderToolOutcomeSummary(cards.filter((card) => card.callId && visibleCalls.has(card.callId)))}
         <span class="chat-tool-row__chevron" aria-hidden="true">${icons.chevronRight}</span>
       </button>
       <div class="chat-activity-group__body" id=${activityBodyId} ?hidden=${!activityExpanded}>

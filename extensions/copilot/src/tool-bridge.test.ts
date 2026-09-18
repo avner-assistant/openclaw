@@ -1982,8 +1982,18 @@ describe("createCopilotToolBridge tool conversion", () => {
     const preparedArgs = { value: "prepared" };
     const onToolCompleted = vi.fn();
     const prepareArguments = vi.fn(() => preparedArgs);
+    const executedArguments = { action: "kill", sessionId: "process-1" };
+    const observeToolTerminal = vi.fn(() => ({
+      executionStarted: true,
+      sideEffectEvidence: true,
+      executedArguments,
+      effectReceipt: { state: "uncertain" as const },
+    }));
     const sourceTool = makeTool({ prepareArguments });
-    const sdkTool = await convertOpenClawToolToSdkToolForTest(sourceTool, { onToolCompleted });
+    const sdkTool = await convertOpenClawToolToSdkToolForTest(sourceTool, {
+      onToolCompleted,
+      observeToolTerminal,
+    });
 
     await runSdkTool(sdkTool, { value: "raw" }, makeInvocation({ toolCallId: "call-99" }));
 
@@ -1991,7 +2001,7 @@ describe("createCopilotToolBridge tool conversion", () => {
     expect(prepareArguments).toHaveBeenCalledWith({ value: "raw" });
     expect(sourceTool.execute).toHaveBeenCalledWith("call-99", preparedArgs, undefined, undefined);
     expect(onToolCompleted).toHaveBeenCalledWith(
-      expect.objectContaining({ args: preparedArgs, toolCallId: "call-99" }),
+      expect.objectContaining({ args: executedArguments, toolCallId: "call-99" }),
     );
   });
 
@@ -2084,6 +2094,20 @@ describe("createCopilotToolBridge tool conversion", () => {
       },
       isError: true,
     });
+  });
+
+  it("reports a failed result even when it has no error text", async () => {
+    const onToolCompleted = vi.fn();
+    const sdkTool = await convertOpenClawToolToSdkToolForTest(
+      makeTool({}, { content: [], details: { ok: false } }),
+      { onToolCompleted },
+    );
+    const result = await runSdkTool(sdkTool, {}, makeInvocation({ toolCallId: "no-error-text" }));
+    await flushAsync();
+    expect(result).toMatchObject({ resultType: "failure" });
+    expect(onToolCompleted).toHaveBeenCalledWith(
+      expect.objectContaining({ toolCallId: "no-error-text", isError: true }),
+    );
   });
 
   it("reports terminal tool failures to the harness lifecycle bridge", async () => {

@@ -356,7 +356,10 @@ export async function readChatHistoryPageKernel(
       : projected;
     if (messageId) {
       // Numeric offsets do not encode the selected historical transcript source.
-      return { messages: augmentChatHistoryWithCanvasBlocks(windowed) };
+      return {
+        messages: augmentChatHistoryWithCanvasBlocks(windowed),
+        ...(projection.activity.length ? { activity: projection.activity } : {}),
+      };
     }
     return {
       ...(isTailPage
@@ -370,6 +373,7 @@ export async function readChatHistoryPageKernel(
           }
         : {}),
       messages: augmentChatHistoryWithCanvasBlocks(windowed),
+      ...(projection.activity.length ? { activity: projection.activity } : {}),
       responseOffset: pageOffset,
       pagination: {
         offset: pageOffset,
@@ -405,6 +409,9 @@ export async function readChatHistoryPageKernel(
         ? { deltaCursor: readPage.deltaCursor }
         : {}),
       messages: augmentChatHistoryWithCanvasBlocks(windowedTailMessages),
+      ...(incrementalTail.projection.activity.length
+        ? { activity: incrementalTail.projection.activity }
+        : {}),
       pagination: {
         offset: offset ?? 0,
         totalMessages: readPage.totalMessages,

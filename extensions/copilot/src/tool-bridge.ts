@@ -73,8 +73,10 @@ type CopilotToolAttemptParams = Partial<Omit<EmbeddedRunAttemptParamsV2, "hostCa
 type CopilotToolCompletion = {
   toolName: string;
   toolCallId: string;
+  parentToolCallId?: string;
   args: Record<string, unknown>;
   result?: unknown;
+  isError: boolean;
   error?: string;
   startedAt: number;
 };
@@ -513,7 +515,7 @@ function convertOpenClawToolToSdkTool(
     executionStarted: boolean,
   ): ToolResultObject => {
     const errorMessage = toCopilotToolError(error).message;
-    input.attemptParams.observeToolTerminal?.({
+    const terminal = input.attemptParams.observeToolTerminal?.({
       toolCallId: invocation.toolCallId,
       toolName: sourceTool.name,
       result: error,
@@ -533,7 +535,8 @@ function convertOpenClawToolToSdkTool(
     notifyToolCompleted({
       toolName: sourceTool.name,
       toolCallId: invocation.toolCallId,
-      args: toToolStartArgs(executedArgs),
+      args: toToolStartArgs(terminal?.executedArguments ?? executedArgs),
+      isError: true,
       error: errorMessage,
       startedAt,
     });
@@ -609,7 +612,7 @@ function convertOpenClawToolToSdkTool(
       isError: resultIsError,
     });
     const resultError = resultIsError ? extractToolErrorMessage(sanitizedResult) : undefined;
-    input.attemptParams.observeToolTerminal?.({
+    const terminal = input.attemptParams.observeToolTerminal?.({
       toolCallId: invocation.toolCallId,
       toolName: sourceTool.name,
       result,
@@ -623,8 +626,9 @@ function convertOpenClawToolToSdkTool(
     notifyToolCompleted({
       toolName: sourceTool.name,
       toolCallId: invocation.toolCallId,
-      args: toToolStartArgs(preparedArgs),
+      args: toToolStartArgs(terminal?.executedArguments ?? preparedArgs),
       result: sanitizedResult,
+      isError: resultIsError,
       ...(resultError ? { error: resultError } : {}),
       startedAt,
     });
@@ -675,7 +679,7 @@ async function executeCatalogTool(
       ? (extractToolErrorMessage(sanitizedResult) ?? "tool returned an error")
       : undefined;
     terminalObserved = true;
-    input.attemptParams?.observeToolTerminal?.({
+    const terminal = input.attemptParams?.observeToolTerminal?.({
       toolCallId: params.toolCallId,
       toolName: params.toolName,
       result,
@@ -693,8 +697,10 @@ async function executeCatalogTool(
     await input.onToolCompleted?.({
       toolName: params.toolName,
       toolCallId: params.toolCallId,
-      args: toToolStartArgs(preparedArgs),
+      parentToolCallId: params.parentToolCallId,
+      args: toToolStartArgs(terminal?.executedArguments ?? preparedArgs),
       result: sanitizedResult,
+      isError,
       ...(error ? { error } : {}),
       startedAt,
     });
@@ -704,7 +710,7 @@ async function executeCatalogTool(
     // Completion hooks can throw after the tool terminal outcome. Do not
     // rewrite that recorded outcome as a second, contradictory tool failure.
     if (!terminalObserved) {
-      input.attemptParams?.observeToolTerminal?.({
+      const terminal = input.attemptParams?.observeToolTerminal?.({
         toolCallId: params.toolCallId,
         toolName: params.toolName,
         result: error,
@@ -714,6 +720,7 @@ async function executeCatalogTool(
         failure: { error: message },
         ...(ownerMutation ? { ownerMutation } : {}),
       });
+      preparedArgs = terminal?.executedArguments ?? preparedArgs;
     }
     const failure = sanitizeToolResult({
       content: [{ type: "text", text: message }],
@@ -727,7 +734,9 @@ async function executeCatalogTool(
     await input.onToolCompleted?.({
       toolName: params.toolName,
       toolCallId: params.toolCallId,
+      parentToolCallId: params.parentToolCallId,
       args: toToolStartArgs(preparedArgs),
+      isError: true,
       error: message,
       startedAt,
     });

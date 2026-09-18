@@ -1,3 +1,4 @@
+import { projectAgentToolActivity } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { onInternalDiagnosticEvent } from "openclaw/plugin-sdk/diagnostic-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { handleCodexAppServerApprovalRequest } from "./approval-bridge.js";
@@ -221,6 +222,14 @@ export function createCodexAttemptServerRequestController(
       const commandBearing = isCodexCommandBearingToolCall(call.tool, toolArgs);
       const shouldEmitDynamicToolProgress = shouldEmitTranscriptToolProgress(call.tool, toolArgs);
       if (shouldEmitDynamicToolProgress) {
+        const activity = projectAgentToolActivity({
+          toolCallId: call.callId,
+          name: call.tool,
+          phase: "start",
+          args: toolArgs,
+          meta: toolMeta,
+        });
+        void emitCodexAppServerEvent(params, { stream: "item", data: activity });
         void emitCodexAppServerEvent(params, {
           stream: "tool",
           data: {
@@ -333,6 +342,14 @@ export function createCodexAttemptServerRequestController(
         }
         if (shouldEmitDynamicToolProgress) {
           const progressResponse = toCodexDynamicToolProgressResponse(response, protocolResponse);
+          const activity = projectAgentToolActivity({
+            toolCallId: call.callId,
+            name: call.tool,
+            phase: "result",
+            args: response.executedArguments ?? call.arguments,
+            result: toTranscriptToolResult(progressResponse),
+            isError: !protocolResponse.success,
+          });
           void emitCodexAppServerEvent(params, {
             stream: "tool",
             data: {
@@ -346,6 +363,7 @@ export function createCodexAttemptServerRequestController(
               result: toTranscriptToolResult(progressResponse),
             },
           });
+          void emitCodexAppServerEvent(params, { stream: "item", data: activity });
         }
         if (
           !terminalDiagnosticObserved &&

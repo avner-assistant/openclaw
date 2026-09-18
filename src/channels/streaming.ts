@@ -172,6 +172,8 @@ export type ChannelProgressDraftLineInput =
       itemId?: string;
       toolCallId?: string;
       itemKind?: string;
+      hideFromChannelProgress?: boolean;
+      suppressChannelProgress?: boolean;
       title?: string;
       name?: string;
       phase?: string;
@@ -521,7 +523,8 @@ export function formatChannelProgressDraftLineForEntry(
   /** Formatting options for tool details and command text. */
   options?: ChannelProgressLineOptions,
 ): string | undefined {
-  return buildChannelProgressDraftLineForEntry(entry, input, options)?.text;
+  const line = buildChannelProgressDraftLineForEntry(entry, input, options);
+  return line ? getProgressDraftLineText(line) : undefined;
 }
 
 export function buildChannelProgressDraftLine(
@@ -574,13 +577,22 @@ export function buildChannelProgressDraftLine(
         return undefined;
       }
       if (name) {
-        return buildNamedProgressLine(input.event, name, [meta], options, {
+        const line = buildNamedProgressLine(input.event, name, [meta], options, {
           correlationKey: isCommandProgressItem(input)
             ? resolveCommandProgressCorrelationKey(input)
             : undefined,
           id: resolveProgressDraftLineId(input),
           status: input.status,
         });
+        if (line && input.title?.trim() && !isCommandProgressItem(input)) {
+          line.label = input.title.trim();
+          line.detail =
+            input.progressText ??
+            input.summary ??
+            (meta && !line.label.includes(meta) ? meta : undefined);
+          line.text = getProgressDraftLineText(line);
+        }
+        return line;
       }
       const text = compactStrings([meta, input.title]).at(0);
       const id = resolveProgressDraftLineId(input);
@@ -1154,7 +1166,11 @@ function getProgressDraftLineText(line: string | ChannelProgressDraftLine): stri
   const displayStatus = status === "completed" ? undefined : status;
   if (detail) {
     const compactCommandLine = isShellToolDisplayName(line.toolName);
-    if (line.kind === "command-output" && displayStatus && detail !== displayStatus) {
+    if (
+      displayStatus &&
+      detail !== displayStatus &&
+      (line.kind === "command-output" || isChannelProgressAttentionLine(line))
+    ) {
       const outputDetail = detail.startsWith(`${displayStatus};`)
         ? detail
         : `${displayStatus}; ${detail}`;

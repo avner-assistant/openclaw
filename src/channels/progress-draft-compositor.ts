@@ -1,3 +1,4 @@
+import { isCompleteAgentPreamble } from "../agents/tool-display-common.js";
 import type {
   ChannelProgressDraftCompositorLine,
   ChannelProgressDraftCompositorSnapshot,
@@ -461,7 +462,7 @@ export function createChannelProgressDraftCompositor(params: ChannelProgressDraf
     ...(params.buildProgressEventLine ? { buildLine: params.buildProgressEventLine } : {}),
   });
 
-  return {
+  const compositor = {
     get previewToolProgressEnabled() {
       return previewToolProgressEnabled;
     },
@@ -557,6 +558,29 @@ export function createChannelProgressDraftCompositor(params: ChannelProgressDraf
     },
     pushToolProgress: noteProgress,
     ...progressEventHandlers,
+    async pushItemEvent(
+      payload: Parameters<typeof progressEventHandlers.pushItemEvent>[0],
+    ): Promise<boolean> {
+      if (payload.kind !== "preamble") {
+        if (payload.hideFromChannelProgress && payload.itemId) {
+          await progressEventHandlers.pushItemEvent(payload);
+          return await clearLine(payload.itemId);
+        }
+        return await progressEventHandlers.pushItemEvent(payload);
+      }
+      if (!isCompleteAgentPreamble(payload)) {
+        return false;
+      }
+      if (params.mode !== "progress") {
+        return await progressEventHandlers.pushItemEvent(payload);
+      }
+      return commentaryProgressEnabled
+        ? await compositor.pushCommentaryProgress(payload.progressText, {
+            itemId: payload.itemId,
+            complete: true,
+          })
+        : await compositor.pushPreambleHeadline(payload.progressText, { itemId: payload.itemId });
+    },
     async pushApprovalEvent(
       payload: Parameters<typeof progressEventHandlers.pushApprovalEvent>[0],
     ) {
@@ -757,4 +781,5 @@ export function createChannelProgressDraftCompositor(params: ChannelProgressDraf
       return await startAndRender();
     },
   };
+  return compositor;
 }

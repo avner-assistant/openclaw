@@ -30,25 +30,25 @@ export function createChannelProgressDraftEventHandlers(params: {
   ) => Promise<boolean>;
 }) {
   const pushEvent = (
-    input: Exclude<ChannelProgressDraftLineInput, { event: "plan" }>,
-    detailMode?: "explain" | "raw",
-  ) => {
-    const lineOptions = detailMode ? { detailMode } : undefined;
-    const line = params.buildLine
-      ? params.buildLine(input, lineOptions)
-      : buildChannelProgressDraftLineForEntry(params.entry, input, lineOptions);
-    return params.pushLine(line, input.event === "tool" ? { toolName: input.name?.trim() } : {});
-  };
+    input: Extract<ChannelProgressDraftLineInput, { event: "item" | "approval" }>,
+  ) =>
+    params.pushLine(
+      params.buildLine
+        ? params.buildLine(input)
+        : buildChannelProgressDraftLineForEntry(params.entry, input),
+    );
 
   return {
     pushToolEvent: (payload: ToolProgressPayload) => {
-      const { detailMode, ...input } = payload;
       params.onTool?.(payload);
-      return pushEvent({ event: "tool", ...input }, detailMode);
+      return Promise.resolve(false);
     },
     pushItemEvent: (payload: ItemProgressPayload) => {
       const { kind: itemKind, ...input } = payload;
       params.onItem?.(payload);
+      if (payload.hideFromChannelProgress || payload.suppressChannelProgress) {
+        return Promise.resolve(false);
+      }
       return pushEvent({ event: "item", ...input, itemKind });
     },
     pushApprovalEvent: (payload: ProgressPayload<"approval">) => {
@@ -57,14 +57,12 @@ export function createChannelProgressDraftEventHandlers(params: {
         : Promise.resolve(false);
     },
     pushCommandOutputEvent: (payload: ProgressPayload<"command-output">) => {
-      return payload.phase === "end"
-        ? pushEvent({ event: "command-output", ...payload })
-        : Promise.resolve(false);
+      void payload;
+      return Promise.resolve(false);
     },
     pushPatchEvent: (payload: ProgressPayload<"patch">) => {
-      return payload.phase === "end"
-        ? pushEvent({ event: "patch", ...payload })
-        : Promise.resolve(false);
+      void payload;
+      return Promise.resolve(false);
     },
   };
 }

@@ -1,4 +1,5 @@
 // Msteams tests cover reply dispatcher plugin behavior.
+import { projectAgentToolActivity } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-runtime";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { createReplyDispatcher } from "openclaw/plugin-sdk/reply-runtime";
@@ -272,7 +273,14 @@ describe("createMSTeamsReplyDispatcher", () => {
     // onReplyStart renders the initial informative line. Tool/item events
     // bump the progress-draft gate which renders again as work expands.
     await options.onReplyStart?.();
-    await dispatcher.replyOptions.onToolStart?.({ name: "exec" });
+    await dispatcher.replyOptions.onToolStart?.({
+      name: "exec",
+      toolCallId: "exec-1",
+      phase: "start",
+    });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({ name: "exec", toolCallId: "exec-1", phase: "start" }),
+    );
     await vi.advanceTimersByTimeAsync(5_000);
     await dispatcher.replyOptions.onItemEvent?.({ progressText: "done" });
 
@@ -421,7 +429,14 @@ describe("createMSTeamsReplyDispatcher", () => {
     });
     const stream = getStreamMock();
 
-    await dispatcher.replyOptions.onToolStart?.({ name: "exec" });
+    await dispatcher.replyOptions.onToolStart?.({
+      name: "exec",
+      toolCallId: "exec-1",
+      phase: "start",
+    });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({ name: "exec", toolCallId: "exec-1", phase: "start" }),
+    );
     expect(stream.update).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1_500);
     expect(stream.update).toHaveBeenLastCalledWith("Working");
@@ -433,12 +448,14 @@ describe("createMSTeamsReplyDispatcher", () => {
     });
     expect(stream.update).toHaveBeenLastCalledWith(expect.stringContaining("confirm-operation"));
 
-    await dispatcher.replyOptions.onCommandOutput?.({
-      itemId: "command-1",
-      phase: "end",
-      name: "exec",
-      exitCode: 1,
-    });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({
+        toolCallId: "exec-1",
+        name: "exec",
+        phase: "result",
+        isError: true,
+      }),
+    );
     expect(stream.update).toHaveBeenLastCalledWith(expect.stringContaining("confirm-operation"));
     expect(stream.update).toHaveBeenLastCalledWith(expect.not.stringContaining("exit 1"));
     expect(stream.update).toHaveBeenLastCalledWith(expect.not.stringContaining("Exec"));
@@ -448,12 +465,14 @@ describe("createMSTeamsReplyDispatcher", () => {
       approvalId: "approval-1",
     });
     expect(stream.update).toHaveBeenLastCalledWith("Working");
-    await dispatcher.replyOptions.onCommandOutput?.({
-      itemId: "command-1",
-      phase: "end",
-      name: "exec",
-      exitCode: 0,
-    });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({
+        toolCallId: "exec-1",
+        name: "exec",
+        phase: "result",
+        isError: false,
+      }),
+    );
     expect(stream.update).toHaveBeenLastCalledWith("Working");
   });
 
@@ -479,7 +498,9 @@ describe("createMSTeamsReplyDispatcher", () => {
     const progressDispatcher = createDispatcher("personal", {
       streaming: { mode: "progress", progress: { toolProgress: true } },
     });
-    await progressDispatcher.replyOptions.onToolStart?.({ name: "exec" });
+    await progressDispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({ name: "exec", toolCallId: "exec-1", phase: "start" }),
+    );
     await vi.advanceTimersByTimeAsync(5_000);
     expect(getStreamMock().update).toHaveBeenCalled();
   });
@@ -502,7 +523,14 @@ describe("createMSTeamsReplyDispatcher", () => {
 
     const dispatcher = createDispatcher("personal", { streaming: { mode } });
     dispatcher.replyOptions.onPartialReply?.({ text: "original partial" });
-    await dispatcher.replyOptions.onToolStart?.({ name: "exec" });
+    await dispatcher.replyOptions.onToolStart?.({
+      name: "exec",
+      toolCallId: "exec-1",
+      phase: "start",
+    });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({ name: "exec", toolCallId: "exec-1", phase: "start" }),
+    );
     await dispatcher.delivery.deliver({ text: "authoritative final" }, { kind: "final" });
     await dispatcher.dispatcherOptions.onSettled?.();
 
@@ -627,9 +655,18 @@ describe("createMSTeamsReplyDispatcher", () => {
     // controller's pushProgressLine, which renders informative-text updates
     // via stream.update(). Exact line formatting is exercised by
     // channel-streaming's own unit tests.
-    await dispatcher.replyOptions.onToolStart?.({ name: "exec" });
+    await dispatcher.replyOptions.onToolStart?.({
+      name: "exec",
+      toolCallId: "exec-1",
+      phase: "start",
+    });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({ name: "exec", toolCallId: "exec-1", phase: "start" }),
+    );
     await vi.advanceTimersByTimeAsync(5_000);
-    await dispatcher.replyOptions.onToolStart?.({ name: "web_search" });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({ name: "web_search", toolCallId: "search-1", phase: "start" }),
+    );
     expect(getStreamMock().update).toHaveBeenCalled();
   });
 
@@ -654,13 +691,15 @@ describe("createMSTeamsReplyDispatcher", () => {
       progressText: "install dependencies",
     });
     await vi.advanceTimersByTimeAsync(5_000);
-    await dispatcher.replyOptions.onCommandOutput?.({
-      itemId: "tool:call-1-output",
-      toolCallId: "call-1",
-      phase: "end",
-      name: "exec",
-      exitCode: 0,
-    });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({
+        toolCallId: "call-1",
+        name: "exec",
+        phase: "result",
+        args: { command: "install dependencies" },
+        isError: false,
+      }),
+    );
 
     const lastUpdate = getStreamMock().update.mock.calls.at(-1)?.[0];
     expect(lastUpdate).toContain("install dependencies");
@@ -680,12 +719,15 @@ describe("createMSTeamsReplyDispatcher", () => {
       },
     });
 
-    await dispatcher.replyOptions.onCommandOutput?.({
-      phase: "end",
-      title: "pnpm test -- --watch=false",
-      name: "exec",
-      exitCode: 1,
-    });
+    await dispatcher.replyOptions.onItemEvent?.(
+      projectAgentToolActivity({
+        toolCallId: "exec-1",
+        name: "exec",
+        phase: "result",
+        isError: true,
+        args: { command: "pnpm test -- --watch=false" },
+      }),
+    );
     await vi.advanceTimersByTimeAsync(5_000);
 
     expect(getStreamMock().update).toHaveBeenLastCalledWith(

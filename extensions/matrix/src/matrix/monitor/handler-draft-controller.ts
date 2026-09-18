@@ -99,6 +99,8 @@ export async function createMatrixDraftController(params: {
     }
     return {
       suppressDefaultToolProgressMessages: true,
+      progressPreambleEnabled: true,
+      commentaryProgressEnabled: progressDraft.commentaryProgressEnabled,
       onToolStart: async (payload) => {
         return await progressDraft.pushToolEvent(payload);
       },
@@ -116,12 +118,6 @@ export async function createMatrixDraftController(params: {
       },
       onApprovalEvent: async (payload) => {
         return await progressDraft.pushApprovalEvent(payload);
-      },
-      onCommandOutput: async (payload) => {
-        return await progressDraft.pushCommandOutputEvent(payload);
-      },
-      onPatchSummary: async (payload) => {
-        return await progressDraft.pushPatchEvent(payload);
       },
     };
   };

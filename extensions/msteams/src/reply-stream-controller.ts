@@ -2,8 +2,6 @@
 import {
   type AgentPlanStep,
   createChannelProgressDraftCompositor,
-  type ChannelProgressDraftLine,
-  isChannelProgressDraftWorkToolName,
   resolveChannelPreviewStreamMode,
 } from "openclaw/plugin-sdk/channel-outbound";
 import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
@@ -339,22 +337,8 @@ export function createTeamsReplyStreamController(params: {
       }
     },
 
-    async noteProgressWork(options?: { toolName?: string }): Promise<void> {
-      if (
-        options?.toolName !== undefined &&
-        !isChannelProgressDraftWorkToolName(options.toolName)
-      ) {
-        return;
-      }
-      await progressDraft.noteActivity();
-    },
-
-    async pushProgressLine(
-      line?: string | ChannelProgressDraftLine,
-      options?: { toolName?: string },
-    ): Promise<void> {
-      await progressDraft.pushToolProgress(line, options);
-    },
+    pushItemEvent: progressDraft.pushItemEvent.bind(progressDraft),
+    pushToolEvent: progressDraft.pushToolEvent,
 
     async pushReasoningProgress(text?: string, options?: { snapshot?: boolean }): Promise<void> {
       await progressDraft.pushReasoningProgress(text, options);

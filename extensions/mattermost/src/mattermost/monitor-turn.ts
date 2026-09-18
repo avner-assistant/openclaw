@@ -6,7 +6,6 @@ import {
 } from "openclaw/plugin-sdk/channel-inbound";
 import {
   bindIngressLifecycleToReplyOptions,
-  buildChannelProgressDraftLineForEntry,
   createMessageReceiptFromOutboundResults,
   createChannelProgressDraftCompositor,
   listMessageReceiptPlatformIds,
@@ -471,6 +470,8 @@ export async function dispatchMattermostInboundTurn(
           dispatcherOptions,
           delivery,
           replyOptions: {
+            progressPreambleEnabled: draftProgressEnabled,
+            commentaryProgressEnabled: progressDraft.commentaryProgressEnabled,
             ...(turnAdoptionLifecycle
               ? bindIngressLifecycleToReplyOptions(turnAdoptionLifecycle)
               : {}),
@@ -533,35 +534,13 @@ export async function dispatchMattermostInboundTurn(
               const [, visible] = await Promise.all([boundarySettled, progressSettled]);
               return visible;
             },
-            onToolStart: async (payloadValue) => {
-              if (!draftProgressEnabled) {
-                return false;
-              }
-              const boundarySettled = enterBlockPreviewActivity("tool");
-              // Boundary detach and progress staging both happen synchronously before
-              // their first await; agent callbacks may be dispatched fire-and-forget.
-              const progressSettled = progressDraft.pushToolProgress(
-                buildChannelProgressDraftLineForEntry(
-                  account.config,
-                  {
-                    event: "tool",
-                    itemId: payloadValue.itemId,
-                    toolCallId: payloadValue.toolCallId,
-                    name: payloadValue.name,
-                    phase: payloadValue.phase,
-                    args: payloadValue.args,
-                  },
-                  payloadValue.detailMode ? { detailMode: payloadValue.detailMode } : undefined,
-                ),
-                { startImmediately: true },
-              );
-              previewBoundaryController.noteUpdate();
-              const [, visible] = await Promise.all([boundarySettled, progressSettled]);
-              return visible;
-            },
+            onToolStart: (payload) => progressDraft.pushToolEvent(payload),
             onItemEvent: async (payloadLocal) => {
               if (!draftProgressEnabled) {
                 return false;
+              }
+              if (payloadLocal.hideFromChannelProgress || payloadLocal.suppressChannelProgress) {
+                return progressDraft.pushItemEvent(payloadLocal);
               }
               const boundarySettled = enterBlockPreviewActivity("tool");
               const progressSettled = progressDraft.pushItemEvent(payloadLocal);

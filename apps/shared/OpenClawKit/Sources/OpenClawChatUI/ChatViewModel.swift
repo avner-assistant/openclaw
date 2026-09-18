@@ -145,7 +145,10 @@ public final class OpenClawChatViewModel {
 
     public private(set) var streamingAssistantText: String?
 
-    public private(set) var pendingToolCalls: [OpenClawChatPendingToolCall] = []
+    public private(set) var toolActivities: [OpenClawChatPendingToolCall] = []
+    public var pendingToolCalls: [OpenClawChatPendingToolCall] {
+        self.toolActivities.filter { !$0.isComplete }
+    }
     var subagentActivities: [ChatSubagentActivity] = []
     var hiddenWorkingSubagentCount = 0
     private(set) var timelineRevision: UInt64 = 0
@@ -490,12 +493,15 @@ public final class OpenClawChatViewModel {
         var scope: RunMessageScope
     }
 
-    var pendingToolCallsById: [String: OpenClawChatPendingToolCall] = [:] {
+    var turnToolCallsById: [String: OpenClawChatPendingToolCall] = [:] {
         didSet {
-            guard self.pendingToolCallsById != oldValue else { return }
-            reportToolActivityChanges(from: oldValue, to: self.pendingToolCallsById)
-            self.pendingToolCalls = self.pendingToolCallsById.values
-                .sorted { ($0.startedAt ?? 0) < ($1.startedAt ?? 0) }
+            guard self.turnToolCallsById != oldValue else { return }
+            reportToolActivityChanges(from: oldValue, to: self.turnToolCallsById)
+            self.toolActivities = self.turnToolCallsById.values
+                .sorted {
+                    if $0.isComplete != $1.isComplete { return !$0.isComplete }
+                    return ($0.startedAt ?? 0) < ($1.startedAt ?? 0)
+                }
             markTimelineChanged()
         }
     }
@@ -889,7 +895,7 @@ extension OpenClawChatViewModel {
         self.invalidateOutboxBranchReconciliation()
         self.healthOK = false
         clearPendingRuns(reason: nil)
-        self.pendingToolCallsById = [:]
+        self.turnToolCallsById = [:]
         self.updateStreamingAssistantText(nil)
         self.updateActiveSessionRunWithoutChatSnapshot(false)
         self.sessionId = nil
@@ -1011,7 +1017,7 @@ extension OpenClawChatViewModel {
             if refresh.sessionHasActiveRun,
                Self.hasUnansweredLatestUser(in: self.messages)
             {
-                self.pendingToolCallsById = [:]
+                self.turnToolCallsById = [:]
                 self.updateStreamingAssistantText(nil)
                 // Keep a known run ID authoritative so its stream and terminal
                 // events still route here. Synthesize activity only after the
@@ -1022,7 +1028,7 @@ extension OpenClawChatViewModel {
                 clearPendingRuns(
                     reason: nil,
                     hapticEvent: assistantHapticEventAfterLatestUser())
-                self.pendingToolCallsById = [:]
+                self.turnToolCallsById = [:]
                 self.updateStreamingAssistantText(nil)
             }
         }
@@ -1277,7 +1283,7 @@ extension OpenClawChatViewModel {
         self.provisionalFinalMessagesByID.removeAll()
         resetOutboxPresentationForSessionSwitch()
         self.sessionId = nil
-        self.pendingToolCallsById = [:]
+        self.turnToolCallsById = [:]
         self.clearSubagentActivities()
         self.updateStreamingAssistantText(nil)
         self.clearProgressCard()

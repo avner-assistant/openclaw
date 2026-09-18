@@ -1,5 +1,9 @@
 // Copilot plugin module implements event bridge behavior.
 import type { MessageOptions, SessionEvent, SessionEventType } from "@github/copilot-sdk";
+import {
+  emitAgentEvent,
+  projectAgentToolActivity,
+} from "openclaw/plugin-sdk/agent-harness-runtime";
 import type {
   AgentHarnessAttemptResult,
   AgentMessage,
@@ -52,6 +56,8 @@ export interface SessionLike {
 }
 
 interface EventBridgeOptions {
+  runId?: string;
+  sessionKey?: string;
   onAssistantDelta?: (payload: OnAssistantDeltaPayload) => void | Promise<void>;
   onAgentEvent?: (event: {
     stream: "item" | "plan";
@@ -110,6 +116,14 @@ interface EventBridgeController {
   buildAssistantMessage(args: BuildAssistantMessageArgs): AssistantMessage | undefined;
   finalizeAssistantTexts(): string[];
   detach(): void;
+  completeTool(tool: {
+    toolCallId: string;
+    parentToolCallId?: string;
+    name: string;
+    args?: unknown;
+    result?: unknown;
+    isError: boolean;
+  }): void;
 }
 
 type MessageAccumulator = { messageId: string; text: string };
@@ -147,6 +161,8 @@ export function attachEventBridge(
   let streamError: Error | undefined;
   const toolMetas: AgentHarnessAttemptResult["toolMetas"] = [];
   const toolMetaIndexByCallId = new Map<string, number>();
+  const toolCallsById = new Map<string, { args: unknown; root: boolean }>();
+  const preparedToolCompletions = new Set<string>();
   const projectedToolNamesByCallId = new Map<string, string>();
   const userRequestedToolCallIds = new Set<string>();
   let startedCount = 0;
@@ -335,6 +351,21 @@ export function attachEventBridge(
     }
     toolMetaIndexByCallId.set(event.data.toolCallId, toolMetas.length);
     toolMetas.push({ toolName: event.data.toolName });
+    toolCallsById.set(event.data.toolCallId, {
+      args: event.data.arguments,
+      root: isRootSessionEvent(event),
+    });
+    if (isRootSessionEvent(event)) {
+      enqueueAgentEvent({
+        stream: "item",
+        data: projectAgentToolActivity({
+          toolCallId: event.data.toolCallId,
+          name: event.data.toolName,
+          phase: "start",
+          args: event.data.arguments,
+        }),
+      });
+    }
   });
 
   registerListener(session, unsubscribeFns, "tool.execution_complete", (event) => {
@@ -344,6 +375,21 @@ export function attachEventBridge(
     }
     const toolMetaIndex = toolMetaIndexByCallId.get(event.data.toolCallId);
     const toolName = toolMetaIndex === undefined ? undefined : toolMetas[toolMetaIndex]?.toolName;
+    const args = toolCallsById.get(event.data.toolCallId)?.args;
+    toolCallsById.delete(event.data.toolCallId);
+    const completionPrepared = preparedToolCompletions.delete(event.data.toolCallId);
+    if (toolName && isRootSessionEvent(event) && !completionPrepared) {
+      enqueueAgentEvent({
+        stream: "item",
+        data: projectAgentToolActivity({
+          toolCallId: event.data.toolCallId,
+          name: toolName,
+          phase: "result",
+          args,
+          isError: !event.data.success,
+        }),
+      });
+    }
     const meta = event.data.success
       ? (event.data.result?.detailedContent ?? event.data.result?.content)
       : event.data.error?.message;
@@ -614,6 +660,19 @@ export function attachEventBridge(
     finalizeAssistantTexts() {
       return finalizeAssistantTexts(messageOrder, messagesById, lastAssistantEvent);
     },
+    completeTool(tool) {
+      const owner = toolCallsById.get(tool.parentToolCallId ?? tool.toolCallId);
+      if (detached || !owner?.root) {
+        return;
+      }
+      if (!tool.parentToolCallId) {
+        preparedToolCompletions.add(tool.toolCallId);
+      }
+      enqueueAgentEvent({
+        stream: "item",
+        data: projectAgentToolActivity({ ...tool, phase: "result" }),
+      });
+    },
     detach() {
       if (detached) {
         return;
@@ -771,6 +830,9 @@ export function attachEventBridge(
     stream: "item" | "plan";
     data: Record<string, unknown>;
   }): void {
+    if (options.runId) {
+      emitAgentEvent({ runId: options.runId, sessionKey: options.sessionKey, ...event });
+    }
     const callback = options.onAgentEvent;
     if (!callback) {
       return;

@@ -67,6 +67,10 @@ import {
   shouldSuppressAssistantEventForLiveChat,
 } from "../gateway/live-chat-projector.js";
 import { getMaxChatHistoryMessagesBytes } from "../gateway/server-constants.js";
+import {
+  createChatHistoryActivityProjection,
+  createChatHistoryByteCounter,
+} from "../gateway/server-methods/chat-history-budget.js";
 import { enrichChatHistoryCompactionMarkers } from "../gateway/server-methods/chat-history-page-kernel.js";
 import { readChatHistoryPage } from "../gateway/server-methods/chat-history-pages.js";
 import {
@@ -674,12 +678,19 @@ export class EmbeddedTuiBackend implements TuiBackend {
       messageId: undefined,
     });
     const normalized = enrichChatHistoryCompactionMarkers(historyPage.messages, entry);
+    const activity = createChatHistoryActivityProjection(normalized, historyPage.activity);
+    const byteCounter = createChatHistoryByteCounter(activity);
     const perMessageHardCap = Math.min(CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES, maxHistoryBytes);
     const replaced = replaceOversizedChatHistoryMessages({
       messages: normalized,
+      byteCounter,
       maxSingleMessageBytes: perMessageHardCap,
     });
-    const messages = capArrayByJsonBytes(replaced.messages, maxHistoryBytes).items;
+    const messages = capArrayByJsonBytes(
+      replaced.messages,
+      maxHistoryBytes - byteCounter.framingBytes(replaced.messages),
+      byteCounter.messageBytes,
+    ).items;
     const newestInFlightRun = [...this.runs.entries()].findLast(
       ([, run]) =>
         !run.isBtw &&
@@ -733,6 +744,7 @@ export class EmbeddedTuiBackend implements TuiBackend {
       sessionId,
       messages,
       defaults,
+      activity: messages.flatMap((message) => activity.get(message) ?? []),
       sessionInfo,
       thinkingLevel,
       fastMode: entry?.fastMode,

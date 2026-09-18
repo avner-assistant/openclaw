@@ -5,6 +5,7 @@ import type { SessionsPatchResult } from "../../packages/gateway-protocol/src/in
 import { resolveSessionInfoModelSelection } from "../agents/model-selection-display.js";
 import type { SessionEntry } from "../config/sessions/types.js";
 import { isAbortError } from "../infra/abort-signal.js";
+import type { AgentHistoryActivity } from "../infra/agent-activity-events.js";
 import {
   agentSessionKeysMatchByRequestKey,
   normalizeAgentId,
@@ -468,6 +469,7 @@ export function createSessionActions(context: SessionActionContext) {
       }
       const record = history as {
         messages?: unknown[];
+        activity?: AgentHistoryActivity[];
         sessionId?: string;
         sessionInfo?: SessionInfoEntry &
           Partial<Pick<SessionEntry, "abortedLastRun" | "lastRunError" | "status">> & {
@@ -536,6 +538,9 @@ export function createSessionActions(context: SessionActionContext) {
       chatLog.clearAll();
       btw.clear();
       chatLog.addSystem(`session ${state.currentSessionKey}`);
+      const activityByMessageId = new Map(
+        record.activity?.map((entry) => [entry.messageId, entry.items]),
+      );
       for (const entry of projection.entries) {
         const message = entry.message as Record<string, unknown>;
         if (isCommandMarkedMessage(message)) {
@@ -586,7 +591,14 @@ export function createSessionActions(context: SessionActionContext) {
         if (message.role === "toolResult") {
           const toolCallId = formatPrimitiveString(message.toolCallId, "");
           const toolName = formatPrimitiveString(message.toolName, "tool");
-          const component = chatLog.startTool(toolCallId, toolName, {});
+          const messageId = entry.identity?.id;
+          const items = messageId ? activityByMessageId.get(messageId) : undefined;
+          const activity =
+            items?.find((item) => item.toolCallId === toolCallId) ?? (items ? null : undefined);
+          const component =
+            activity === undefined
+              ? chatLog.startTool(toolCallId, toolName, {})
+              : chatLog.startTool(toolCallId, toolName, {}, undefined, activity);
           component.setResult(
             state.sessionInfo.verboseLevel === "full"
               ? {

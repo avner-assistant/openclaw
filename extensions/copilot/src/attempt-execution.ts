@@ -283,9 +283,26 @@ export async function runCopilotExecution(context: {
             yieldDetected = true;
             yieldAcknowledgment = acknowledgment;
           },
-          onToolCompleted: async ({ args, error, result, startedAt, toolCallId, toolName }) => {
+          onToolCompleted: async ({
+            args,
+            isError,
+            error,
+            result,
+            startedAt,
+            toolCallId,
+            parentToolCallId,
+            toolName,
+          }) => {
+            bridge?.completeTool({
+              toolCallId,
+              parentToolCallId,
+              name: toolName,
+              args,
+              result,
+              isError,
+            });
             const acceptedSessionSpawnDetails =
-              toolName === "sessions_spawn" && !error
+              toolName === "sessions_spawn" && !isError
                 ? asOptionalRecord(asOptionalRecord(result)?.details)
                 : undefined;
             const runId = normalizeOptionalString(acceptedSessionSpawnDetails?.runId);
@@ -436,6 +453,8 @@ export async function runCopilotExecution(context: {
       sdkSessionId,
     });
     bridge = attachEventBridge(session, {
+      runId: input.runId,
+      sessionKey: input.sessionKey,
       onAssistantDelta: settledToolFinalization ? undefined : input.onAssistantDelta,
       onAgentEvent: settledToolFinalization ? undefined : input.onAgentEvent,
       onNativeSubagentEvent: (event) => nativeSubagentTaskMirror?.handleEvent(event),

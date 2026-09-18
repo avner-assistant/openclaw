@@ -11,6 +11,10 @@ import {
 } from "../agents/failover/assistant-request-failure-copy.js";
 import { isContextOverflowErrorFromTables } from "../agents/failover/context-overflow-tables.js";
 import { readTranscriptSenderIdentity } from "../chat/sender-identity.js";
+import {
+  projectAgentHistoryActivity,
+  type AgentHistoryActivity,
+} from "../infra/agent-activity-events.js";
 import { classifyGatewayStorageFailure } from "../infra/sqlite-error-diagnostics.js";
 import {
   readNestedToolActivity,
@@ -53,6 +57,7 @@ import type {
 type ChatDisplayProjectionOptions = {
   includeCommentaryFallbacks?: boolean;
   maxChars?: number;
+  activity?: false;
   resolveCurrentUserProfileDisplay?: CurrentUserProfileDisplayResolver;
   stripEnvelope?: boolean;
   turnBoundaryPending?: boolean;
@@ -122,6 +127,7 @@ function projectCurrentUserProfileAvatars(
 
 type ChatDisplayProjectionResult = {
   messages: Array<Record<string, unknown>>;
+  activity: AgentHistoryActivity[];
   turnBoundaryPending: boolean;
   assistantErrorPending: boolean;
   assistantErrorRecoveryObserved: boolean;
@@ -523,6 +529,15 @@ export function projectChatDisplayMessagesWithState(
   options?.subagentCoordination?.assertCurrent?.();
   const recoveredErrors = projectChatHistoryRecovery(messages, options);
   const projectedErrors = projectEmptyAssistantErrorMessages(recoveredErrors.messages);
+  const activity =
+    options?.activity === false
+      ? []
+      : projectAgentHistoryActivity(
+          messages.flatMap((message) => {
+            const messageId = asOptionalRecord(asOptionalRecord(message)?.["__openclaw"])?.id;
+            return typeof messageId === "string" ? [{ messageId, message }] : [];
+          }),
+        );
   const sanitizedMessages = toProjectedMessages(
     sanitizeChatHistoryMessages(projectedErrors, Number.MAX_SAFE_INTEGER, {
       includeCommentaryFallbacks: options?.includeCommentaryFallbacks,
@@ -542,6 +557,7 @@ export function projectChatDisplayMessagesWithState(
     options?.maxChars ?? DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS,
   ) as Array<Record<string, unknown>>;
   const result: ChatDisplayProjectionResult = {
+    activity,
     messages: projectCurrentUserProfileAvatars(
       displayMessages,
       options?.resolveCurrentUserProfileDisplay,
@@ -561,7 +577,7 @@ export function projectChatDisplayMessages(
   messages: unknown[],
   options?: ChatDisplayProjectionOptions,
 ): Array<Record<string, unknown>> {
-  return projectChatDisplayMessagesWithState(messages, options).messages;
+  return projectChatDisplayMessagesWithState(messages, { ...options, activity: false }).messages;
 }
 
 export function projectChatDisplayMessage(

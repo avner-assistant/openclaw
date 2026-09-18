@@ -133,7 +133,9 @@ const withPreparedModelCatalogOwnerMock = vi.fn(
   },
 );
 const readChatHistoryPageMock = vi.fn(
-  async (_params?: unknown): Promise<{ messages: unknown[] }> => ({
+  async (
+    _params?: unknown,
+  ): Promise<import("../config/sessions/session-history-types.js").ChatHistoryPage> => ({
     messages: [],
   }),
 );
@@ -1579,8 +1581,25 @@ describe("EmbeddedTuiBackend", () => {
     });
 
     const backend = new EmbeddedTuiBackend();
-
-    await backend.loadHistory({ sessionKey: "agent:main:main" });
+    const messages = [
+      {
+        role: "toolResult",
+        toolCallId: "wait",
+        toolName: "collab.wait",
+        content: "raw result",
+        isError: false,
+        __openclaw: { id: "wait-result" },
+      },
+    ];
+    readChatHistoryPageMock.mockResolvedValueOnce({
+      messages,
+      activity: [{ messageId: "wait-result", items: [] }],
+    });
+    const history = await backend.loadHistory({ sessionKey: "agent:main:main" });
+    expect(history).toMatchObject({
+      messages,
+      activity: [{ messageId: "wait-result", items: [] }],
+    });
 
     expect(readChatHistoryPageMock).toHaveBeenCalledWith({
       entry: { sessionId: "sess-main" },

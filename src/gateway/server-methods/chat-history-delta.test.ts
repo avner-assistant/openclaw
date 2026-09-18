@@ -15,6 +15,7 @@ import {
   closeOpenClawAgentDatabasesForTest,
 } from "../../state/openclaw-agent-db.js";
 import { buildGatewaySessionSnapshot } from "../session-event-payload.js";
+import { chatHistoryActivityBytes } from "./chat-history-budget.js";
 import { readChatHistoryDelta } from "./chat-history-delta.js";
 import { readChatHistoryPage } from "./chat-history-pages.js";
 import { appendInjectedAssistantMessageToTranscript } from "./chat-transcript-inject.js";
@@ -95,6 +96,195 @@ async function readContents(contents: string[], requestedMaxBytes?: number) {
 }
 
 describe("chat history delta display budget", () => {
+  it("keeps a result-only poll delta quiet without dropping failed or mutating results", async () => {
+    const { scope, cursor } = await createTranscript();
+    for (const [id, details] of [
+      [
+        "poll",
+        { status: "completed", sessionId: "job", aggregated: "private output", exitCode: 0 },
+      ],
+      [
+        "stopped",
+        {
+          status: "completed",
+          sessionId: "job",
+          aggregated: "stopped",
+          exitCode: 143,
+          exitReason: "manual-cancel",
+        },
+      ],
+      ["write", { status: "running", sessionId: "job" }],
+      [
+        "failure",
+        {
+          status: "completed",
+          sessionId: "job",
+          aggregated: "output",
+          exitCode: 2,
+          exitReason: "exit",
+        },
+      ],
+    ] as const) {
+      await appendTranscriptMessage(scope, {
+        eventId: id,
+        message: {
+          role: "toolResult",
+          toolCallId: id,
+          toolName: "process",
+          isError: false,
+          details,
+          content: [{ type: "text", text: "Result" }],
+        },
+      });
+    }
+    const result = readDelta(scope, cursor);
+    expect(result.kind).toBe("delta");
+    if (result.kind !== "delta") {
+      throw new Error("Expected a result delta");
+    }
+    expect(result.activity).toMatchObject([
+      { messageId: "poll", items: [] },
+      { messageId: "stopped", items: [] },
+      { messageId: "write", items: [{ name: "process" }] },
+      { messageId: "failure", items: [{ status: "failed" }] },
+    ]);
+    expect(result.messages).toHaveLength(4);
+    expect(JSON.stringify(result.messages)).not.toContain("private output");
+  });
+
+  it("projects a poll call and its result together before producing a delta", async () => {
+    const { scope, cursor } = await createTranscript();
+    await appendTranscriptMessage(scope, {
+      eventId: "call",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "poll", name: "process", arguments: { action: "kill" } }],
+      },
+    });
+    await appendTranscriptMessage(scope, {
+      eventId: "result",
+      message: {
+        role: "toolResult",
+        toolCallId: "poll",
+        toolName: "process",
+        isError: false,
+        details: { status: "completed", sessionId: "job", aggregated: "done" },
+        content: [
+          {
+            type: "toolResult",
+            toolCallId: "poll",
+            toolName: "process",
+            content: [{ type: "text", text: "Done" }],
+            isError: false,
+          },
+        ],
+      },
+    });
+    expect(readDelta(scope, cursor)).toMatchObject({
+      kind: "delta",
+      activity: [
+        { messageId: "call", items: [] },
+        { messageId: "result", items: [] },
+      ],
+    });
+  });
+
+  it.each([false, true])(
+    "keeps missing-result placeholders visible until a real result arrives (%s)",
+    async (resolved) => {
+      const { scope, cursor } = await createTranscript();
+      await appendTranscriptMessage(scope, {
+        eventId: "call",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "poll", name: "process", arguments: {} }],
+        },
+      });
+      await appendTranscriptMessage(scope, {
+        eventId: "missing",
+        message: {
+          role: "toolResult",
+          toolCallId: "poll",
+          toolName: "process",
+          isError: true,
+          details: { openclawSyntheticMissingToolResult: true, reason: "missing_tool_result" },
+          content: [{ type: "text", text: "aborted" }],
+        },
+      });
+      if (resolved) {
+        await appendTranscriptMessage(scope, {
+          eventId: "empty",
+          message: { role: "assistant", content: [] },
+        });
+        await appendTranscriptMessage(scope, {
+          eventId: "actual",
+          message: {
+            role: "toolResult",
+            toolCallId: "poll",
+            toolName: "process",
+            isError: false,
+            details: { status: "running", sessionId: "job", aggregated: "working" },
+            content: [{ type: "text", text: "working" }],
+          },
+        });
+      }
+      const items = resolved ? [] : [{ status: "failed" }];
+      expect(readDelta(scope, cursor)).toMatchObject({
+        kind: "delta",
+        activity: [
+          { messageId: "call", items },
+          { messageId: "missing", items },
+          ...(resolved ? [{ messageId: "actual", items: [] }] : []),
+        ],
+      });
+    },
+  );
+
+  it.each([true, false])(
+    "preserves reused call IDs (explicit run ownership: %s)",
+    async (scoped) => {
+      const { scope, cursor } = await createTranscript();
+      for (const [runId, failed] of [
+        ["failed-run", true],
+        ["quiet-run", false],
+      ] as const) {
+        await appendTranscriptMessage(scope, {
+          eventId: `${runId}-call`,
+          message: {
+            role: "assistant",
+            ...(scoped ? { __openclaw: { runId } } : {}),
+            content: [{ type: "toolCall", id: "same", name: "process", arguments: {} }],
+          },
+        });
+        await appendTranscriptMessage(scope, {
+          eventId: `${runId}-result`,
+          message: {
+            role: "toolResult",
+            ...(scoped ? { __openclaw: { runId } } : {}),
+            toolCallId: "same",
+            toolName: "process",
+            isError: failed,
+            details: {
+              status: failed ? "failed" : "completed",
+              sessionId: "job",
+              aggregated: "output",
+            },
+            content: [{ type: "text", text: "Result" }],
+          },
+        });
+      }
+      expect(readDelta(scope, cursor)).toMatchObject({
+        kind: "delta",
+        activity: [
+          { messageId: "failed-run-call", items: [{ status: scoped ? "failed" : "running" }] },
+          { messageId: "failed-run-result", items: [{ status: "failed" }] },
+          { messageId: "quiet-run-call", items: scoped ? [] : [{ status: "running" }] },
+          { messageId: "quiet-run-result", items: [] },
+        ],
+      });
+    },
+  );
+
   it.each([
     [1, 0, undefined],
     [1, 1, undefined],
@@ -117,7 +307,10 @@ describe("chat history delta display budget", () => {
       contents[0] =
         prefix +
         "x".repeat(
-          byteLimit - Buffer.byteLength(JSON.stringify(small.messages), "utf8") + extraBytes,
+          byteLimit -
+            Buffer.byteLength(JSON.stringify(small.messages), "utf8") -
+            chatHistoryActivityBytes(small.activity) +
+            extraBytes,
         );
       const result = await readContents(contents, requestedMaxBytes);
       if (extraBytes > 0) {
@@ -137,7 +330,9 @@ describe("chat history delta display budget", () => {
         throw new Error("Expected the exact-limit delta");
       }
       const serialized = JSON.stringify(result.messages);
-      expect(Buffer.byteLength(serialized, "utf8")).toBe(byteLimit);
+      expect(
+        Buffer.byteLength(serialized, "utf8") + chatHistoryActivityBytes(result.activity),
+      ).toBe(byteLimit);
       expect(serialized).not.toContain("PRIVATE_REPLAY");
       expect(serialized).not.toContain("PRIVATE_UPSTREAM");
     },

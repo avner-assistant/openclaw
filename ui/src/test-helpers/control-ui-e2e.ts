@@ -1871,7 +1871,14 @@ function installControlUiMockGateway(
       return {};
     }
     const transcript: Record<string, unknown> = {};
-    for (const field of ["messages", "sessionId", "sessionInfo", "inFlightRun", "thinkingLevel"]) {
+    for (const field of [
+      "messages",
+      "activity",
+      "sessionId",
+      "sessionInfo",
+      "inFlightRun",
+      "thinkingLevel",
+    ]) {
       if (hasOwn(configured, field)) {
         transcript[field] = configured[field];
       }

@@ -764,6 +764,12 @@ describe("TUI PTY harness", { concurrent: false }, () => {
   );
 
   it(
+    "keeps quiet tool details available through Ctrl+O and settles prepared-only outcomes",
+    async () => await exerciseToolCardRendering(startTuiFixture, STARTUP_TIMEOUT_MS, true),
+    STARTUP_TEST_TIMEOUT_MS,
+  );
+
+  it(
     "blocks overlapping normal messages while a run is busy",
     async () => {
       await fixture.run.write("slow prompt\r");

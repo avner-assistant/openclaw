@@ -804,7 +804,6 @@ extensions/msteams/src/probe.ts	1
 extensions/msteams/src/qa/adapter.runtime.ts	2
 extensions/msteams/src/qa/bot-framework-server.ts	3
 extensions/msteams/src/qa/private-runtime.ts	3
-extensions/msteams/src/reply-dispatcher.ts	3
 extensions/msteams/src/reply-stream-controller.ts	1
 extensions/msteams/src/sdk-proactive.ts	7
 extensions/msteams/src/sdk.ts	10
@@ -1386,7 +1385,7 @@ packages/acp-core/src/types.ts	2
 packages/agent-core/src/agent-loop.ts	3
 packages/agent-core/src/harness/compaction/branch-summarization.ts	1
 packages/agent-core/src/harness/compaction/compaction.ts	2
-packages/agent-core/src/harness/session/tool-result-pairing.ts	17
+packages/agent-core/src/harness/session/tool-result-pairing.ts	14
 packages/agent-core/src/harness/session/uuid.ts	1
 packages/agent-core/src/harness/utils/truncate.ts	1
 packages/agent-core/src/turn-interruption.ts	1
