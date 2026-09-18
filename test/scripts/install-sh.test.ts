@@ -546,6 +546,7 @@ NODE
     expect(script).toContain('npm_config_has_raw_key npm "min-release-age"');
     expect(script).toContain('freshness_flag="--before=$(date -u');
     expect(script).toContain('cmd+=(--no-fund --no-audit "$freshness_flag" install -g "$spec")');
+    expect(script).not.toContain("NPM_SILENT_FLAG");
   });
 
   it("does not emit --before when raw user npmrc config contains min-release-age", () => {
@@ -1095,7 +1096,6 @@ NODE
           `HOME=${JSON.stringify(home)}`,
           `PATH=${JSON.stringify(`${bin}:/usr/bin:/bin`)}`,
           "NPM_LOGLEVEL=error",
-          "NPM_SILENT_FLAG=",
           `run_npm_global_install openclaw@latest ${JSON.stringify(join(tmp, "install.log"))}`,
         ].join("\n"),
       );
@@ -1133,7 +1133,6 @@ NODE
           `HOME=${JSON.stringify(home)}`,
           `PATH=${JSON.stringify(`${bin}:/usr/bin:/bin`)}`,
           "NPM_LOGLEVEL=error",
-          "NPM_SILENT_FLAG=",
           `run_npm_global_install openclaw@latest ${JSON.stringify(join(tmp, "install.log"))}`,
         ].join("\n"),
       );
