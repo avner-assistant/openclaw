@@ -267,6 +267,33 @@ function resolveNativeOpenAIImageSizesForModel(model: string): readonly string[]
   }
 }
 
+function isValidFlexibleOpenAIImageSize(model: string, size: string | undefined): size is string {
+  if (!OPENAI_IMAGE_25_MODELS.some((candidate) => candidate === model)) {
+    return false;
+  }
+  if (size === "auto") {
+    return true;
+  }
+  const dimensions = /^(\d+)x(\d+)$/.exec(size ?? "");
+  if (!dimensions) {
+    return false;
+  }
+  const width = Number(dimensions[1]);
+  const height = Number(dimensions[2]);
+  const pixels = width * height;
+  return (
+    width > 0 &&
+    height > 0 &&
+    width % 16 === 0 &&
+    height % 16 === 0 &&
+    Math.max(width, height) <= 3840 &&
+    pixels >= 655_360 &&
+    pixels <= 8_294_400 &&
+    width <= height * 3 &&
+    height <= width * 3
+  );
+}
+
 function resolveConfiguredOpenAIImageBaseUrl(cfg: OpenClawConfig | undefined, model: string) {
   const modelId = model.trim().replace(/^openai\//u, "");
   const modelBaseUrl = cfg?.models?.providers?.openai?.models
@@ -978,11 +1005,13 @@ export function buildOpenAIImageGenerationProvider(): ImageGenerationProvider {
       });
       const count = resolveOpenAIImageCount(req.count);
       const timeoutMs = resolveOpenAIImageTimeoutMs(req.timeoutMs, { isAzure });
-      const sizeResolution = resolveOpenAIImageRequestSize({
-        model,
-        requestedSize: req.size,
-        applyNativeLimits: publicOpenAIBaseUrl || isAzure,
-      });
+      const sizeResolution = isValidFlexibleOpenAIImageSize(model, req.size)
+        ? { size: req.size }
+        : resolveOpenAIImageRequestSize({
+            model,
+            requestedSize: req.size,
+            applyNativeLimits: publicOpenAIBaseUrl || isAzure,
+          });
       const size = sizeResolution.size;
       const url = isAzure
         ? buildAzureImageUrl(rawBaseUrl, model, isEdit ? "edits" : "generations")
