@@ -47,6 +47,13 @@ import {
   PAIRING_APPROVED_MESSAGE,
 } from "../runtime-api.js";
 import {
+  actionError,
+  jsonActionResultWithDetails,
+  jsonMSTeamsActionResult,
+  jsonMSTeamsConversationResult,
+  jsonMSTeamsOkActionResult,
+} from "./action-results.js";
+import {
   extractMSTeamsToolSendResult,
   msteamsContextTargetsMatch,
   resolveMSTeamsAutoThreadId,
@@ -118,52 +125,7 @@ const loadMSTeamsChannelRuntime = createLazyRuntimeNamedExport(
   "msTeamsChannelRuntime",
 );
 
-function jsonActionResult(data: Record<string, unknown>) {
-  const text = JSON.stringify(data);
-  return {
-    content: [{ type: "text" as const, text }],
-    details: data,
-  };
-}
-
-function jsonMSTeamsActionResult(action: string, data: Record<string, unknown> = {}) {
-  return jsonActionResult({ channel: "msteams", action, ...data });
-}
-
-function jsonMSTeamsOkActionResult(action: string, data: Record<string, unknown> = {}) {
-  return jsonActionResult({ ok: true, channel: "msteams", action, ...data });
-}
-
-function jsonMSTeamsConversationResult(conversationId: string | undefined) {
-  return jsonActionResultWithDetails(
-    {
-      ok: true,
-      channel: "msteams",
-      conversationId,
-    },
-    { ok: true, channel: "msteams" },
-  );
-}
-
-function jsonActionResultWithDetails(
-  contentData: Record<string, unknown>,
-  details: Record<string, unknown>,
-) {
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify(contentData) }],
-    details,
-  };
-}
-
 const MSTEAMS_REACTION_TYPES = ["like", "heart", "laugh", "surprised", "sad", "angry"] as const;
-
-function actionError(message: string) {
-  return {
-    isError: true as const,
-    content: [{ type: "text" as const, text: message }],
-    details: { error: message },
-  };
-}
 
 function requireMSTeamsGroupManagementAuthorization(ctx: {
   senderIsOwner?: boolean;
