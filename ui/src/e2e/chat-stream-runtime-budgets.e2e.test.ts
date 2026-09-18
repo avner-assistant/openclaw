@@ -1,7 +1,7 @@
 import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { beforeEach, expect, it } from "vitest";
-import type { AppSidebarSessionNavigationElement } from "../components/app-sidebar-session-navigation.ts";
+import type { ApplicationContext } from "../app/context.ts";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import {
   createChatFlowE2eSuite,
@@ -551,19 +551,26 @@ suite.define(() => {
       await gateway.waitForRequest("chat.startup");
       const runId = await openStreamingTurn(page, gateway, "burst coalescing probe");
 
-      // Drain the initial roster publication before measuring stream-only updates.
-      await page.evaluate(async () => {
-        const sidebar =
-          document.querySelector<AppSidebarSessionNavigationElement>("openclaw-app-sidebar");
-        if (!sidebar) {
-          throw new Error("sidebar is not mounted");
-        }
-        await sidebar.sessionData.refreshSidebarSessions();
-        if (!sidebar.sessionData.sessionsResult || sidebar.sessionData.sessionsLoading) {
-          throw new Error("sidebar session roster is not ready");
-        }
-        await sidebar.updateComplete;
+      // The delayed swarm child query publishes roster metadata after first paint.
+      // Observe its committed result before measuring stream-driven invalidations.
+      const childList = await gateway.waitForRequest("sessions.list", {
+        match: { spawnedBy: "agent:main:main" },
       });
+      const childScope = requireRecord(childList.params);
+      await expect
+        .poll(() =>
+          page.evaluate((scope) => {
+            const app = document.querySelector<
+              HTMLElement & {
+                runtime?: { context: ApplicationContext };
+              }
+            >("openclaw-app");
+            const snapshot = app?.runtime?.context.sessions.listSnapshot(scope);
+            return Boolean(snapshot?.result && !snapshot.loading && !snapshot.error);
+          }, childScope),
+        )
+        .toBe(true);
+      await waitForChatScrollIdle(page);
       await installRenderProbe(page);
       await resetRenderProbe(page);
 
