@@ -141,12 +141,6 @@ export function main(root = process.cwd(), argv = process.argv.slice(2)) {
     const paths = [...new Set(changes)].filter((file) => /\.(?:ts|tsx|mts|mjs)$/u.test(file));
     const renames = listRatchetRenames(root, base, args.staged, []);
     const oldPaths = new Map(renames.map(({ from, to }) => [to, from]));
-    const basePaths = new Set(gitPaths(root, ["ls-tree", "-r", "--name-only", "-z", base]));
-    const baseSources = loadRatchetSources(
-      root,
-      paths.map((file) => oldPaths.get(file) ?? file).filter((file) => basePaths.has(file)),
-      base,
-    );
     const headSources = args.staged
       ? loadRatchetSources(root, paths)
       : new Map(paths.map((file) => [file, fs.readFileSync(path.join(root, file), "utf8")]));
@@ -173,8 +167,18 @@ export function main(root = process.cwd(), argv = process.argv.slice(2)) {
       throw new Error("No max-lines overrides found in .oxlintrc.json");
     }
     scratch = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-line-cap-"));
-    const before = collectViolations(path.join(scratch, "base"), baseSources, config);
     const after = collectViolations(path.join(scratch, "head"), headSources, config);
+    // Only current violations need inherited debt. A repaired file within its
+    // absolute cap must not depend on its old source being parseable.
+    const basePaths = new Set(gitPaths(root, ["ls-tree", "-r", "--name-only", "-z", base]));
+    const baseSources = loadRatchetSources(
+      root,
+      [...after.keys()]
+        .map((file) => oldPaths.get(file) ?? file)
+        .filter((file) => basePaths.has(file)),
+      base,
+    );
+    const before = collectViolations(path.join(scratch, "base"), baseSources, config);
     const increased = compareLineCapViolations(after, before, renames);
     if (
       reportRatchetFailures(

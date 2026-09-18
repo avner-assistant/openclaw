@@ -123,6 +123,41 @@ describe("line-cap growth ratchet", () => {
     expect(main(root, ["--base", base])).toBe(0);
   });
 
+  it.each([false, true])(
+    "accepts an under-cap syntax repair alongside inherited debt (staged: %s)",
+    (staged) => {
+      const root = fixture(5);
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      const repaired = path.join(root, "src/repaired.ts");
+      fs.writeFileSync(repaired, source(2) + source(1));
+      git(root, "add", ".");
+      git(root, "commit", "-m", "duplicate declaration");
+      fs.writeFileSync(repaired, source(3));
+      fs.writeFileSync(path.join(root, "src/file.ts"), source(4));
+      if (staged) {
+        git(root, "add", ".");
+      }
+      expect(main(root, ["--base", "HEAD", ...(staged ? ["--staged"] : [])])).toBe(0);
+      expect(errors).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { label: "a malformed candidate", before: source(2), after: source(1) + source(1) },
+    { label: "unmeasurable inherited debt", before: source(2) + source(1), after: source(4) },
+  ])("rejects $label", ({ before, after }) => {
+    const root = fixture();
+    const target = path.join(root, "src/file.ts");
+    fs.writeFileSync(target, before);
+    git(root, "add", ".");
+    git(root, "commit", "-m", "baseline");
+    fs.writeFileSync(target, after);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(main(root, ["--base", "HEAD"])).toBe(1);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining("Cannot measure src/file.ts:"));
+  });
+
   it.each(["oxlint", "eslint"])("counts %s-suppressed debt without changing the source", (tool) => {
     const root = fixture();
     const target = path.join(root, "src/file.ts");
