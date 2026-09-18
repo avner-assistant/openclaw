@@ -27,13 +27,10 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "nvidia/nemotron-3.5-lightning-30b-a3b",
-            "name": "Nemotron 3.5 Lightning 30B",
-            "input": [
-              "text"
-            ],
-            "reasoning": true,
-            "contextWindow": 1048576,
+            "id": "nvidia/nemotron-3-ultra-550b-a55b",
+            "name": "NVIDIA Nemotron 3 Ultra 550B",
+            "input": ["text"],
+            "contextWindow": 1000000,
             "maxTokens": 16384,
             "cost": {
               "input": 0,
@@ -46,10 +43,13 @@
             }
           },
           {
-            "id": "nvidia/nemotron-3-ultra-550b-a55b",
-            "name": "NVIDIA Nemotron 3 Ultra 550B",
-            "input": ["text"],
-            "contextWindow": 1000000,
+            "id": "nvidia/nemotron-3.5-lightning-30b-a3b",
+            "name": "Nemotron 3.5 Lightning 30B",
+            "input": [
+              "text"
+            ],
+            "reasoning": true,
+            "contextWindow": 1048576,
             "maxTokens": 16384,
             "cost": {
               "input": 0,
