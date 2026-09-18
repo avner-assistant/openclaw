@@ -1,5 +1,4 @@
 /* @vitest-environment jsdom */
-
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import type { AgentsListResult, GatewayAgentRow } from "../api/types.ts";
@@ -26,6 +25,7 @@ import {
   stubRenderedWhenDefined,
 } from "./app-host.test-support.ts";
 import { ShellGatewayOwner, type ShellGatewayHost } from "./app-shell-gateway.ts";
+import { createChatSubmissions } from "./chat-submissions.ts";
 import type {
   ApplicationContext,
   ApplicationGateway,
@@ -460,6 +460,7 @@ describe("OpenClaw shell route session commits", () => {
         agentSelection: { state: { selectedId: "main" } },
         gateway: { snapshot: { hello: null } },
         sessions: createRouteSessions(),
+        chatSubmissions: createChatSubmissions(),
         navigate,
       } as unknown as ApplicationContext,
     };
@@ -490,6 +491,7 @@ describe("OpenClaw shell route session commits", () => {
         agentSelection: { state: { selectedId: "research" } },
         gateway: { snapshot: { hello: null } },
         sessions: createRouteSessions(),
+        chatSubmissions: createChatSubmissions(),
         navigate,
       } as unknown as ApplicationContext,
     };
@@ -519,6 +521,7 @@ describe("OpenClaw shell route session commits", () => {
         agentSelection: { set: vi.fn(), state: { selectedId: null } },
         gateway: { setSessionKey: vi.fn(), snapshot },
         sessions: createRouteSessions(),
+        chatSubmissions: createChatSubmissions(),
         replace,
       } as unknown as ApplicationContext,
     };
@@ -547,6 +550,7 @@ describe("OpenClaw shell route session commits", () => {
         },
         agentSelection: { set: setAgent },
         sessions: createRouteSessions(),
+        chatSubmissions: createChatSubmissions(),
       } as unknown as ApplicationContext,
     };
     shell.activeSessionKey = "agent:main:session-a";
@@ -942,6 +946,7 @@ describe("OpenClaw shell keyboard shortcuts", () => {
         agents: { state: { agentsList: { mainKey: "main" } } },
         agentSelection: { state: { selectedId: "main" }, set: setAgent },
         sessions: createRouteSessions(),
+        chatSubmissions: createChatSubmissions(),
         navigate,
       } as unknown as ApplicationContext,
     };
@@ -1050,7 +1055,7 @@ describe("OpenClaw shell keyboard shortcuts", () => {
     shell.handleGatewayEvent({ event: "config.changed", payload: {} });
     await vi.advanceTimersByTimeAsync(100);
 
-    expect(harness.setSelection).toHaveBeenCalledExactlyOnceWith("main");
+    expect(harness.setSelection).toHaveBeenCalledExactlyOnceWith("main", { background: true });
   });
 
   it("keeps caches intact when a config.changed refresh returns the same roster", async () => {

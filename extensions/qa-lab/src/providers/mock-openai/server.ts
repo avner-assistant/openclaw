@@ -178,6 +178,7 @@ import {
   extractUserTurnTexts,
   extractInstructionsText,
   extractAllRequestTexts,
+  classifyMockOpenAiRequest,
   buildWhatsAppPendingHistoryReply,
   buildWhatsAppBroadcastReply,
   buildWhatsAppGroupDispatchReply,
@@ -187,6 +188,7 @@ import {
   parseToolOutputJson,
 } from "./mock-openai-input.js";
 import { attachQaMockResponsesWebSocketServer } from "./mock-openai-responses-websocket.js";
+import { resolveMockSubagentHandoff } from "./mock-openai-subagent-completion.js";
 import {
   readTargetFromPrompt,
   execCommandFromToolProgressPrompt,
@@ -201,6 +203,7 @@ import {
   isSnackRecallPrompt,
   extractSnackPreference,
 } from "./mock-openai-tooling.js";
+import type { QaMockOpenAiServerOptions } from "./server-options.js";
 
 const MOCK_HTTP_POST_ROUTES = new Map([
   ["/v1/images/generations", "OpenAI Images"],
@@ -210,8 +213,6 @@ const MOCK_HTTP_POST_ROUTES = new Map([
   ["/v1/messages", "Anthropic Messages"],
 ]);
 const QA_COMPACTION_RETRY_PROMPT_RE = /compaction retry mutating tool check/i;
-const QA_COMPACTION_SUMMARY_INSTRUCTIONS_RE =
-  /context summarization assistant[\s\S]*structured summary[\s\S]*do not continue/i;
 const QA_COMPACTION_RETRY_OVERFLOW_THRESHOLD_BYTES = 256 * 1024;
 const QA_COMPACTION_OUTPUT_RECOVERY_OVERFLOW_THRESHOLD_BYTES = 96 * 1024;
 const QA_COMPACTION_RETRY_DURABLE_MARKER = "QA-COMPACTION-DURABLE-MARKER";
@@ -872,20 +873,6 @@ function resolveAcceptedChildSessionKey(input: ResponsesInputItem[]) {
   return output?.status === "accepted" && typeof output.childSessionKey === "string"
     ? output.childSessionKey.trim() || undefined
     : undefined;
-}
-
-function classifyMockOpenAiRequest(
-  input: ResponsesInputItem[],
-  body: Record<string, unknown>,
-): MockOpenAiRequestKind {
-  const instructionText = extractAllRequestTexts(
-    input.filter((item) => item.role === "developer" || item.role === "system"),
-    body,
-  );
-  if (QA_COMPACTION_SUMMARY_INSTRUCTIONS_RE.test(instructionText)) {
-    return "compaction-summary";
-  }
-  return hasToolOutput(input) ? "tool-continuation" : "agent-initial";
 }
 
 function resolveCompactionSummaryFaultMode(params: {
@@ -2597,19 +2584,19 @@ async function buildResponsesPayload(
       return buildToolCallEventsWithArgs("read", { path: "FOLLOWTHROUGH_NOTE.md" });
     }
   }
-  if (
-    canCallSessionsSpawn &&
-    (/delegate (?:one |a )bounded qa task/i.test(allInputText) ||
-      /subagent handoff/i.test(allInputText)) &&
-    !hasCompletedToolOutput &&
-    !scenarioState.subagentHandoffSpawned
-  ) {
-    scenarioState.subagentHandoffSpawned = true;
-    return buildToolCallEventsWithArgs("sessions_spawn", {
-      task: subagentHandoffTaskForProvider(providerVariant),
-      label: "qa-sidecar",
-      ...(!/nested worker lineage handoff/i.test(allInputText) ? { thread: false } : {}),
-    });
+  const handoff = resolveMockSubagentHandoff({
+    input,
+    body,
+    state: scenarioState,
+    toolOutput,
+    canSpawn: canCallSessionsSpawn,
+    canYield: canCallSessionsYield,
+    task: subagentHandoffTaskForProvider(providerVariant),
+  });
+  if (handoff) {
+    return "text" in handoff
+      ? buildAssistantEvents(handoff.text)
+      : buildToolCallEventsWithArgs(handoff.tool, handoff.args);
   }
   if (
     /(worked, failed, blocked|worked\/failed\/blocked|source and docs)/i.test(prompt) &&
@@ -2637,14 +2624,13 @@ async function buildResponsesPayload(
   return buildAssistantEvents(buildAssistantText(input, body));
 }
 
-export async function startQaMockOpenAiServer(params?: {
-  host?: string;
-  port?: number;
-  finalOnlyMarkerPauseMs?: number;
-  modelRefs?: readonly string[];
-}) {
+export async function startQaMockOpenAiServer(params?: QaMockOpenAiServerOptions) {
   const host = params?.host ?? "127.0.0.1";
   const finalOnlyMarkerPauseMs = params?.finalOnlyMarkerPauseMs ?? 1_500;
+  const repeatedRequestResponsePauseMs =
+    params?.repeatedRequestResponsePauseMs ?? QA_REPEATED_REQUEST_RESPONSE_PAUSE_MS;
+  const repeatedRequestStalledResponsePauseMs =
+    params?.repeatedRequestStalledResponsePauseMs ?? QA_REPEATED_REQUEST_STALLED_RESPONSE_PAUSE_MS;
   const terminalRequesterSettleGate = createTerminalRequesterSettleGate();
   const scenarioStates = new Map<string, MockScenarioState>();
   const servedCompactionSummaryFaultMarkers = new Set<string>();
@@ -2698,11 +2684,16 @@ export async function startQaMockOpenAiServer(params?: {
     if (isRemoteCompactionV2Request(input)) {
       return { events: buildRemoteCompactionV2Events(), model };
     }
+    const requestKind = classifyMockOpenAiRequest(input, body);
+    if (requestKind === "activity-summary") {
+      // Recaps quote scenario prompts as data. Keep maintenance requests out of
+      // scenario state and tool evidence, just like native remote compaction.
+      return { events: buildAssistantEvents("The requested work is in progress."), model };
+    }
     const subagentTurn = resolveMockSubagentTurn(input);
     const prompt = extractLastUserText(input);
     const allInputText = extractAllRequestTexts(input, body);
     const scenarioState = scenarioStateFor(body);
-    const requestKind = classifyMockOpenAiRequest(input, body);
     const compactionSummaryFaultMode = resolveCompactionSummaryFaultMode({
       allInputText,
       requestKind,
@@ -2879,8 +2870,8 @@ export async function startQaMockOpenAiServer(params?: {
         ? {
             responsePauseMs:
               scenarioState.repeatedRequestRecoveryAttempts === QA_REPEATED_REQUEST_STALL_ATTEMPT
-                ? QA_REPEATED_REQUEST_STALLED_RESPONSE_PAUSE_MS
-                : QA_REPEATED_REQUEST_RESPONSE_PAUSE_MS,
+                ? repeatedRequestStalledResponsePauseMs
+                : repeatedRequestResponsePauseMs,
           }
         : {}),
     };
