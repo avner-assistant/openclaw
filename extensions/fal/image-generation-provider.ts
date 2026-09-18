@@ -81,6 +81,13 @@ const FAL_SUPPORTED_ASPECT_RATIOS = [
   "8:1",
   "1:8",
 ] as const;
+const GPT_IMAGE_25_SUPPORTED_ASPECT_RATIOS = FAL_SUPPORTED_ASPECT_RATIOS.filter(
+  (aspectRatio) =>
+    aspectRatio !== "4:1" &&
+    aspectRatio !== "1:4" &&
+    aspectRatio !== "8:1" &&
+    aspectRatio !== "1:8",
+);
 const KREA_SUPPORTED_ASPECT_RATIOS = [
   "1:1",
   "4:3",
@@ -751,6 +758,12 @@ export function buildFalImageGenerationProvider(): ImageGenerationProvider {
         },
         aspectRatios: [...FAL_SUPPORTED_ASPECT_RATIOS],
         aspectRatiosByModel: {
+          ...Object.fromEntries(
+            FAL_GPT_IMAGE_25_MODELS.map((model) => [
+              model,
+              [...GPT_IMAGE_25_SUPPORTED_ASPECT_RATIOS],
+            ]),
+          ),
           [FAL_NANO_BANANA_MODEL]: [...NANO_BANANA_LEGACY_SUPPORTED_ASPECT_RATIOS],
           [`${FAL_NANO_BANANA_MODEL}/edit`]: [...NANO_BANANA_LEGACY_SUPPORTED_ASPECT_RATIOS],
           [FAL_NANO_BANANA_2_LITE_MODEL]: [...NANO_BANANA_SUPPORTED_ASPECT_RATIOS],

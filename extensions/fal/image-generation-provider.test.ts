@@ -84,6 +84,8 @@ describe("fal image-generation provider", () => {
     expect(provider.capabilities.edit.maxInputImagesByModel?.[model]).toBe(16);
     expect(provider.capabilities.geometry?.sizesByModel?.[model]).toEqual([]);
     expect(provider.capabilities.geometry?.resolutionsByModel?.[model]).toEqual([]);
+    expect(provider.capabilities.geometry?.aspectRatiosByModel?.[model]).toContain("21:9");
+    expect(provider.capabilities.geometry?.aspectRatiosByModel?.[model]).not.toContain("4:1");
     expect(provider.capabilities.output?.formatsByModel?.[model]).toEqual(["png", "jpeg", "webp"]);
     expect(provider.capabilities.output?.qualitiesByModel?.[model]).toEqual([
       "low",
