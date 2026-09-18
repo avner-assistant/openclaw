@@ -1575,10 +1575,11 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         originalHybridJob.pretestBuildMode === undefined &&
         shard.pretestBuildMode === "runtime";
       if (promoted) {
+        expect(shard.pretestBuildMode).toBe("runtime");
         expect(shard.planConcurrency).toBe(1);
-        expect(shard.env).toEqual(originalHybridJob.env);
         expect(exclusiveCount).toBe(0);
         expect(shard.requiresDist).toBe(false);
+        expect(shard.env).toEqual(originalHybridJob.env);
         for (const original of originalHybridJob.groups) {
           const retained = expectDefined(
             shard.groups.find((group) => group.shard_name === original.shard_name),
