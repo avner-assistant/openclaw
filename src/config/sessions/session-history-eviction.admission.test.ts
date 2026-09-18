@@ -7,6 +7,8 @@ import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
 import * as sqlite from "../../infra/node-sqlite.js";
 import * as integrity from "../../infra/sqlite-integrity-worker.js";
 import { isSessionLifecycleMutationActive } from "../../sessions/session-lifecycle-admission.js";
+import { closeCachedOpenClawAgentDatabase } from "../../state/openclaw-agent-db-lifecycle.js";
+import { invalidateOpenClawAgentDatabaseValidation } from "../../state/openclaw-agent-db-validation-cache.js";
 import {
   closeOpenClawAgentDatabaseByPath,
   closeOpenClawAgentDatabasesAsync,
@@ -204,18 +206,23 @@ it.each([
       events.push("preparation-ready");
       expect(database.db.isTransaction).toBe(false);
       if (cold) {
-        closeOpenClawAgentDatabaseByPath(database.path);
+        closeCachedOpenClawAgentDatabase(database, { eviction: true });
+        invalidateOpenClawAgentDatabaseValidation(database.path);
         expect(getOpenClawAgentDatabaseIfOpen(options)).toBeUndefined();
         events.push("parent-handle-closed");
       }
       observingAdmission = true;
       void own(
-        runExclusiveSqliteSessionWrite(options, async () => {
-          events.push("blocker-entered");
-          blockerEntered.resolve();
-          await releaseBlocker.promise;
-          events.push("blocker-released");
-        }),
+        runExclusiveSqliteSessionWrite(
+          options,
+          async () => {
+            events.push("blocker-entered");
+            blockerEntered.resolve();
+            await releaseBlocker.promise;
+            events.push("blocker-released");
+          },
+          "session.history.eviction-prepare",
+        ),
       );
       await blockerEntered.promise;
       preparationReady.resolve();
@@ -240,10 +247,14 @@ it.each([
     await preparationReady.promise;
     await yieldToEventLoop();
     const laterWriter = own(
-      runExclusiveSqliteSessionWrite(options, async () => {
-        laterWriterRan = true;
-        events.push("later-writer");
-      }),
+      runExclusiveSqliteSessionWrite(
+        options,
+        async () => {
+          laterWriterRan = true;
+          events.push("later-writer");
+        },
+        "session.history.eviction-prepare",
+      ),
     );
     expect(laterWriterRan).toBe(false);
     releaseBlocker.resolve();

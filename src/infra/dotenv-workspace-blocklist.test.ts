@@ -3,7 +3,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { setCurrentPluginMetadataSnapshot } from "../plugins/current-plugin-metadata.test-support.js";
+import {
+  makeEmptyPluginMetadataOwners,
+  setCurrentPluginMetadataSnapshot,
+} from "../plugins/current-plugin-metadata.test-support.js";
 import { resolveInstalledPluginIndexPolicyHash } from "../plugins/installed-plugin-index-policy.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import { clearPluginMetadataLifecycleCaches } from "../plugins/plugin-metadata-lifecycle.js";
@@ -50,20 +53,6 @@ function clearEnv(keys: readonly string[]) {
   }
 }
 
-function emptyOwnerMaps(): PluginMetadataSnapshot["owners"] {
-  return {
-    channels: new Map(),
-    channelConfigs: new Map(),
-    providers: new Map(),
-    modelCatalogProviders: new Map(),
-    cliBackends: new Map(),
-    setupProviders: new Map(),
-    commandAliases: new Map(),
-    contracts: new Map(),
-    modelIdNormalizationPolicies: new Map(),
-  };
-}
-
 function createManifestBackedProviderSnapshot(
   plugin: PluginManifestRecord,
 ): PluginMetadataSnapshot {
@@ -90,7 +79,7 @@ function createManifestBackedProviderSnapshot(
     byPluginId: new Map([[plugin.id, plugin]]),
     normalizePluginId: (pluginId: string) => pluginId,
     declaredProviderOwners: buildDeclaredProviderOwnerIndex([plugin]),
-    owners: emptyOwnerMaps(),
+    owners: makeEmptyPluginMetadataOwners(),
     metrics: {
       registrySnapshotMs: 0,
       manifestRegistryMs: 0,
@@ -197,10 +186,13 @@ describe("workspace .env blocklist completeness", () => {
           "OPENCLAW_WHATSAPP_WEB_SOCKET_URL",
           "EXAMPLE_API_HOST",
           "HOMEBREW_BREW_FILE",
+          "HOMEBREW_CURL_PATH",
+          "HOMEBREW_GIT_PATH",
           "HOMEBREW_PREFIX",
           "IRC_HOST",
           "APPDATA",
           "LOCALAPPDATA",
+          "DISCORD_API_URL",
           "MATTERMOST_URL",
           "MATRIX_HOMESERVER",
           "MINIMAX_API_HOST",
@@ -261,6 +253,8 @@ describe("workspace .env blocklist completeness", () => {
           "OPENCLAW_ALLOW_PROJECT_LOCAL_BIN",
           "PATH",
           "HOMEBREW_BREW_FILE",
+          "HOMEBREW_CURL_PATH",
+          "HOMEBREW_GIT_PATH",
           "HOMEBREW_PREFIX",
           "SystemRoot",
           "WINDIR",
@@ -335,6 +329,7 @@ describe("workspace .env blocklist completeness", () => {
           [
             "MATRIX_HOMESERVER=https://evil-matrix.example.com",
             "MATTERMOST_URL=https://evil-mattermost.example.com",
+            "DISCORD_API_URL=https://evil-discord.example.com/api/v10",
             "IRC_HOST=evil-irc.example.com",
             "BUZZ_RELAY_URL=wss://evil-buzz.example.com/relay",
             "SYNOLOGY_CHAT_INCOMING_URL=https://evil-synology.example.com/incoming",
@@ -346,6 +341,7 @@ describe("workspace .env blocklist completeness", () => {
 
         delete process.env.MATRIX_HOMESERVER;
         delete process.env.MATTERMOST_URL;
+        delete process.env.DISCORD_API_URL;
         delete process.env.IRC_HOST;
         delete process.env.BUZZ_RELAY_URL;
         delete process.env.SYNOLOGY_CHAT_INCOMING_URL;
@@ -357,6 +353,7 @@ describe("workspace .env blocklist completeness", () => {
 
         expect(process.env.MATRIX_HOMESERVER).toBeUndefined();
         expect(process.env.MATTERMOST_URL).toBeUndefined();
+        expect(process.env.DISCORD_API_URL).toBeUndefined();
         expect(process.env.IRC_HOST).toBeUndefined();
         expect(process.env.BUZZ_RELAY_URL).toBeUndefined();
         expect(process.env.SYNOLOGY_CHAT_INCOMING_URL).toBeUndefined();

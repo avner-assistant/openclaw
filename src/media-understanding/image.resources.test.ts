@@ -250,6 +250,21 @@ module.exports = { id: ${JSON.stringify(id)}, register(api) {
   };
 }
 
+function acquireFixtureRuntime(fixture: ReturnType<typeof nativeImageFixture>, modelId: string) {
+  return acquireReadOnlyPreparedModelRuntime(
+    {
+      config: fixture.config,
+      agentId: "main",
+      agentDir: fixture.agentDir,
+      workspaceDir: fixture.dir,
+      loadRuntimePlugins: true,
+      skipCredentials: true,
+      runtimePluginSelections: [{ provider: fixture.id, modelId }],
+    },
+    { catalogMode: "static" },
+  );
+}
+
 afterEach(async () => {
   vi.useRealTimers();
   await closePreparedModelRuntimeSnapshots();
@@ -286,19 +301,7 @@ it.each(["timeout", "cancellation", "late-rejection"] as const)(
             ),
           ).toEqual({ ok: true });
           setActivePluginRegistry(donor.registry);
-          const acquired = await acquireReadOnlyPreparedModelRuntime(
-            {
-              config: fixture.config,
-              agentId: "main",
-              agentDir: fixture.agentDir,
-              workspaceDir: fixture.dir,
-              loadRuntimePlugins: true,
-              skipCredentials: true,
-              runtimePluginSelections: [{ provider: fixture.id, modelId: "image-model" }],
-            },
-            undefined,
-            "static",
-          );
+          const acquired = await acquireFixtureRuntime(fixture, "image-model");
           lease = acquired;
           expect(fixture.state.connections).toHaveLength(2);
           const [donorConnection, primary] = fixture.state.connections;
@@ -336,7 +339,7 @@ it.each(["timeout", "cancellation", "late-rejection"] as const)(
                   : "synthetic image cancellation",
             }),
           );
-          acquired.release();
+          await acquired[Symbol.asyncDispose]();
           await donor.release();
           closing = closePreparedModelRuntimeSnapshots();
           await vi.advanceTimersByTimeAsync(0);
@@ -370,7 +373,7 @@ it.each(["timeout", "cancellation", "late-rejection"] as const)(
           fixture.state.finish.resolve();
           await outcome;
           await parent.drain();
-          lease?.release();
+          await lease?.[Symbol.asyncDispose]();
           await donor.release();
           await closing;
           vi.useRealTimers();
@@ -387,19 +390,7 @@ it("releases only its borrow while the supplying generation remains open", async
   try {
     await fixture.environment(async () => {
       useNoBundledPlugins();
-      const lease = await acquireReadOnlyPreparedModelRuntime(
-        {
-          config: fixture.config,
-          agentId: "main",
-          agentDir: fixture.agentDir,
-          workspaceDir: fixture.dir,
-          loadRuntimePlugins: true,
-          skipCredentials: true,
-          runtimePluginSelections: [{ provider: fixture.id, modelId: "image-model" }],
-        },
-        undefined,
-        "static",
-      );
+      const lease = await acquireFixtureRuntime(fixture, "image-model");
       try {
         fixture.state.finish.resolve();
         expect(
@@ -411,7 +402,7 @@ it("releases only its borrow while the supplying generation remains open", async
         expect(fixture.state.connections[0]!.database.isOpen).toBe(true);
         expect(fixture.state.connections[0]!.disposals).toBe(0);
       } finally {
-        lease.release();
+        await lease[Symbol.asyncDispose]();
         await closePreparedModelRuntimeSnapshots();
       }
       expect(fixture.state.connections[0]!.disposals).toBe(1);
@@ -428,19 +419,7 @@ it("leaves a raw supplied registry with its caller", async () => {
       useNoBundledPlugins();
       const raw = loadPluginRegistryHandle({ config: fixture.config });
       setActivePluginRegistry(raw);
-      const lease = await acquireReadOnlyPreparedModelRuntime(
-        {
-          config: fixture.config,
-          agentId: "main",
-          agentDir: fixture.agentDir,
-          workspaceDir: fixture.dir,
-          loadRuntimePlugins: true,
-          skipCredentials: true,
-          runtimePluginSelections: [{ provider: fixture.id, modelId: "image-model" }],
-        },
-        undefined,
-        "static",
-      );
+      const lease = await acquireFixtureRuntime(fixture, "image-model");
       try {
         fixture.state.finish.resolve();
         const snapshot = { ...lease.snapshot, pluginRegistry: raw };
@@ -450,7 +429,7 @@ it("leaves a raw supplied registry with its caller", async () => {
         expect(fixture.state.connections[0]!.disposals).toBe(0);
         expect(fixture.state.connections[0]!.database.isOpen).toBe(true);
       } finally {
-        lease.release();
+        await lease[Symbol.asyncDispose]();
         await closePreparedModelRuntimeSnapshots();
       }
     });
@@ -466,19 +445,7 @@ it.each(["setup", "retry"] as const)(
     try {
       await fixture.environment(async () => {
         useNoBundledPlugins();
-        const lease = await acquireReadOnlyPreparedModelRuntime(
-          {
-            config: fixture.config,
-            agentId: "main",
-            agentDir: fixture.agentDir,
-            workspaceDir: fixture.dir,
-            loadRuntimePlugins: true,
-            skipCredentials: true,
-            runtimePluginSelections: [{ provider: fixture.id, modelId: "image-model" }],
-          },
-          undefined,
-          "static",
-        );
+        const lease = await acquireFixtureRuntime(fixture, "image-model");
         let closing: Promise<void> | undefined;
         let outcome: Promise<unknown> | undefined;
         try {
@@ -495,7 +462,7 @@ it.each(["setup", "retry"] as const)(
               throw new Error("Image request settled before the held phase");
             }),
           ]);
-          lease.release();
+          await lease[Symbol.asyncDispose]();
           closing = closePreparedModelRuntimeSnapshots();
           expect(fixture.state.connections[0]!.database.isOpen).toBe(true);
           fixture.state.resumeSetup.resolve();
@@ -514,7 +481,7 @@ it.each(["setup", "retry"] as const)(
           fixture.state.resumeSetup.resolve();
           fixture.state.finish.resolve();
           await outcome;
-          lease.release();
+          await lease[Symbol.asyncDispose]();
           await closing;
           await closePreparedModelRuntimeSnapshots();
         }
@@ -532,19 +499,7 @@ it.each(["parent", "normal", "admitted-tail"] as const)(
     try {
       await fixture.environment(async () => {
         useNoBundledPlugins();
-        const lease = await acquireReadOnlyPreparedModelRuntime(
-          {
-            config: fixture.config,
-            agentId: "main",
-            agentDir: fixture.agentDir,
-            workspaceDir: fixture.dir,
-            loadRuntimePlugins: true,
-            skipCredentials: true,
-            runtimePluginSelections: [{ provider: fixture.id, modelId: "image-model" }],
-          },
-          undefined,
-          "static",
-        );
+        const lease = await acquireFixtureRuntime(fixture, "image-model");
         const parent = new AsyncWorkScope();
         let result: Promise<unknown> | undefined;
         let closing: Promise<void> | undefined;
@@ -591,7 +546,7 @@ it.each(["parent", "normal", "admitted-tail"] as const)(
             fixture.state.cancellation.signal?.reason,
           );
           expect(fixture.state.cancellation.registry).toBe(lease.snapshot.pluginRegistry);
-          lease.release();
+          await lease[Symbol.asyncDispose]();
           closing = closePreparedModelRuntimeSnapshots();
           expect(fixture.state.connections[0]!.database.isOpen).toBe(true);
           fixture.state.finish.resolve();
@@ -609,7 +564,7 @@ it.each(["parent", "normal", "admitted-tail"] as const)(
           fixture.state.finishCleanup.resolve();
           await result;
           await parent.drain();
-          lease.release();
+          await lease[Symbol.asyncDispose]();
           await closing;
           await closePreparedModelRuntimeSnapshots();
         }
@@ -627,19 +582,7 @@ it.each(["success", "failure", "timeout"] as const)(
     try {
       await fixture.environment(async () => {
         useNoBundledPlugins();
-        const lease = await acquireReadOnlyPreparedModelRuntime(
-          {
-            config: fixture.config,
-            agentId: "main",
-            agentDir: fixture.agentDir,
-            workspaceDir: fixture.dir,
-            loadRuntimePlugins: true,
-            skipCredentials: true,
-            runtimePluginSelections: [{ provider: fixture.id, modelId: "image-model" }],
-          },
-          undefined,
-          "static",
-        );
+        const lease = await acquireFixtureRuntime(fixture, "image-model");
         const parent = new AsyncWorkScope();
         let outcome: Promise<unknown> | undefined;
         let closing: Promise<void> | undefined;
@@ -683,7 +626,7 @@ it.each(["success", "failure", "timeout"] as const)(
           await vi.advanceTimersByTimeAsync(0);
           expect(fixture.state.setupReads).toBe(1);
           expect(fixture.state.calls).toBe(mode === "success" ? 1 : 0);
-          lease.release();
+          await lease[Symbol.asyncDispose]();
           closing = closePreparedModelRuntimeSnapshots();
           await vi.advanceTimersByTimeAsync(0);
           expect(fixture.state.connections[0]!.database.isOpen).toBe(true);
@@ -707,7 +650,7 @@ it.each(["success", "failure", "timeout"] as const)(
           fixture.state.finishSetupTail.resolve();
           await outcome;
           await parent.drain();
-          lease.release();
+          await lease[Symbol.asyncDispose]();
           await closing;
           vi.useRealTimers();
         }
@@ -731,19 +674,7 @@ it.each(["open", "resolved", "fallback"] as const)(
     try {
       await fixture.environment(async () => {
         useNoBundledPlugins();
-        const lease = await acquireReadOnlyPreparedModelRuntime(
-          {
-            config: fixture.config,
-            agentId: "main",
-            agentDir: fixture.agentDir,
-            workspaceDir: fixture.dir,
-            loadRuntimePlugins: true,
-            skipCredentials: true,
-            runtimePluginSelections: [{ provider: fixture.id, modelId: fixture.request.model }],
-          },
-          undefined,
-          "static",
-        );
+        const lease = await acquireFixtureRuntime(fixture, fixture.request.model);
         const parent = new AsyncWorkScope();
         const read = () =>
           fixture.state.connections[0]!.database.prepare("SELECT value FROM proof").get()?.value;
@@ -788,7 +719,7 @@ it.each(["open", "resolved", "fallback"] as const)(
                 throw new Error("MiniMax did not enter the held boundary");
               }),
             ]);
-            lease.release();
+            await lease[Symbol.asyncDispose]();
             closing = closePreparedModelRuntimeSnapshots();
             expect(read()).toBe(42);
             resume.resolve();
@@ -804,7 +735,7 @@ it.each(["open", "resolved", "fallback"] as const)(
           }
           expect(request).toHaveBeenCalledTimes(mode === "open" ? 2 : mode === "resolved" ? 1 : 0);
           await parent.drain();
-          lease.release();
+          await lease[Symbol.asyncDispose]();
           await closing;
           await closePreparedModelRuntimeSnapshots();
           expect(fixture.state.connections[0]!.disposals).toBe(1);
@@ -820,7 +751,7 @@ it.each(["open", "resolved", "fallback"] as const)(
           resume.resolve();
           await outcome;
           await parent.drain();
-          lease.release();
+          await lease[Symbol.asyncDispose]();
           await closing;
           request.mockRestore();
           auth?.mockRestore();

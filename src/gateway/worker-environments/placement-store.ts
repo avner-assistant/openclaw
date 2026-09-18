@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
+import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
+import { sessionChanges } from "../../sessions/session-row-changes.js";
+import type { DB as StateDatabase } from "../../state/openclaw-state-db.generated.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
@@ -58,6 +60,8 @@ import {
   hasWorkerWorkspacePendingResult,
   readWorkerWorkspaceReconcilingSessionIds,
 } from "./placement-workspace-result.js";
+import { consumePreparedEnvironment } from "./prepared-environment-store.js";
+import type { PreparedEnvironmentSelection } from "./store.js";
 import { boundedWorkerError } from "./worker-error.js";
 import {
   projectWorkspaceResultConflict,
@@ -102,7 +106,35 @@ function updateTransition(
   if (result.numAffectedRows !== 1n) {
     throw new Error(`Worker session placement ${current.sessionId} changed during transition`);
   }
-  return getRequired(db, current.sessionId);
+  const updated = getRequired(db, current.sessionId);
+  if (updated.state === "active") {
+    // Activation and demand are one commit. Teardown may run before refill observes
+    // the placement, so cleanup timestamps cannot stand in for successful demand.
+    const activated = executeSqliteQuerySync(
+      db,
+      getNodeSqliteKysely<Pick<StateDatabase, "worker_environments">>(db)
+        .updateTable("worker_environments")
+        .set((eb) => ({
+          last_activated_at_ms: eb
+            .case()
+            .when("last_activated_at_ms", ">", nowMs)
+            .then(eb.ref("last_activated_at_ms"))
+            .else(nowMs)
+            .end(),
+        }))
+        .where("environment_id", "=", updated.environmentId)
+        .where("state", "=", "attached")
+        .where("destroy_requested_at_ms", "is", null)
+        .where("owner_epoch", "=", updated.activeOwnerEpoch)
+        .where("attached_session_ids_json", "=", JSON.stringify([updated.sessionId])),
+    );
+    if (activated.numAffectedRows !== 1n) {
+      throw new Error(
+        `Worker session placement ${current.sessionId} lost its attached environment`,
+      );
+    }
+  }
+  return updated;
 }
 
 export function createWorkerSessionPlacementStore(
@@ -127,17 +159,6 @@ export function createWorkerSessionPlacementStore(
     }
     const conflict = workspaceResultConflicts.get(record.sessionId);
     return conflict ? { ...record, workspaceResultConflict: conflict } : record;
-  };
-
-  const requireClaimOwner = (claim: WorkerSessionTurnClaim): void => {
-    const db = read();
-    const current = find(db, required(claim.sessionId, "session id"));
-    if (
-      !current ||
-      (!isCurrentPlacementTurnClaim(current, claim) && !hasCurrentWorkspaceResultClaim(db, claim))
-    ) {
-      throw new Error(`Session ${claim.sessionId} workspace result conflict owner changed`);
-    }
   };
 
   const store = {
@@ -215,9 +236,17 @@ export function createWorkerSessionPlacementStore(
       claim: WorkerSessionTurnClaim,
       conflict: WorkerWorkspaceResultConflict | undefined,
     ): void {
-      requireClaimOwner(claim);
+      const db = read();
+      const current = find(db, required(claim.sessionId, "session id"));
+      if (
+        !current ||
+        (!isCurrentPlacementTurnClaim(current, claim) && !hasCurrentWorkspaceResultClaim(db, claim))
+      ) {
+        throw new Error(`Session ${claim.sessionId} workspace result conflict owner changed`);
+      }
       if (!conflict) {
         workspaceResultConflicts.delete(claim.sessionId);
+        sessionChanges.emit({ agentId: current.agentId, sessionKey: current.sessionKey });
         return;
       }
       const paths = conflict.paths.map(exactConflictPath);
@@ -232,6 +261,25 @@ export function createWorkerSessionPlacementStore(
         claim.sessionId,
         projectWorkspaceResultConflict(paths, stagedResultRef, conflict.totalCount),
       );
+      sessionChanges.emit({ agentId: current.agentId, sessionKey: current.sessionKey });
+    },
+
+    bindPreparedEnvironment(
+      input: PreparedEnvironmentSelection,
+    ): WorkerSessionPlacementRecord | undefined {
+      return write((db) => {
+        const nowMs = now();
+        const current = consumePreparedEnvironment(db, input, nowMs);
+        return current
+          ? updateTransition(
+              db,
+              current,
+              "provisioning",
+              { environmentId: input.environmentId },
+              nowMs,
+            )
+          : undefined;
+      });
     },
 
     startDispatch(input: WorkerSessionPlacementDispatchIdentity): WorkerSessionPlacementRecord {

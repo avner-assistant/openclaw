@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 351659,
-  "reason": "PR #141121 (Control UI warm reload) measures 351659 B startup gzip in Linux CI at 491b8bf880a (+1282 B, 0.37% over the 350377 B baseline; current main measures about 350640 B in the same CI). The boot record, roster-cache lifecycle, and transcript prewarm join the boot path after deferring the roster and snapshot readers. Fixed 358400 B cap and existing growth allowance retained.",
-  "updatedAt": "2026-09-08"
+  "startupJsGzipBytes": 362706,
+  "reason": "Maintainer-approved correction in #149291 for the existing startup bundle: exact base 7b6094ec7b7d and CI merge b524940307fc emitted byte-identical Control UI output at 362706 B with Vite 8.2.2/Pako 3.0.1 on Node 24.21.0. CI run 35173887678 also measured 362706 B. The 512 B growth and 64 B build variance allowances remain unchanged.",
+  "updatedAt": "2026-09-17"
 }

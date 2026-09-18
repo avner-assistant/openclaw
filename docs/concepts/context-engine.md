@@ -86,6 +86,18 @@ Every time OpenClaw runs a model prompt, the context engine participates at four
 
 Engines can also implement an optional `maintain()` method for transcript maintenance (safe rewrites via `runtimeContext.rewriteTranscriptEntries()`) after bootstrap, a successful turn, or compaction. Set `info.turnMaintenanceMode: "background"` to run it as deferred work instead of blocking the reply.
 
+When queued budget compaction accepts background maintenance, it keeps the prepared
+runtime alive through maintenance, coalesced reruns, and engine disposal. Acceptance
+does not mean cleanup has finished. Return asynchronous work from engine methods
+and `dispose()` so the host can join it before releasing their resources.
+
+A logical turn also retains its managed supplying registry through engine disposal.
+When that registry copied a runtime engine from another inspection, its recorded
+donor dependency can keep the engine usable after the donor inspection retires.
+Retiring the supplying registry still refuses new logical turns; existing engine
+work keeps its physical resources until cleanup finishes. Raw registrations keep
+their caller-owned lifetime.
+
 For the bundled non-ACP Codex harness, OpenClaw applies the same lifecycle by projecting assembled context into Codex developer instructions and the current turn prompt. Codex still owns its native thread history and native compactor.
 
 ### Subagent lifecycle (optional)
@@ -115,6 +127,15 @@ The built-in `legacy` engine preserves OpenClaw's original behavior:
 The legacy engine does not register tools or provide a `systemPromptAddition`.
 
 When no `plugins.slots.contextEngine` is set (or it's set to `"legacy"`), this engine is used automatically.
+
+Disabling or denying the selected plugin preserves the slot preference but uses
+`legacy` normally when the engine's registered owner identifies the plugin, or
+when the engine ID matches the plugin ID. After a cold start with no registration,
+a distinct engine ID does not identify its owning plugin: resolution still reports
+the missing engine. Global plugin disablement uses `legacy` regardless of this
+owner mapping. Re-enabling the plugin restores the retained selection when its
+runtime registration is available. An enabled selection that is missing or fails
+still follows the failure-isolation behavior below.
 
 ## Plugin engines
 
@@ -299,7 +320,16 @@ Optional members:
 | `afterTurn(params)`            | Method | Post-run lifecycle work (persist state, trigger background compaction).                                                                      |
 | `prepareSubagentSpawn(params)` | Method | Set up shared state for a child session before it starts.                                                                                    |
 | `onSubagentEnded(params)`      | Method | Clean up after a subagent ends.                                                                                                              |
-| `dispose()`                    | Method | Release engine-instance resources when the logical turn retires, after any retained turn work finishes.                                      |
+| `dispose()`                    | Method | Release engine-instance resources when the owning operation ends, after any retained work finishes.                                          |
+
+The host also disposes instances resolved for standalone compaction, Doctor
+inspection, and subagent lifecycle hooks. A queued subagent spawn keeps its
+instance until dispatch succeeds or preparation is rolled back; returning a
+queued acceptance does not end that lifetime. Timed-out compaction keeps its
+instance until the underlying plugin work settles.
+Gateway shutdown releases queued instances without rolling back their preparation,
+so persisted queued work can resume after restart. Explicit cancellation still
+rolls back the preparation.
 
 Foreground engine disposal shares the agent cleanup deadline: 10 seconds by
 default, adjustable with `OPENCLAW_AGENT_CLEANUP_TIMEOUT_MS`. A stalled cleanup
@@ -365,6 +395,12 @@ for the current Gateway process and downgrades context-engine work to the
 built-in `legacy` engine. The error is logged with the failed operation so the
 operator can repair, update, or disable the plugin without the agent going
 silent.
+
+Host admission and resource-ownership failures before factory entry propagate
+without quarantining the engine. Factory rejections caused by cancellation of
+the caller's work also propagate without quarantine or fallback. Completion
+cleanup owns an independent async lifetime, so a closed caller scope does not
+prevent its factory from running.
 
 Host requirement failures are different: when an engine declares that a runtime
 lacks a required capability, OpenClaw fails closed before starting the run. That
@@ -451,3 +487,5 @@ The slot is exclusive at run time - only one registered context engine is resolv
 - [Plugin Architecture](/plugins/architecture) - registering context engine plugins
 - [Plugin manifest](/plugins/manifest) - plugin manifest fields
 - [Plugins](/tools/plugin) - plugin overview
+- [Session management deep dive](/reference/session-management-compaction) - the session store, transcript events, and auto-compaction internals
+- [System prompt](/concepts/system-prompt) - what OpenClaw assembles into the system prompt for every agent run, and the layers it renders from

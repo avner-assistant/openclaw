@@ -28,7 +28,7 @@ describe.skipIf(!hasBrowserLayout)("sidebar glyph geometry", () => {
       async function show(running: boolean, queued = false) {
         render(
           html`<a style="display:flex;align-items:center;gap:8px;width:220px;min-height:30px">
-            ${renderSessionGlyph({ content, running, queued, circular: kind !== "page", badge: kind === "page" ? renderSessionUnreadBadge() : nothing })}
+            ${renderSessionGlyph({ content, running, queued, circular: kind !== "page", ring: kind === "group" ? "pair" : "circle", badge: kind === "page" ? renderSessionUnreadBadge() : nothing })}
             <span data-title>Session title</span>
           </a>`,
           host,
@@ -42,6 +42,13 @@ describe.skipIf(!hasBrowserLayout)("sidebar glyph geometry", () => {
             ),
           );
         }
+        const artwork = host.querySelector(".session-glyph__content")!;
+        await Promise.all(
+          artwork
+            .getAnimations()
+            .filter((animation) => animation instanceof CSSTransition)
+            .map((animation) => animation.finished),
+        );
       }
       const artworkSelector =
         kind === "page"
@@ -60,7 +67,7 @@ describe.skipIf(!hasBrowserLayout)("sidebar glyph geometry", () => {
       const idleArtwork = bounds(artworkSelector);
       const idleTitle = bounds("[data-title]");
       const idleRow = bounds("a");
-      expect(idleArtwork.width).toBe(kind === "page" ? 16 : 20);
+      expect(idleArtwork.width).toBe(kind === "page" ? 16 : kind === "group" ? 28 : 20);
       expect(idleArtwork.height).toBe(kind === "page" ? 16 : 20);
       for (const queued of [false, true]) {
         await show(true, queued);
@@ -68,6 +75,13 @@ describe.skipIf(!hasBrowserLayout)("sidebar glyph geometry", () => {
         expect([artwork.width, artwork.height]).toEqual([idleArtwork.width, idleArtwork.height]);
         expect(bounds("[data-title]").x).toBe(idleTitle.x);
         expect(bounds("a").height).toBe(idleRow.height);
+        if (kind === "group") {
+          const trace = bounds(".session-glyph__trace");
+          expect([trace.width, trace.height]).toEqual([32, 22]);
+          const run = host.querySelector(".session-glyph__trace-run")!;
+          expect(getComputedStyle(run).animationPlayState).toBe(queued ? "paused" : "running");
+          continue;
+        }
         const ringElement = host.querySelector<HTMLElement>(".session-glyph__ring");
         if (!ringElement) {
           throw new Error("Missing activity ring");

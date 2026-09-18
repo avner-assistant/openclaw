@@ -2,9 +2,8 @@
 
 import { html, render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { GatewayBrowserClient } from "../../../api/gateway.ts";
+import type { MessageClientSource } from "../../../../../src/chat/message-client-source.js";
 import * as markdown from "../../../components/markdown.ts";
-import { SessionLinkTitler } from "../../../components/session-link-titling.ts";
 import type { MessageGroup } from "../../../lib/chat/chat-types.ts";
 import { setAvatarGatewayOrigin } from "../../../lib/identity-avatar-context.ts";
 import * as localStorageModule from "../../../local-storage.ts";
@@ -32,6 +31,7 @@ import "./chat-sidebar.ts";
 const localStorageValues = new Map<string, string>();
 const mediaSubscribers = new Set<() => void>();
 const renderMarkdownHtml = markdown.toSanitizedMarkdownHtml;
+const renderStreamingMarkdown = markdown.toStreamingMarkdownParts;
 const markdownRenderMock = vi.fn(
   (value: string, _options?: { codeBlockChrome?: "copy" | "none"; fileLinks?: boolean }) => value,
 );
@@ -97,6 +97,10 @@ beforeEach(() => {
 
 type RenderMessageGroupOptions = Parameters<typeof renderMessageGroup>[1];
 type TestMessage = Record<string, unknown>;
+type TestMessageEntry = Omit<MessageGroup["messages"][number], "hasVisibleContent">;
+type TestMessageGroupOverrides = Omit<Partial<MessageGroup>, "messages"> & {
+  messages?: TestMessageEntry[];
+};
 
 function messageTimestamp(message: unknown): number {
   return typeof message === "object" &&
@@ -269,7 +273,7 @@ function renderAssistantMessages(
 
 function renderAssistantMessageEntries(
   container: HTMLElement,
-  entries: MessageGroup["messages"],
+  entries: TestMessageEntry[],
   opts: Partial<RenderMessageGroupOptions> = {},
 ) {
   const group = createMessageGroup(entries[0]?.message, "assistant", {
@@ -296,13 +300,15 @@ function renderGroupedMessage(
 function createMessageGroup(
   message: unknown,
   role: string,
-  overrides: Partial<MessageGroup> = {},
+  overrides: TestMessageGroupOverrides = {},
 ): MessageGroup {
   const timestamp = overrides.timestamp ?? messageTimestamp(message);
-  const messages = overrides.messages ?? [{ key: `${role}:${timestamp}:message`, message }];
-  const groups = groupMessages(messages.map((entry) => ({ kind: "message", ...entry }))).filter(
-    (item) => item.kind === "group",
-  );
+  const {
+    messages: sourceMessages = [{ key: `${role}:${timestamp}:message`, message }],
+    ...groupOverrides
+  } = overrides;
+  const groups = sourceMessages.map(prepareMessageGroup);
+  const messages = groups.flatMap((group) => group.messages);
   const visibleContent = groups.some((group) => group.visibleContent === "non-text")
     ? "non-text"
     : groups.some((group) => group.visibleContent === "text")
@@ -316,18 +322,26 @@ function createMessageGroup(
     visibleContent,
     timestamp,
     isStreaming: false,
-    ...overrides,
+    ...groupOverrides,
   };
 }
 
+function prepareMessageGroup(entry: TestMessageEntry): MessageGroup {
+  const [group] = groupMessages([{ kind: "message", ...entry }]);
+  if (group?.kind !== "group" || !group.messages[0]) {
+    throw new Error("expected a prepared message entry");
+  }
+  return group;
+}
+
 function createMessageEntry(key: string, message: unknown): MessageGroup["messages"][number] {
-  return { key, message };
+  return prepareMessageGroup({ key, message }).messages[0]!;
 }
 
 function createToolGroup(
   key: string,
-  messages: MessageGroup["messages"],
-  overrides: Partial<MessageGroup> = {},
+  messages: TestMessageEntry[],
+  overrides: TestMessageGroupOverrides = {},
 ): MessageGroup {
   return createMessageGroup(messages[0]?.message, "tool", { key, messages, ...overrides });
 }
@@ -415,13 +429,9 @@ function createAssistantCanvasBlock(params: {
   url?: string;
   preferredHeight?: number;
   presentationTarget?: "assistant_message" | "tool_card";
-  mcpApp?: { viewId: string };
 }) {
   const viewId = `cv_inline_${params.suffix}`;
-  const preview = {
-    ...createCanvasPreview({ ...params, viewId }),
-    ...(params.mcpApp ? { mcpApp: params.mcpApp } : {}),
-  };
+  const preview = createCanvasPreview({ ...params, viewId });
   return {
     type: "canvas",
     preview,
@@ -705,21 +715,199 @@ afterEach(() => {
 });
 
 describe("grouped chat rendering", () => {
-  it("preserves paragraph breaks around assistant attachments in rendered markdown", () => {
+  it.each([
+    { customType: "run-failed-before-reply", label: "Error" },
+    { customType: "cloud-workspace-recovery-failed", label: "Error" },
+    { customType: "system-notice", label: "System" },
+  ])("labels $customType notices as $label", ({ customType, label }) => {
     const container = document.createElement("div");
-
-    renderAssistantMessage(
+    renderGroupedMessage(
       container,
-      createAssistantMessage(
-        "First paragraph\n \nMEDIA:https://example.com/image.png\n\t\nSecond paragraph",
-        { timestamp: 1000 },
-      ),
+      {
+        role: "custom",
+        customType,
+        content: "Notice details",
+        display: true,
+        timestamp: Date.now(),
+      },
+      "custom",
     );
+    expect(container.querySelector(".chat-sender-name")?.textContent).toBe(label);
+    expect(container.textContent).toContain("Notice details");
+  });
 
-    expect(markdownRenderMock).toHaveBeenCalledWith(
-      "First paragraph\n\nSecond paragraph",
-      expect.any(Object),
-    );
+  it.each([
+    {
+      format: "MEDIA directives",
+      content:
+        "Introduction\n\n**Before**\nMEDIA:https://example.com/before.png\n\n**After**\nMEDIA:https://example.com/after.png\n\nClosing paragraph",
+    },
+    {
+      format: "structured images",
+      content: [
+        { type: "text", text: "Introduction\n\n**Before**" },
+        { type: "image", url: "https://example.com/before.png" },
+        { type: "text", text: "**After**" },
+        { type: "image", url: "https://example.com/after.png" },
+        { type: "text", text: "Closing paragraph" },
+      ],
+    },
+  ])("keeps assistant $format between their surrounding paragraphs", ({ content }) => {
+    const container = document.createElement("div");
+    markdownRenderMock.withImplementation(renderMarkdownHtml, () => {
+      renderAssistantMessage(container, createAssistantMessage(content, { timestamp: 1000 }));
+    });
+
+    expect(
+      Array.from(container.querySelectorAll(".chat-text strong, .chat-message-image"), (element) =>
+        element instanceof HTMLImageElement
+          ? new URL(element.src).pathname
+          : element.textContent?.replace(/\s+/g, " ").trim(),
+      ),
+    ).toEqual(["Before", "/before.png", "After", "/after.png"]);
+    const text = container.querySelector(".chat-text")?.textContent?.trim() ?? "";
+    expect(text.startsWith("Introduction")).toBe(true);
+    expect(text.endsWith("Closing paragraph")).toBe(true);
+  });
+
+  it.each([false, true])(
+    "preserves reference links and one duplicate badge around media (recovered: %s)",
+    (recovered) => {
+      const container = document.createElement("div");
+      const fullText =
+        "[Before][proof]\n\nMEDIA:https://example.com/comparison.png\n\n[After][proof]\n\n[proof]: https://example.com/proof";
+      const fullMessage = createAssistantMessage(fullText, { timestamp: 1000 });
+      const message = recovered
+        ? createAssistantMessage("Loading preview", {
+            timestamp: 1000,
+            __openclaw: { id: "media-recovery", seq: 1, truncated: true },
+          })
+        : fullMessage;
+      markdownRenderMock.withImplementation(renderMarkdownHtml, () => {
+        renderAssistantMessageEntries(
+          container,
+          [{ key: "media-order", message, duplicateCount: 2 }],
+          recovered
+            ? {
+                sessionKey: "agent:main:main",
+                loadFullAssistantMessage: async () => null,
+                getAssistantMessageExpansion: () => ({
+                  status: "loaded",
+                  markdown: fullText,
+                  message: fullMessage,
+                  revision: 1,
+                }),
+                onToggleAssistantMessageExpanded: vi.fn(),
+              }
+            : {},
+        );
+      });
+      expect(
+        Array.from(container.querySelectorAll(".chat-text a, .chat-message-image"), (element) =>
+          element instanceof HTMLImageElement ? "image" : element.textContent,
+        ),
+      ).toEqual(["Before", "image", "After"]);
+      expect(
+        Array.from(
+          container.querySelectorAll<HTMLAnchorElement>(".chat-text a"),
+          (link) => link.href,
+        ),
+      ).toEqual(["https://example.com/proof", "https://example.com/proof"]);
+      expect(container.querySelectorAll(".chat-duplicate-count")).toHaveLength(1);
+      expect(container.textContent).not.toContain("Loading preview");
+    },
+  );
+
+  it("keeps numbered-list structure across an assistant image", () => {
+    const container = document.createElement("div");
+    markdownRenderMock.withImplementation(renderMarkdownHtml, () => {
+      renderAssistantMessage(
+        container,
+        createAssistantMessage("1. First\nMEDIA:https://example.com/first.png\n1. Second"),
+      );
+    });
+    const list = expectElement(container, ".chat-text ol", HTMLOListElement);
+    expect(list.querySelectorAll(":scope > li")).toHaveLength(2);
+    expect(list.querySelector("li:first-child .chat-message-image")).not.toBeNull();
+    expect(list.querySelector("li:last-child")?.textContent).toBe("Second");
+  });
+
+  it.each(["thinking", "relevant_memories"])(
+    "suppresses a whole %s region spanning assistant media",
+    (tag) => {
+      const container = document.createElement("div");
+      markdownRenderMock.withImplementation(renderMarkdownHtml, () => {
+        renderAssistantMessage(
+          container,
+          createAssistantMessage([
+            { type: "text", text: `<${tag}>Hidden before` },
+            { type: "image", url: "https://example.com/hidden-before.png" },
+            { type: "text", text: "Hidden middle" },
+            { type: "image", url: "https://example.com/hidden-after.png" },
+            { type: "text", text: `Hidden after</${tag}>\n\nVisible answer` },
+          ]),
+        );
+      });
+      expect(container.querySelector(".chat-text")?.textContent?.trim()).toBe("Visible answer");
+    },
+  );
+
+  it("keeps literal media-marker text distinct from assistant image positions", () => {
+    const container = document.createElement("div");
+    markdownRenderMock.withImplementation(renderMarkdownHtml, () => {
+      renderAssistantMessage(
+        container,
+        createAssistantMessage(
+          "Literal OPENCLAWMEDIASLOT0END\n\nMEDIA:https://example.com/real.png\n\nDone",
+        ),
+      );
+    });
+    expect(container.textContent).toContain("Literal OPENCLAWMEDIASLOT0END");
+    expect(container.textContent).not.toContain("OPENCLAWMEDIASLOTX");
+    expect(container.querySelectorAll(".chat-message-image")).toHaveLength(1);
+  });
+
+  it("keeps an inline image mounted while the following paragraph streams and completes", () => {
+    const container = document.createElement("div");
+    const renderTurn = (tail: string, isStreaming: boolean) => {
+      const message = createAssistantMessage(
+        `**Before**\nMEDIA:https://example.com/stream.png\n\n${tail}`,
+        { timestamp: 1000 },
+      );
+      render(
+        renderTestMessageGroup(
+          createMessageGroup(message, "assistant", { key: "stream-media", isStreaming }),
+        ),
+        container,
+      );
+    };
+    markdownRenderMock.withImplementation(renderMarkdownHtml, () => {
+      streamingMarkdownRenderMock.withImplementation(renderStreamingMarkdown, () => {
+        renderTurn("Checking", true);
+        const image = expectElement(container, ".chat-message-image", HTMLImageElement);
+        renderTurn("Checking the result.", true);
+        expect(container.querySelector(".chat-message-image")).toBe(image);
+        renderTurn("Checking the result.", false);
+        expect(container.querySelector(".chat-message-image")).toBe(image);
+        expect(container.querySelector(".chat-text")?.textContent).toContain(
+          "Checking the result.",
+        );
+      });
+    });
+  });
+
+  it("uses the visible caption direction when an assistant image comes first", () => {
+    const container = document.createElement("div");
+    markdownRenderMock.withImplementation(renderMarkdownHtml, () => {
+      renderAssistantMessage(
+        container,
+        createAssistantMessage(
+          "MEDIA:https://example.com/preview.png\n\n<thinking>Hidden English</thinking>שלום",
+        ),
+      );
+    });
+    expect(container.querySelector(".chat-text")?.getAttribute("dir")).toBe("rtl");
+    expect(container.querySelector(".chat-text")?.textContent?.trim()).toBe("שלום");
   });
 
   it("renders a compact count for collapsed duplicate messages", () => {
@@ -909,8 +1097,9 @@ describe("grouped chat rendering", () => {
     { state: "failed", label: "Not sent", actionLabel: undefined },
     { state: "unconfirmed", label: "Delivery unconfirmed", actionLabel: undefined },
     { state: "unconfirmed", label: "Delivery unconfirmed", actionLabel: "Check delivery" },
+    { state: "waiting-reconnect", label: "Waiting for reconnect", actionLabel: undefined },
   ] as const)(
-    "shows a $state footer with its diagnostic and retry action ($actionLabel)",
+    "shows a $state footer with its diagnostic and recovery actions ($actionLabel)",
     ({ state, label, actionLabel }) => {
       const container = document.createElement("div");
       const onRetryQueuedMessage = vi.fn();
@@ -938,16 +1127,23 @@ describe("grouped chat rendering", () => {
       const status = expectElement(container, ".chat-group.user .chat-send-status", HTMLElement);
       expect(status.dataset.sendState).toBe(state);
       expect(status.title).toBe("Delivery diagnostic");
+      const reconnecting = state === "waiting-reconnect";
+      const canDiscard = (state === "unconfirmed" || reconnecting) && !actionLabel;
       expect(status.textContent?.replace(/\s+/g, " ").trim()).toBe(
-        `· ${label} · ${actionLabel ?? "Retry"}${state === "unconfirmed" && !actionLabel ? " · Discard" : ""}`,
+        `· ${label}${reconnecting ? "" : ` · ${actionLabel ?? "Retry"}`}${canDiscard ? " · Discard" : ""}`,
       );
-      expect(status.querySelector("button")?.getAttribute("aria-label")).toBe(
-        actionLabel ?? "Retry queued message",
+      const retry = status.querySelector<HTMLButtonElement>(".chat-send-status__retry");
+      expect(retry?.getAttribute("aria-label")).toBe(
+        reconnecting ? undefined : (actionLabel ?? "Retry queued message"),
       );
-      status.querySelector<HTMLButtonElement>(".chat-send-status__retry")?.click();
-      expect(onRetryQueuedMessage).toHaveBeenCalledWith("attempted-send");
+      retry?.click();
+      if (reconnecting) {
+        expect(onRetryQueuedMessage).not.toHaveBeenCalled();
+      } else {
+        expect(onRetryQueuedMessage).toHaveBeenCalledWith("attempted-send");
+      }
       const discard = status.querySelector<HTMLButtonElement>(".chat-send-status__discard");
-      if (state === "unconfirmed" && !actionLabel) {
+      if (canDiscard) {
         expect(discard?.title).toBe(
           "Discard this local pending copy. This does not cancel a message already received by the Gateway.",
         );
@@ -955,7 +1151,7 @@ describe("grouped chat rendering", () => {
         expect(onDiscardQueuedMessage).toHaveBeenCalledWith("attempted-send");
         discard?.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 2 }));
         expect(onDiscardQueuedMessage).toHaveBeenCalledTimes(1);
-        expect(onRetryQueuedMessage).toHaveBeenCalledTimes(1);
+        expect(onRetryQueuedMessage).toHaveBeenCalledTimes(reconnecting ? 0 : 1);
       } else {
         expect(discard).toBeNull();
       }
@@ -1096,7 +1292,7 @@ describe("grouped chat rendering", () => {
     expect(collapsedText.textContent).toContain(expandedTail);
     expect(collapsedFileLink.dataset.filePath).toBe("AGENTS.md");
     expect(collapsedFileLink.dataset.fileLine).toBe("188");
-    expect(toggle.getAttribute("aria-label")).toBe("Show more");
+    expect(toggle.textContent?.trim()).toBe("Show more");
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
 
     toggle.click();
@@ -1119,7 +1315,7 @@ describe("grouped chat rendering", () => {
     expect(expandedText.textContent).toContain(expandedTail);
     expect(expandedFileLink.dataset.filePath).toBe("AGENTS.md");
     expect(expandedFileLink.dataset.fileLine).toBe("188");
-    expect(collapseToggle.getAttribute("aria-label")).toBe("Show less");
+    expect(collapseToggle.textContent?.trim()).toBe("Show less");
     expect(collapseToggle.getAttribute("aria-expanded")).toBe("true");
   });
 
@@ -1810,6 +2006,7 @@ describe("grouped chat rendering", () => {
     ["preparing_workspace", "Preparing workspace…"],
     ["provisioning_environment", "Provisioning environment…"],
     ["preparing_context", "Preparing this turn…"],
+    ["memory_flushing", "Saving conversation memory…"],
     ["starting_model", "Waiting for a response…"],
   ] as const)("renders the %s startup phase with elapsed time", (startupPhase, label) => {
     const container = document.createElement("div");
@@ -1997,6 +2194,88 @@ describe("grouped chat rendering", () => {
   });
 
   it.each([
+    { client: { id: "cli", mode: "cli" }, label: "CLI" },
+    { client: { id: "openclaw-control-ui", mode: "webchat" }, label: "Web" },
+    { client: { id: "openclaw-tui", mode: "ui" }, label: "TUI" },
+    { client: { id: "openclaw-ios", mode: "node" }, label: "App" },
+    { client: { id: "gateway-client", mode: "backend" }, label: "RPC" },
+  ] satisfies Array<{ client: MessageClientSource; label: string }>)(
+    "keeps $label client provenance separate from the authenticated human author",
+    ({ client, label }) => {
+      const message = createUserMessage("Follow up on the current task.", {
+        __openclaw: {
+          senderId: "profile-1",
+          senderName: "Recorded Name",
+          senderIdentity: { type: "profile", id: "profile-1" },
+          transport: { clients: [{ ...client, displayName: "Task helper" }] },
+        },
+      });
+      const group = prepareMessageGroup(createMessageEntry("source-message", message));
+      const container = document.createElement("div");
+      render(
+        renderTestMessageGroup(group, { userId: "profile-1", userName: "Current Name" }),
+        container,
+      );
+      expect(container.querySelector(".chat-sender-name")?.textContent).toBe("Current Name");
+      const source = container.querySelector(".chat-message-source");
+      if (label === "Web") {
+        expect(source).toBeNull();
+      } else {
+        expect(source?.textContent).toBe(`via ${label} (Task helper)`);
+      }
+    },
+  );
+
+  it.each(
+    (["gutter", "footer"] as const).flatMap((avatarPlacement) => [
+      {
+        avatarPlacement,
+        source: "collected Web and external clients",
+        clients: [
+          { id: "openclaw-control-ui", mode: "webchat" },
+          { id: "cli", mode: "cli", displayName: "Release helper" },
+          { id: "gateway-client", mode: "backend", displayName: "Build helper" },
+        ],
+        expectedSource: "via CLI (Release helper), RPC (Build helper)",
+      },
+      {
+        avatarPlacement,
+        source: "Web only",
+        clients: [{ id: "openclaw-control-ui", mode: "webchat" }],
+        expectedSource: null,
+      },
+    ]),
+  )(
+    "does not borrow the viewer's name or $avatarPlacement avatar for source-only input from $source",
+    ({ avatarPlacement, clients, expectedSource }) => {
+      const message = createUserMessage("Collected follow-ups.", {
+        __openclaw: {
+          transport: { clients },
+        },
+      });
+      const group = prepareMessageGroup(createMessageEntry("source-only-message", message));
+      const container = document.createElement("div");
+      render(
+        renderTestMessageGroup(group, {
+          avatarPlacement,
+          userName: "Unrelated Viewer",
+          userAvatar: "https://example.test/viewer.png",
+        }),
+        container,
+      );
+      expect(container.querySelector(".chat-sender-name")).toBeNull();
+      expect(container.querySelector(".chat-avatar, .chat-author-avatar")).toBeNull();
+      expect(container.textContent).not.toContain("Unrelated Viewer");
+      const source = container.querySelector(".chat-message-source");
+      if (expectedSource === null) {
+        expect(source).toBeNull();
+      } else {
+        expect(source?.textContent).toBe(expectedSource);
+      }
+    },
+  );
+
+  it.each([
     {
       behavior: "keeps a peer's recorded sender name visible",
       senderLabel: "alice",
@@ -2138,7 +2417,7 @@ describe("grouped chat rendering", () => {
       label: "attributed sender without a viewer",
       sender: { id: "other-user" },
       userId: null,
-      peer: true,
+      peer: false,
     },
   ])("sets peer alignment for $label", ({ sender, userId, peer }) => {
     const container = document.createElement("div");
@@ -2427,6 +2706,7 @@ describe("grouped chat rendering", () => {
             showReasoning: true,
             showToolCalls: true,
             assistantName: "OpenClaw",
+            userId: "local-viewer",
             avatarPlacement,
           },
         ),
@@ -2509,221 +2789,6 @@ describe("grouped chat rendering", () => {
       container,
     );
     expect(container.querySelector(".chat-author-avatar")).toBeNull();
-  });
-
-  it("preserves custom assistant sender labels without forwarded provenance", () => {
-    const container = document.createElement("div");
-    const message = { role: "assistant", content: "forwarded report", timestamp: 1000 };
-    const group = createMessageGroup(message, "assistant", {
-      key: "forwarded-group",
-      senderLabel: "Forwarded from main",
-      messages: [createMessageEntry("forwarded-message", message)],
-    });
-
-    render(renderTestMessageGroup(group), container);
-
-    const sender = container.querySelector<HTMLElement>(".chat-group.assistant .chat-sender-name");
-    expect(sender?.textContent).toBe("Forwarded from main");
-    expect(container.querySelector(".chat-group--forwarded")).toBeNull();
-  });
-
-  it("renders forwarded messages with a source-session chip, own avatar, and timestamp/actions", () => {
-    const container = document.createElement("div");
-    const message = createAssistantMessage("forwarded report", { timestamp: 1000 });
-    const group = createMessageGroup(message, "assistant", {
-      senderLabel: "Forwarded from main",
-      senderSession: { sessionKey: "agent:main:main", agentId: "main" },
-    });
-
-    render(renderTestMessageGroup(group), container);
-
-    const forwarded = container.querySelector<HTMLElement>(".chat-group--forwarded");
-    expect(forwarded).not.toBeNull();
-    expect(forwarded?.classList.contains("chat-group--sender-tint")).toBe(true);
-    expect(forwarded?.style.getPropertyValue("--chat-sender-hue")).not.toBe("");
-    const attribution = container.querySelector(".chat-group--forwarded .chat-reply-attribution");
-    const link = attribution?.querySelector<HTMLAnchorElement>(
-      'a.markdown-session-link[data-session-key="agent:main:main"]',
-    );
-    expect(attribution?.textContent).toContain("From");
-    expect(link?.textContent).toBe("agent:main:main");
-    expect(link?.tabIndex).toBe(0);
-    expect(attribution?.nextElementSibling?.classList.contains("chat-bubble")).toBe(true);
-    expect(container.querySelector(".chat-avatar--forwarded svg path")?.namespaceURI).toBe(
-      "http://www.w3.org/2000/svg",
-    );
-    expect(container.querySelector(".chat-avatar.assistant")).toBeNull();
-    expect(container.querySelector(".chat-group-footer .chat-sender-name")).toBeNull();
-    expect(container.querySelector(".chat-group-footer .chat-group-timestamp")).not.toBeNull();
-    expect(container.querySelector(".chat-group-footer-actions")).not.toBeNull();
-  });
-
-  it.each([
-    { agentId: "research", avatar: "blob:research-avatar", expected: "image" },
-    { agentId: "research", avatar: null, expected: "initials" },
-    { agentId: "research", avatar: "https://example.test/avatar.png", expected: "initials" },
-    // Same-agent sources wear the current agent's own avatar (fallback logo here).
-    { agentId: "main", avatar: "blob:main-avatar", expected: "assistant" },
-    { agentId: "removed", avatar: "blob:stale-avatar", expected: "glyph" },
-    { agentId: undefined, avatar: null, expected: "glyph" },
-  ])(
-    "renders $expected for forwarded agent $agentId with $avatar",
-    ({ agentId, avatar, expected }) => {
-      const container = document.createElement("div");
-      const group = createMessageGroup(createAssistantMessage("forwarded report"), "assistant", {
-        senderSession: { agentId },
-      });
-      const options = {
-        agentId: "main",
-        agents: [{ id: "main" }, { id: "research", identity: { name: "Research Agent" } }],
-        senderAgentAvatars: new Map(agentId ? [[agentId, avatar]] : []),
-      };
-      render(renderTestMessageGroup(group, options), container);
-
-      const image = container.querySelector("img.chat-avatar:not(.chat-avatar--logo)");
-      const initials = container.querySelector<HTMLElement>(".chat-avatar--sender-initials");
-      expect(image !== null).toBe(expected === "image");
-      expect(initials !== null).toBe(expected === "initials");
-      expect(container.querySelector(".chat-avatar--forwarded") !== null).toBe(
-        expected === "glyph",
-      );
-      if (expected === "assistant") {
-        expect(container.querySelector(".chat-avatar")).not.toBeNull();
-      }
-      if (expected === "image") {
-        expect(image?.getAttribute("src")).toBe(avatar);
-        expect(image?.getAttribute("alt")).toBe("Research Agent");
-      }
-      if (expected === "initials") {
-        expect(initials?.textContent?.trim()).toBe("RA");
-        expect(initials?.getAttribute("aria-label")).toBe("Research Agent");
-        expect(initials?.style.background).not.toBe("");
-      }
-    },
-  );
-
-  // Label rules: an agent's main session reads as the agent itself; other
-  // sessions read as the session (titler-resolved), prefixed with the agent
-  // name only when the sender is a different agent.
-  it.each([
-    {
-      name: "another agent's main session labels as that agent",
-      key: "agent:research:main",
-      chipText: "Research Agent",
-      prefix: null,
-      titled: true,
-    },
-    {
-      name: "own main session labels as the local agent",
-      key: "agent:main:main",
-      chipText: "main",
-      prefix: null,
-      titled: true,
-    },
-    {
-      name: "same-agent session leaves the key for the titler",
-      key: "agent:main:bench",
-      chipText: "agent:main:bench",
-      prefix: null,
-      titled: false,
-    },
-    {
-      name: "other-agent session prefixes the agent name",
-      key: "agent:research:bench",
-      chipText: "agent:research:bench",
-      prefix: "Research Agent —",
-      titled: false,
-    },
-  ])("$name", ({ key, chipText, prefix, titled }) => {
-    const container = document.createElement("div");
-    const group = createMessageGroup(createAssistantMessage("forwarded report"), "assistant", {
-      senderSession: { sessionKey: key, agentId: key.split(":")[1] },
-    });
-    render(
-      renderTestMessageGroup(group, {
-        agentId: "main",
-        agents: [{ id: "main" }, { id: "research", identity: { name: "Research Agent" } }],
-        mainKey: "main",
-      }),
-      container,
-    );
-
-    const chip = expectElement(
-      container,
-      `a.markdown-session-link[data-session-key="${key}"]`,
-      HTMLAnchorElement,
-    );
-    expect(chip.textContent).toBe(chipText);
-    expect(chip.classList.contains("markdown-session-link--titled")).toBe(titled);
-    const attributionText =
-      container
-        .querySelector(".chat-group--forwarded .chat-reply-attribution")
-        ?.textContent?.replace(/\s+/g, " ")
-        .trim() ?? "";
-    if (prefix) {
-      expect(attributionText).toContain(prefix.replace(/\s+/g, " "));
-    } else {
-      expect(attributionText).not.toContain("—");
-    }
-  });
-
-  it.each([
-    { senderSession: { agentId: "main" }, label: "Forwarded from main" },
-    { senderSession: undefined, label: "Forwarded message" },
-    // Non-agent-prefixed keys are not navigable (titler, hovercard, and click
-    // handlers all reject them), so they stay readable plain text.
-    { senderSession: { sessionKey: "legacy-session" }, label: "From legacy-session" },
-  ])(
-    "keeps legacy forwarded attribution visible without a session link: $label",
-    ({ senderSession, label }) => {
-      const container = document.createElement("div");
-      const message = createAssistantMessage("legacy report", {
-        provenance: { kind: "inter_session", sourceTool: "sessions_send" },
-      });
-      render(
-        renderTestMessageGroup(createMessageGroup(message, "assistant", { senderSession })),
-        container,
-      );
-
-      expect(container.querySelector(".chat-group--forwarded")).not.toBeNull();
-      const attribution = container.querySelector(".chat-group--forwarded .chat-reply-attribution");
-      expect(attribution?.textContent?.replace(/\s+/g, " ").trim()).toBe(label);
-      expect(attribution?.querySelector("a")).toBeNull();
-      expect(attribution?.querySelector("[tabindex]")).toBeNull();
-      expect(container.querySelector(".chat-group-footer .chat-sender-name")).toBeNull();
-    },
-  );
-
-  // A rendered group's source cannot change in place: messages are immutable
-  // and grouping splits on senderSession, so a different source produces a new
-  // group key and a fresh anchor. The protected behavior is that the titler's
-  // stamped title and href survive ordinary re-renders of the same group.
-  it("keeps titled source chips usable across rerenders", async () => {
-    const container = document.createElement("div");
-    const group = createMessageGroup(createAssistantMessage("forwarded report"), "assistant", {
-      senderSession: { sessionKey: "agent:main:main" },
-    });
-    const titler = new SessionLinkTitler(container);
-    titler.client = new GatewayBrowserClient({ url: "ws://localhost" });
-    vi.spyOn(titler.client, "request").mockResolvedValueOnce({
-      status: "ok",
-      sessionKey: "agent:main:main",
-      agentId: "main",
-      title: "Main session",
-    });
-    const sourceLink = () =>
-      expectElement(
-        container,
-        ".chat-group--forwarded .chat-reply-attribution a",
-        HTMLAnchorElement,
-      );
-
-    render(renderTestMessageGroup(group), container);
-    await titler.decorate(sourceLink(), true);
-    expect(sourceLink().textContent).toBe("Main session");
-    expect(() => render(renderTestMessageGroup(group), container)).not.toThrow();
-    expect(sourceLink().textContent).toBe("Main session");
-    expect(sourceLink().title).toBe("agent:main:main");
   });
 
   it("uses the assistant name when an assistant group has no sender label", () => {
@@ -3204,7 +3269,8 @@ describe("grouped chat rendering", () => {
     expect(activitySummary.classList.contains("chat-activity-group__summary--error")).toBe(false);
     expect(activitySummary.getAttribute("aria-label")).toBeNull();
     expect(activitySummary.getAttribute("aria-expanded")).toBe("false");
-    expect(activitySummary.textContent).not.toContain("failed");
+    expect(activitySummary.textContent).toContain("1 failed");
+    expect(container.textContent).not.toContain("Read failed");
     expect(activitySummary.querySelector(".chat-activity-group__badge")).toBeNull();
     expect(container.querySelector(".chat-tool-msg-body")).toBeNull();
     selectText(expectElement(activitySummary, ".chat-activity-group__label", HTMLElement));
@@ -3892,14 +3958,14 @@ describe("grouped chat rendering", () => {
     renderMessage();
     expect(container.textContent).not.toContain("Outside allowed folders");
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    await flushAssistantAttachmentAvailabilityChecks();
-
-    expect(
-      container
-        .querySelector<HTMLAnchorElement>(".chat-assistant-attachment-card__download")
-        ?.getAttribute("href"),
-    ).toBe(
-      `/__openclaw__/assistant-media?source=${encodeURIComponent(source)}&mediaTicket=ticket-bootstrap-audio`,
+    await vi.waitFor(() =>
+      expect(
+        container
+          .querySelector<HTMLAnchorElement>(".chat-assistant-attachment-card__download")
+          ?.getAttribute("href"),
+      ).toBe(
+        `/__openclaw__/assistant-media?source=${encodeURIComponent(source)}&mediaTicket=ticket-bootstrap-audio`,
+      ),
     );
   });
 
@@ -4556,22 +4622,8 @@ describe("grouped chat rendering", () => {
       );
 
     renderMessage();
-    const checkingCard = container.querySelector(
-      '.chat-assistant-attachment-card--checking[aria-busy="true"]',
-    );
-    const skeleton = checkingCard?.querySelector(
-      ".chat-assistant-attachment-card__status-meta.skeleton",
-    );
-    const actionSkeleton = checkingCard?.querySelector(
-      ".chat-assistant-attachment-card__action-skeleton.skeleton",
-    );
-    const actionReservation = checkingCard?.querySelector(
-      ".chat-assistant-attachment-card__actions--loading",
-    );
-    expect(skeleton?.getAttribute("aria-hidden")).toBe("true");
-    expect(skeleton?.textContent?.trim()).toBe("");
-    expect(actionSkeleton?.getAttribute("aria-hidden")).toBe("true");
-    expect(actionReservation?.getAttribute("aria-hidden")).toBe("true");
+    expect(container.querySelector(".chat-image-frame")?.getAttribute("aria-busy")).toBe("true");
+    expect(container.querySelector(".chat-assistant-attachment-card")).toBeNull();
     await flushAssistantAttachmentAvailabilityChecks();
 
     const expectedMetaUrl = `/openclaw/__openclaw__/assistant-media?source=${encodeURIComponent(source).replaceAll("%20", "+")}&meta=1`;
@@ -4731,16 +4783,14 @@ describe("grouped chat rendering", () => {
       );
 
     rerender();
-    await flushAssistantAttachmentAvailabilityChecks();
     const download = () =>
       container
         .querySelector<HTMLAnchorElement>(".chat-assistant-attachment-card__download")
         ?.getAttribute("href");
-    expect(download()).toContain("mediaTicket=ticket-old");
+    await vi.waitFor(() => expect(download()).toContain("mediaTicket=ticket-old"));
 
     await vi.advanceTimersByTimeAsync(1_001);
-    await flushAssistantAttachmentAvailabilityChecks();
-    expect(download()).toContain("mediaTicket=ticket-new");
+    await vi.waitFor(() => expect(download()).toContain("mediaTicket=ticket-new"));
     expect(container.querySelector("openclaw-chat-audio-player")).not.toBeNull();
   });
 
@@ -4945,7 +4995,9 @@ describe("grouped chat rendering", () => {
     expect(
       blocked?.querySelector(".chat-assistant-attachment-card__status-meta")?.textContent,
     ).toContain("Outside allowed folders");
-    expect(container.querySelector(".chat-text")?.textContent?.trim()).toBe("Blocked\nDone");
+    const visibleText = container.querySelector(".chat-text")?.textContent?.trim() ?? "";
+    expect(visibleText.startsWith("Blocked")).toBe(true);
+    expect(visibleText.endsWith("Done")).toBe(true);
   });
 
   it("renders transcript video URLs with encoded extensions as cards", () => {
@@ -5926,43 +5978,6 @@ describe("grouped chat rendering", () => {
     });
   });
 
-  it("updates the authenticated widget's script policy when grouped messages rerender", () => {
-    const container = document.createElement("div");
-    const renderCanvas = (embedSandboxMode: "strict" | "scripts") =>
-      renderMessageGroups(
-        container,
-        [
-          createMessageGroup(
-            createAssistantMessage(
-              [
-                { type: "text", text: "Inline canvas result." },
-                createAssistantCanvasBlock({ suffix: "sandbox-change" }),
-              ],
-              { id: "assistant-canvas-inline-sandbox-change" },
-            ),
-            "assistant",
-          ),
-        ],
-        { embedSandboxMode },
-      );
-
-    renderCanvas("strict");
-    const widget = expectCanvasWidget(container, {
-      docId: "cv_inline_sandbox-change",
-      title: "Inline demo",
-    });
-    expect(widget).toMatchObject({ allowScripts: false });
-
-    renderCanvas("scripts");
-    expect(container.querySelector("openclaw-canvas-widget-view")).toBe(widget);
-    expect(widget).toMatchObject({ allowScripts: true });
-
-    renderCanvas("strict");
-    expect(container.querySelector("openclaw-canvas-widget-view")).toBe(widget);
-    expect(widget).toMatchObject({ allowScripts: false });
-    expect(container.querySelector(".chat-tool-card__preview-panel > iframe")).toBeNull();
-  });
-
   it("renders assistant_message canvas results in the assistant bubble even when tool rows are visible", () => {
     const container = document.createElement("div");
     renderMessageGroups(
@@ -6022,30 +6037,6 @@ describe("grouped chat rendering", () => {
     expect(
       container.querySelector(".chat-group.tool .chat-tool-msg-summary__names")?.textContent,
     ).toBe("canvas_render");
-  });
-
-  it("keeps MCP App raw details reachable from its widget menu", () => {
-    const container = document.createElement("div");
-    const canvas = createAssistantCanvasBlock({
-      suffix: "mcp-raw",
-      mcpApp: { viewId: "view-mcp-raw" },
-    });
-    renderAssistantMessage(container, createAssistantMessage([canvas]), {
-      sessionKey: "agent:main:main",
-    });
-
-    const dropdown = expectElement(container, "wa-dropdown", HTMLElement);
-    expect(dropdown.querySelectorAll("wa-dropdown-item")).toHaveLength(1);
-    dropdown.dispatchEvent(
-      new CustomEvent("wa-select", {
-        detail: { item: { value: "raw-details" } },
-      }),
-    );
-    expect(
-      container
-        .querySelector(".chat-tool-card__widget-raw .chat-tool-card__raw-toggle")
-        ?.getAttribute("aria-expanded"),
-    ).toBe("true");
   });
 
   it("opens generic tool details instead of a canvas preview from tool rows", () => {

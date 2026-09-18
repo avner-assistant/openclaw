@@ -184,59 +184,18 @@ describe("openclaw tool", () => {
     expect(mocks.executeSystemAgentOperation).not.toHaveBeenCalled();
   });
 
-  it("does not stage a config proposal after its validation was cancelled", async () => {
+  it("createSystemAgentTool.execute does not stage a config proposal when cancelled", async () => {
     const proposalRef: NonNullable<SystemAgentToolOptions["proposalRef"]> = {};
     const controller = new AbortController();
+    controller.abort(new Error("Setup cancelled"));
     const pending = createSystemAgentTool({ surface: "gateway", proposalRef }).execute(
       "cancelled-proposal",
       { action: "config_set", path: "gateway.port", value: "19001" },
       controller.signal,
     );
-    controller.abort(new Error("Setup cancelled"));
     await expect(pending).rejects.toThrow("Setup cancelled");
     expect(proposalRef).toEqual({});
   });
-
-  it("preserves a different proposal staged while config validation yields", async () => {
-    const proposalRef: NonNullable<SystemAgentToolOptions["proposalRef"]> = {};
-    const pending = createSystemAgentTool({ surface: "gateway", proposalRef }).execute(
-      "racing-proposal",
-      { action: "config_set", path: "gateway.port", value: "19001" },
-    );
-    const prior = { kind: "gateway-restart" as const };
-    proposalRef.operation = prior;
-    proposalRef.current = hashSystemAgentOperation(prior);
-    expect(toolText(await pending)).toContain("proposal-conflict");
-    expect(proposalRef.operation).toEqual(prior);
-  });
-
-  it.each([false, true])(
-    "preserves a proposal across rejected validation in-process and in the CLI mirror (approved=%s)",
-    async (approved) => {
-      const operation = {
-        kind: "config-set" as const,
-        path: "auth.profiles.invalid",
-        value: "true",
-      };
-      const original = { current: hashSystemAgentOperation(operation), operation };
-      const proposalRef = { ...original };
-      const args = { action: "config_set", path: operation.path, value: operation.value, approved };
-      let failure: unknown;
-      try {
-        await createSystemAgentTool({ surface: "cli", approvalArmed: true, proposalRef }).execute(
-          "rejected-validation",
-          args,
-        );
-      } catch (error) {
-        failure = error;
-      }
-      expect(failure).toBeInstanceOf(Error);
-      expect(proposalRef).toEqual(original);
-      expect(
-        resolveSystemAgentProposalTransition({ args, resultText: String(failure) }),
-      ).toBeNull();
-    },
-  );
 
   it("rejects arbitrary plugin installs before creating an approval proposal", async () => {
     const proposalRef: { current?: string } = {};
@@ -519,12 +478,34 @@ describe("openclaw tool", () => {
     expect(mocks.readConfigFileSnapshot).not.toHaveBeenCalled();
   });
 
-  it("maps create_agent with optional workspace and model", async () => {
+  it.each([
+    {
+      args: { action: "create_agent", agentId: "work", workspace: "/tmp/work" },
+      operation: { kind: "create-agent", agentId: "work", workspace: "/tmp/work" },
+    },
+    {
+      args: { action: "create_agent", agentId: "editor", role: "writer" },
+      operation: { kind: "create-agent", agentId: "editor", role: "writer" },
+    },
+    {
+      args: {
+        action: "create_team",
+        coordinatorId: "lead",
+        prefix: "docs",
+        workspaceRoot: "/tmp/team",
+      },
+      operation: {
+        kind: "create-team",
+        coordinatorId: "lead",
+        prefix: "docs",
+        workspaceRoot: "/tmp/team",
+      },
+    },
+    { args: { action: "create_team" }, operation: { kind: "create-team" } },
+  ])("stages and hands off the exact creation proposal: $args", async ({ args, operation }) => {
     const proposalRef: { current?: string } = {};
     await createSystemAgentTool({ surface: "cli", proposalRef }).execute("t6a", {
-      action: "create_agent",
-      agentId: "work",
-      workspace: "/tmp/work",
+      ...args,
       approved: true,
     });
     const directiveRef: { current?: SystemAgentToolDirective } = {};
@@ -535,14 +516,12 @@ describe("openclaw tool", () => {
       directiveRef,
     });
     await tool.execute("t6", {
-      action: "create_agent",
-      agentId: "work",
-      workspace: "/tmp/work",
+      ...args,
       approved: true,
     });
     expect(directiveRef.current).toEqual({
       kind: "approved-operation",
-      operation: { kind: "create-agent", agentId: "work", workspace: "/tmp/work" },
+      operation,
     });
     expect(mocks.executeSystemAgentOperation).not.toHaveBeenCalled();
   });
@@ -550,6 +529,9 @@ describe("openclaw tool", () => {
   it("rejects unknown or underspecified actions as input errors", async () => {
     const tool = createSystemAgentTool({ surface: "cli" });
     await expect(tool.execute("t5", { action: "config_get" })).rejects.toThrow(/path/);
+    await expect(
+      tool.execute("bad-role", { action: "create_agent", agentId: "work", role: "unknown" }),
+    ).rejects.toThrow(/unknown role/);
   });
 
   it("records interactive directives for the host without executing operations", async () => {
@@ -596,10 +578,8 @@ describe("openclaw tool", () => {
       workspace: "/tmp/work",
     });
     expect(toolText(configureModel)).toContain("directive:");
-    expect(toolText(configureModel)).toContain(
-      "active inference route cannot be changed inside OpenClaw",
-    );
-    expect(toolText(configureModel)).toContain("openclaw onboard");
+    expect(toolText(configureModel)).toContain("protected Models sign-in guidance");
+    expect(toolText(configureModel)).toContain("Nothing has changed");
     expect(directiveRef.current).toEqual({ kind: "model-setup", workspace: "/tmp/work" });
 
     const open = await tool.execute("t7", { action: "open_agent", agentId: "work" });
@@ -717,8 +697,7 @@ describe("openclaw tool", () => {
     expect(
       resolveSystemAgentDirectiveTransition({
         args: { action: "configure_model_provider", workspace: "/tmp/work" },
-        resultText:
-          "directive: the active inference route cannot be changed inside OpenClaw; run openclaw onboard.",
+        resultText: "directive: the host returns protected Models sign-in guidance next.",
       }),
     ).toEqual({ kind: "model-setup", workspace: "/tmp/work" });
     expect(

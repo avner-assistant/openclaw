@@ -30,6 +30,7 @@ import {
   REQUEST,
   seedActivePlacement,
 } from "./worker-environments/placement-dispatch-test-fixtures.js";
+import { seedAttachedPlacementEnvironment } from "./worker-environments/placement-test-fixtures.js";
 
 const mocks = githubPublicationTestMocks();
 const checkpoint = vi.hoisted(() => vi.fn());
@@ -41,6 +42,19 @@ function repositoryFixture(
   session?: Parameters<typeof createRepositoryPublicationFixture>[2],
 ) {
   return createRepositoryPublicationFixture(checkpoint, requestedRef, session);
+}
+
+function seedPublicationWorker(
+  placements: Parameters<typeof seedActivePlacement>[0],
+  environmentId: string,
+  executionMode: "worker-turn" | "remote-exec" = "worker-turn",
+) {
+  const owner = { environmentId, ownerEpoch: 7 };
+  seedAttachedPlacementEnvironment(openOpenClawStateDatabase(), {
+    ...owner,
+    sessionId: REQUEST.sessionId,
+  });
+  return seedActivePlacement(placements, { ...owner, executionMode });
 }
 
 describe("repository checkpoint GitHub publication", () => {
@@ -276,6 +290,8 @@ describe("repository checkpoint GitHub publication", () => {
       code: "no_changes",
     });
     expect(f.casRequests).toHaveLength(1);
+    expect(f.runtime.head).toBe(previousHead);
+    expect(f.runtime.effects).toEqual(["push", "pull_request"]);
     await f.capture(null, "complete-revert");
     const reverted = await publish("complete-revert");
     expect(reverted).toMatchObject({ status: "published", url });
@@ -292,11 +308,16 @@ describe("repository checkpoint GitHub publication", () => {
     });
     expect(f.runtime.effects).toEqual(["push", "pull_request", "push"]);
     f.runtime.head = "f".repeat(40);
+    const commandsBefore = mocks.runCommand.mock.calls.length;
     expect(await publish("foreign-head-after-revert")).toMatchObject({
       status: "failed",
       code: "push_rejected",
+      nextAction: expect.stringContaining("published head"),
     });
     expect(f.casRequests).toHaveLength(2);
+    expect(
+      mocks.runCommand.mock.calls.slice(commandsBefore).some(([args]) => args.includes("POST")),
+    ).toBe(false);
   });
 
   it("does not recreate a deleted branch when a prior published head was recorded", async () => {
@@ -554,11 +575,7 @@ describe("repository checkpoint GitHub publication", () => {
       let held: Promise<void> | undefined;
       try {
         if (blocker === "pending result") {
-          seedActivePlacement(blocked.placements, {
-            environmentId: "pending-publication-worker",
-            ownerEpoch: 7,
-            executionMode: "remote-exec",
-          });
+          seedPublicationWorker(blocked.placements, "pending-publication-worker", "remote-exec");
           const pendingClaim = blocked.placements.claimTurn({
             sessionId: REQUEST.sessionId,
             sessionKey: REQUEST.sessionKey,
@@ -623,11 +640,7 @@ describe("repository checkpoint GitHub publication", () => {
     "settles the accepted checkpoint for an in-turn $executionMode request with publication $publication",
     async ({ executionMode, publication }) => {
       const f = await repositoryFixture(undefined, REQUEST);
-      seedActivePlacement(f.placements, {
-        environmentId: "in-turn-worker",
-        ownerEpoch: 7,
-        executionMode,
-      });
+      seedPublicationWorker(f.placements, "in-turn-worker", executionMode);
       const claim = f.placements.claimTurn({
         sessionId: REQUEST.sessionId,
         sessionKey: REQUEST.sessionKey,
@@ -696,11 +709,7 @@ describe("repository checkpoint GitHub publication", () => {
     async (executionMode) => {
       const f = await repositoryFixture(undefined, REQUEST);
       if (executionMode) {
-        seedActivePlacement(f.placements, {
-          environmentId: "run-scoped-worker",
-          ownerEpoch: 7,
-          executionMode,
-        });
+        seedPublicationWorker(f.placements, "run-scoped-worker", executionMode);
         f.placements.claimTurn({
           sessionId: REQUEST.sessionId,
           sessionKey: REQUEST.sessionKey,
@@ -757,11 +766,7 @@ describe("repository checkpoint GitHub publication", () => {
     "rejects a remote-exec publication with a %s before recording an intent",
     async (mismatch) => {
       const f = await repositoryFixture(undefined, REQUEST);
-      seedActivePlacement(f.placements, {
-        environmentId: "owned-worker",
-        ownerEpoch: 7,
-        executionMode: "remote-exec",
-      });
+      seedPublicationWorker(f.placements, "owned-worker", "remote-exec");
       const input = {
         sessionId: REQUEST.sessionId,
         sessionKey: REQUEST.sessionKey,
@@ -804,43 +809,36 @@ describe("repository checkpoint GitHub publication", () => {
     "does not bind, process, or defer a request whose %s belongs to a different claim",
     async (column) => {
       const f = await repositoryFixture();
+      seedAttachedPlacementEnvironment(openOpenClawStateDatabase(), {
+        environmentId: "publication-worker",
+        sessionId: SESSION_ID,
+        ownerEpoch: 7,
+      });
       let placement = f.placements.startDispatch({
         sessionId: SESSION_ID,
         sessionKey: SESSION_KEY,
         agentId: "main",
         executionMode: "worker-turn",
       });
-      placement = f.placements.transition({
-        sessionId: SESSION_ID,
-        from: "requested",
-        to: "provisioning",
-        expectedGeneration: placement.generation,
-        patch: { environmentId: "publication-worker" },
-      });
-      placement = f.placements.transition({
-        sessionId: SESSION_ID,
-        from: "provisioning",
-        to: "syncing",
-        expectedGeneration: placement.generation,
-        patch: { workerBundleHash: "b".repeat(64) },
-      });
-      placement = f.placements.transition({
-        sessionId: SESSION_ID,
-        from: "syncing",
-        to: "starting",
-        expectedGeneration: placement.generation,
-        patch: {
-          workspaceBaseManifestRef: "sha256:" + "1".repeat(64),
-          remoteWorkspaceDir: "/worker/workspace",
+      for (const step of [
+        { to: "provisioning", patch: { environmentId: "publication-worker" } },
+        { to: "syncing", patch: { workerBundleHash: "b".repeat(64) } },
+        {
+          to: "starting",
+          patch: {
+            workspaceBaseManifestRef: "sha256:" + "1".repeat(64),
+            remoteWorkspaceDir: "/worker/workspace",
+          },
         },
-      });
-      f.placements.transition({
-        sessionId: SESSION_ID,
-        from: "starting",
-        to: "active",
-        expectedGeneration: placement.generation,
-        patch: { activeOwnerEpoch: 7 },
-      });
+        { to: "active", patch: { activeOwnerEpoch: 7 } },
+      ] as const) {
+        placement = f.placements.transition({
+          sessionId: SESSION_ID,
+          from: placement.state,
+          expectedGeneration: placement.generation,
+          ...step,
+        });
+      }
       const claim = f.placements.claimTurn({
         sessionId: SESSION_ID,
         sessionKey: SESSION_KEY,

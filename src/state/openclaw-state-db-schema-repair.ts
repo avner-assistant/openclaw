@@ -168,6 +168,16 @@ export function migrateAgentDatabaseRelativePaths(
   const hasPath = db.prepare(
     "SELECT 1 FROM agent_databases WHERE agent_id = ? AND path = ? LIMIT 1",
   );
+  const retainNewerFacts = db.prepare(`
+    UPDATE agent_databases AS canonical
+       SET schema_version = source.schema_version,
+           last_seen_at = source.last_seen_at,
+           size_bytes = source.size_bytes
+      FROM agent_databases AS source
+     WHERE canonical.agent_id = ? AND canonical.path = ?
+       AND source.agent_id = canonical.agent_id AND source.path = ?
+       AND source.last_seen_at > canonical.last_seen_at
+  `);
   let relativized = 0;
   const reanchored: string[] = [];
   const deleted: string[] = [];
@@ -182,8 +192,15 @@ export function migrateAgentDatabaseRelativePaths(
     }
     const storedPath = resolveOpenClawAgentDatabaseStoredPath(databasePath, registeredPath);
     if (!path.isAbsolute(storedPath)) {
-      updatePath.run(storedPath, agentId, registeredPath);
-      relativized += 1;
+      if (hasPath.get(agentId, storedPath)) {
+        // Namespace aliases can converge before the foreign-path repair pass.
+        retainNewerFacts.run(agentId, storedPath, registeredPath);
+        deletePath.run(agentId, registeredPath);
+        deleted.push(registeredPath);
+      } else {
+        updatePath.run(storedPath, agentId, registeredPath);
+        relativized += 1;
+      }
     }
   }
   const stateDir = resolveOpenClawStateDirForDatabasePath(databasePath);
@@ -426,6 +443,13 @@ export function detectOpenClawStateDatabaseSchemaMigrationsFromDatabase(
       tableHasColumn(db, "skill_workshop_collection_reviews", "workspace_dir"))
   ) {
     migrations.push({ kind: "skill-workshop-directory-ownership-v16", path: pathname });
+  }
+  if (
+    userVersion < 17 &&
+    tableExists(db, "worker_environments") &&
+    !tableHasColumn(db, "worker_environments", "preparation_consumed_at_ms")
+  ) {
+    migrations.push({ kind: "prepared-worker-ownership-v17", path: pathname });
   }
   if (!hasCanonicalAgentDatabasesPrimaryKey(db)) {
     migrations.push({ kind: "agent-databases-composite-primary-key", path: pathname });

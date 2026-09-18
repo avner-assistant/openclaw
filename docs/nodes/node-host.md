@@ -101,6 +101,37 @@ Notes:
 - If active local `gateway.auth.*` SecretRefs are configured but unresolved, node-host auth fails closed.
 - Node-host auth resolution only honors `OPENCLAW_GATEWAY_*` env vars.
 
+### Restrict the node command surface
+
+Pass `--commands <ids>` to `openclaw node run`, `openclaw node install`, or
+`openclaw connect` to advertise only an explicit comma-separated list of exact
+command IDs. For example, a [Session Share](/plugins/session-share) node can
+publish sessions without exposing execution or other machine capabilities:
+
+```bash
+openclaw connect <join-url> --service \
+  --commands openclaw.sessions.list.v1,openclaw.sessions.read.v1
+```
+
+The flag is repeatable. The allowlist is saved in the node's durable machine
+state, including for installed services; omitting it on a later start keeps
+the saved list. The node advertises only commands that are both available
+and allowlisted, with only their required capabilities. Startup fails if no
+requested command is available. The Gateway pairing approval shows exactly
+the declared commands; Gateway command policy still applies to invocation.
+
+An explicit allowlist also disables computer use, skill scanning and
+publication, plugin-tool publication, MCP servers, and worker hosting. An
+allowlist does not enable a disabled plugin or make an unavailable command
+available.
+
+Restore the full default surface with `openclaw node run --all-commands` in
+the foreground or `openclaw node install --force --all-commands` for an
+installed service. When enrolling with `openclaw connect`, add `--all-commands`
+and optionally `--service`. This durably removes the saved allowlist and
+replaces the service's `--commands` arguments. Do not combine `--all-commands`
+with `--commands`.
+
 ### Start a node host (service)
 
 ```bash
@@ -178,7 +209,7 @@ openclaw nodes invoke --node <idOrNameOrIp> --command system.which --params '{"b
 Notes:
 
 - `system.run` returns stdout/stderr/exit code in the payload.
-- Shell execution now goes through the `exec` tool with `host=node`; `nodes` remains the direct-RPC surface for explicit node commands.
+- Shell execution goes through the `exec` tool with `host=node`; the separate `nodes.run` execution path was removed in 2026.3.31. `nodes` remains the direct-RPC surface for explicit node commands.
 - `nodes invoke` does not expose `system.run` or `system.run.prepare`; those stay on the exec path only.
 - The exec path reads the node policy and prepares a canonical `systemRunPlan`. Full/off execution resolves working-directory aliases without adding approval-only script checks. When caller or node policy requires approval binding, stricter path and script checks remain in place. Once an approval is granted, the gateway forwards that stored plan, not any later caller-edited command/cwd/session fields.
 - `system.notify` respects notification permission state on the macOS app; supports `--priority <passive|active|timeSensitive>` and `--delivery <system|overlay|auto>`.

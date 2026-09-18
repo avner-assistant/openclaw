@@ -1,5 +1,6 @@
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { stripPlainTextToolCallBlocks } from "../../../packages/tool-call-repair/src/index.js";
+import { projectPluginMessageDeliveryFact } from "../../agents/embedded-agent-message-delivery.js";
 import { resolveAgentIdentity, resolveResponsePrefix } from "../../agents/identity.js";
 import { readStringArrayParam, readToolStringParam } from "../../agents/tools/common.js";
 import {
@@ -39,7 +40,7 @@ import {
   executeGatewayAction,
 } from "./message-action-execution.js";
 import { stageGatewayWorkspaceMedia } from "./message-action-gateway-media.js";
-import { collectAttachmentSources, normalizeSandboxMediaList } from "./message-action-params.js";
+import { collectAttachmentSources, normalizeSandboxMediaSource } from "./message-action-params.js";
 import {
   applySendLocationToActionParams,
   applySendPayloadPartsToActionParams,
@@ -177,14 +178,11 @@ export async function buildMessagePayload(params: {
 
   const normalizedMedia = await Promise.all(
     mediaEntries.map(async (entry) => {
-      const normalizedUrl = (
-        await normalizeSandboxMediaList({
-          values: [entry.url],
-          sandboxRoot: input.sandboxRoot,
-          sandboxContainerWorkdir: input.sandboxContainerWorkdir,
-        })
-      )[0];
-      entry.url = normalizedUrl ?? entry.url;
+      entry.url = await normalizeSandboxMediaSource({
+        value: entry.url,
+        sandboxRoot: input.sandboxRoot,
+        sandboxContainerWorkdir: input.sandboxContainerWorkdir,
+      });
       return entry;
     }),
   );
@@ -543,8 +541,10 @@ export async function executeMessageSend(ctx: ResolvedActionContext): Promise<Me
         }),
       });
   if (gatewayPluginAction) {
-    await commitOutboundSessionRoute();
-    return annotateSourceDelivery(
+    if (projectPluginMessageDeliveryFact(gatewayPluginAction.payload)?.status !== "suppressed") {
+      await commitOutboundSessionRoute();
+    }
+    return await annotateSourceDelivery(
       withSendNormalization(gatewayPluginAction, sendPayload.normalization),
       ctx,
       reply?.source === "explicit",
@@ -615,7 +615,11 @@ export async function executeMessageSend(ctx: ResolvedActionContext): Promise<Me
   // a non-failed, non-suppressed return is their success proof. Failed and
   // suppressed sends leave the durable route untouched.
   const coreDeliveryStatus = send.sendResult?.deliveryStatus;
-  if (coreDeliveryStatus !== "failed" && coreDeliveryStatus !== "suppressed") {
+  if (
+    coreDeliveryStatus !== "failed" &&
+    coreDeliveryStatus !== "suppressed" &&
+    projectPluginMessageDeliveryFact(send.payload)?.status !== "suppressed"
+  ) {
     await commitOutboundSessionRoute();
   }
 
@@ -631,7 +635,7 @@ export async function executeMessageSend(ctx: ResolvedActionContext): Promise<Me
     sendResult: send.sendResult,
     dryRun,
   };
-  return annotateSourceDelivery(
+  return await annotateSourceDelivery(
     withSendNormalization(result, sendPayload.normalization),
     ctx,
     reply?.source === "explicit",

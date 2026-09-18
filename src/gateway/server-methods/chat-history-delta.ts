@@ -1,19 +1,19 @@
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { composeTranscriptDisplay } from "../../chat/transcript-display-position.js";
 import type { SessionTranscriptReadScope } from "../../config/sessions/session-accessor.js";
-import {
-  readTranscriptDisplayDelta,
-  type SessionTranscriptDisplayDeltaResult,
-} from "../../config/sessions/session-accessor.sqlite-history-events.js";
+import { readTranscriptDisplayDelta } from "../../config/sessions/session-accessor.sqlite-history-events.js";
+import type { SessionTranscriptDisplayDeltaResult } from "../../config/sessions/session-accessor.sqlite-history-query.js";
 import { jsonUtf8BytesOrInfinity } from "../../infra/json-utf8-bytes.js";
+import { isOpenClawDeliveryMirrorAssistantMessage } from "../../shared/transcript-only-openclaw-assistant.js";
 import {
   createCurrentUserProfileMessageProjector,
-  projectChatDisplayMessagesWithState,
+  isAssistantTtsSupplementMessage,
 } from "../chat-display-projection.js";
 import { resolveCurrentUserProfileDisplay } from "../current-user-profile-display.js";
+import { createSessionHistorySubagentProjection } from "../session-history-subagent-projection.js";
+import { projectTranscriptEntryMessage } from "../session-transcript-entry-message.js";
 import {
   projectSessionMessagePayload,
-  projectTranscriptEntryMessage,
   type SessionMessageProjectionState,
 } from "../session-transcript-message.js";
 
@@ -67,6 +67,7 @@ export function readChatHistoryDelta(params: {
   const projectCurrentUserProfile = createCurrentUserProfileMessageProjector(
     resolveCurrentUserProfileDisplay,
   );
+  const subagentCoordination = createSessionHistorySubagentProjection(params.scope);
   const messages: Record<string, unknown>[] = [];
   // Include array brackets and separators without serializing the whole page.
   let messagesBytes = 2;
@@ -82,31 +83,35 @@ export function readChatHistoryDelta(params: {
     if (!entryMessage) {
       continue;
     }
-    const messageId = asOptionalRecord(row.event)?.id;
-    const historyProjection = projectChatDisplayMessagesWithState([entryMessage], {
-      ...projectionState,
-      includeCommentaryFallbacks: true,
-    });
     if (
-      historyProjection.messages.some(
-        (message) => asOptionalRecord(message.openclawStreamFallback)?.source === "segment",
-      )
+      isOpenClawDeliveryMirrorAssistantMessage(entryMessage) &&
+      asOptionalRecord(asOptionalRecord(entryMessage)?.openclawDeliveryMirror)?.kind ===
+        "channel-final"
     ) {
-      // One transcript entry can own both commentary and a tool call. The single-message
-      // envelope cannot carry that split; let the full history owner reconcile both rows.
+      // Mirror suppression needs the preceding reply, which can be before this cursor.
       return { kind: "reset" };
     }
+    if (isAssistantTtsSupplementMessage(entryMessage)) {
+      // Full history owns merging audio into a reply that can precede this cursor.
+      return { kind: "reset" };
+    }
+    const messageId = asOptionalRecord(row.event)?.id;
     const projected = projectSessionMessagePayload({
       agentId: params.agentId,
+      historyDelta: true,
       message: entryMessage,
       ...(typeof messageId === "string" && messageId ? { messageId } : {}),
       messageSeq: row.messageSeq,
       transcriptPosition: row.displayPosition,
       projectionState,
       projectCurrentUserProfile,
+      subagentCoordination,
       sessionKey: params.sessionKey,
       sessionSnapshot: params.sessionSnapshot,
     });
+    if (projected.requiresHistoryReset) {
+      return { kind: "reset" };
+    }
     projectionState = projected.projectionState;
     // Recovery can remove this row from history, which an append-only delta cannot express.
     // Keep the last accepted cursor before the error and let a full tail own reconciliation.
@@ -121,6 +126,7 @@ export function readChatHistoryDelta(params: {
       messages.push(projected.payload);
     }
   }
+  subagentCoordination.assertCurrent?.();
   return {
     activeLeafEntryId: result.activeLeafEntryId,
     deltaCursor: result.cursor,

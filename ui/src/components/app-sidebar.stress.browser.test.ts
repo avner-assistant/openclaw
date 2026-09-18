@@ -2,7 +2,7 @@ import type { CDPSession } from "@vitest/browser-playwright";
 import { afterEach, describe, expect, it } from "vitest";
 import { cdp, page } from "vitest/browser";
 import "../test-helpers/load-styles.ts";
-import { setupSidebarTest } from "../test-helpers/app-sidebar.ts";
+import { setupSidebarTest } from "../test-helpers/app-sidebar-setup.ts";
 import { owner, other, key, mount, settled, geometry } from "../test-helpers/sidebar-stress.ts";
 setupSidebarTest();
 const captureDirectory = "../../../.openclaw/tmp/sidebar-stress-" + crypto.randomUUID();
@@ -78,7 +78,9 @@ describe.runIf("__vitest_browser__" in globalThis)("full sidebar state stress", 
         features: [{ name: "prefers-reduced-motion", value: reduced ? "reduce" : "no-preference" }],
       });
       document.documentElement.dataset.themeMode = theme;
-      const { sidebar, gateway, fixtureKeys } = await mount(width);
+      const { sidebar, gateway, fixtureKeys, context } = await mount(width);
+      context.theme.setMode(theme === "dark" ? "dark" : "light");
+      await expect.poll(() => document.documentElement.dataset.themeMode).toBe(theme);
       sidebar.sessionOrganizer.setSessionsGrouping(grouping);
       sidebar.sessionOrganizer.setSessionsShowPreview(preview);
       sidebar.sessionOrganizer.saveCollapsedSessionSections(new Set());
@@ -132,8 +134,19 @@ describe.runIf("__vitest_browser__" in globalThis)("full sidebar state stress", 
             issues.push(row.key + " ring/title overlap");
           }
         }
+        for (const trace of row.traces) {
+          if (Math.abs(trace.width - 32) > 0.1 || Math.abs(trace.height - 22) > 0.1) {
+            issues.push(row.key + " incorrect paired trace size");
+          }
+          if (
+            row.title &&
+            (rtl ? trace.left < row.title.right - 0.5 : trace.right > row.title.left + 0.5)
+          ) {
+            issues.push(row.key + " paired trace/title overlap");
+          }
+        }
         for (const stack of row.stacks) {
-          if (Math.abs(stack.width - 20) > 0.1 || Math.abs(stack.height - 20) > 0.1) {
+          if (Math.abs(stack.width - 28) > 0.1 || Math.abs(stack.height - 20) > 0.1) {
             issues.push(row.key + " oversized stack");
           }
         }
@@ -209,6 +222,15 @@ describe.runIf("__vitest_browser__" in globalThis)("full sidebar state stress", 
         for (const ring of sidebar.querySelectorAll(".session-glyph__ring")) {
           expect(getComputedStyle(ring).animationName).toBe("none");
         }
+        // Main replaces the moving paired arc with its static track in reduced motion.
+        for (const trace of sidebar.querySelectorAll(".session-glyph__trace")) {
+          expect(getComputedStyle(trace.querySelector(".session-glyph__trace-run")!).display).toBe(
+            "none",
+          );
+          expect(
+            getComputedStyle(trace.querySelector(".session-glyph__trace-track")!).display,
+          ).not.toBe("none");
+        }
       }
       // Preserve diagnostic captures for the explicitly requested local stress audit.
       if (width === 280 && !preview && !rtl) {
@@ -238,7 +260,9 @@ describe.runIf("__vitest_browser__" in globalThis)("catalog and archive row stre
     await page.viewport(1000, 1100);
     document.documentElement.dataset.themeMode = theme;
     localStorage.setItem("openclaw:sidebar:sessions:catalog-grouping", grouping);
-    const { sidebar } = await mount(width);
+    const { sidebar, context } = await mount(width);
+    context.theme.setMode(theme === "dark" ? "dark" : "light");
+    await expect.poll(() => document.documentElement.dataset.themeMode).toBe(theme);
     sidebar.sessionData.sessionCatalogs = [
       {
         id: "codex",

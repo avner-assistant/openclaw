@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runManagedCommand } from "./managed-child-process.mts";
 import {
+  requestVitestWorkerArtifacts,
   verifyVitestWorkerArtifacts,
   VITEST_WORKER_PREPARE_REQUEST,
   VITEST_WORKER_PREPARE_REPLY,
@@ -22,20 +23,44 @@ function createVitestWorkerDirectory() {
 }
 
 /** The invocation owns preparation and waits for every real borrower before disposal. */
-export function createVitestWorkerRun(env: NodeJS.ProcessEnv = process.env) {
-  const directory = createVitestWorkerDirectory();
+export function createVitestWorkerRun(
+  env: NodeJS.ProcessEnv = process.env,
+  parent?: VitestWorkerDescriptor,
+) {
+  const directory = parent?.directory ?? createVitestWorkerDirectory();
   let preparation: Promise<VitestWorkerManifest> | undefined;
   let disposal: Promise<void> | undefined;
   const borrowers: Promise<unknown>[] = [];
   let channelError: Error | undefined;
   const compilerAbort = new AbortController();
   let compilerJoined = true;
+  const onParentDisconnect = () => {
+    channelError ??= new Error("Compiled subprocess owner disconnected before group completion");
+    console.error(channelError);
+    compilerAbort.abort();
+    // Reuse the group's normal signal/descendant cleanup, including pending admission.
+    process.kill(process.pid, "SIGTERM");
+  };
+  if (parent) {
+    if (!process.connected) {
+      throw new Error("Compiled subprocess owner IPC is unavailable");
+    }
+    process.once("disconnect", onParentDisconnect);
+    process.channel?.unref();
+  }
 
   function prepare(): Promise<VitestWorkerManifest> {
     if (disposal) {
       return Promise.reject(new Error("Compiled subprocess owner is closing"));
     }
     return (preparation ??= (async () => {
+      if (parent) {
+        // One upstream loan serves this group's real borrowers; each still verifies below.
+        await requestVitestWorkerArtifacts(compilerAbort.signal);
+        return JSON.parse(
+          await fs.promises.readFile(path.join(directory, "manifest.json"), "utf8"),
+        ) as VitestWorkerManifest;
+      }
       compilerJoined = false;
       const code = await runManagedCommand({
         bin: process.execPath,
@@ -80,7 +105,11 @@ export function createVitestWorkerRun(env: NodeJS.ProcessEnv = process.env) {
   }
   return {
     descriptor: { directory } satisfies VitestWorkerDescriptor,
-    borrow<T>(child: ChildProcess, completion: Promise<T>): Promise<T> {
+    borrow<T>(
+      child: ChildProcess,
+      completion: Promise<T>,
+      onPreparationProgress?: () => void,
+    ): Promise<T> {
       let request: Promise<void> | undefined;
       const onMessage = (message: unknown) => {
         if (message !== VITEST_WORKER_PREPARE_REQUEST || request) {
@@ -94,6 +123,7 @@ export function createVitestWorkerRun(env: NodeJS.ProcessEnv = process.env) {
             if (disposal) {
               throw new Error("Compiled subprocess owner is closing");
             }
+            onPreparationProgress?.();
           } catch (error) {
             reply = { type: VITEST_WORKER_PREPARE_REPLY, error: String(error) };
           }
@@ -103,6 +133,11 @@ export function createVitestWorkerRun(env: NodeJS.ProcessEnv = process.env) {
             });
           }
         })();
+        // Only accepted admission and verified readiness count as progress.
+        // Duplicate IPC and the compiler's intermediate output cannot renew it.
+        if (!disposal) {
+          onPreparationProgress?.();
+        }
       };
       child.on("message", onMessage);
       // Existing Windows completion observes exit; artifact ownership additionally
@@ -149,11 +184,12 @@ export function createVitestWorkerRun(env: NodeJS.ProcessEnv = process.env) {
             await verifyVitestWorkerArtifacts(directory);
           }
         } finally {
+          process.off("disconnect", onParentDisconnect);
           if (uncertain || !compilerJoined) {
             console.error(
               `[vitest-workers] retaining ${directory}: ${!compilerJoined ? "compiler" : "borrower"} join failed`,
             );
-          } else {
+          } else if (!parent) {
             // Large generations must not block signal delivery during final cleanup.
             await fs.promises.rm(directory, { recursive: true, force: true });
           }

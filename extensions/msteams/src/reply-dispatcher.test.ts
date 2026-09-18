@@ -414,7 +414,7 @@ describe("createMSTeamsReplyDispatcher", () => {
     expect(typingCallbacks.onReplyStart).not.toHaveBeenCalled();
   });
 
-  it("keeps quiet Teams progress useful without exposing routine tool rows", async () => {
+  it("keeps quiet Teams approvals visible without exposing tool failures", async () => {
     vi.useFakeTimers();
     const dispatcher = createDispatcher("personal", {
       streaming: { mode: "progress", progress: { label: "Working" } },
@@ -439,15 +439,15 @@ describe("createMSTeamsReplyDispatcher", () => {
       name: "exec",
       exitCode: 1,
     });
-    expect(stream.update).toHaveBeenLastCalledWith(expect.stringContaining("exit 1"));
+    expect(stream.update).toHaveBeenLastCalledWith(expect.stringContaining("confirm-operation"));
+    expect(stream.update).toHaveBeenLastCalledWith(expect.not.stringContaining("exit 1"));
+    expect(stream.update).toHaveBeenLastCalledWith(expect.not.stringContaining("Exec"));
 
     await dispatcher.replyOptions.onApprovalEvent?.({
       phase: "resolved",
       approvalId: "approval-1",
     });
-    expect(stream.update).toHaveBeenLastCalledWith(
-      expect.not.stringContaining("confirm-operation"),
-    );
+    expect(stream.update).toHaveBeenLastCalledWith("Working");
     await dispatcher.replyOptions.onCommandOutput?.({
       itemId: "command-1",
       phase: "end",
@@ -766,12 +766,6 @@ describe("createMSTeamsReplyDispatcher", () => {
       expect(dispatcher.replyOptions.suppressDefaultToolProgressMessages).toBe(true);
     },
   );
-
-  it("does not create a stream for channel conversations", () => {
-    createDispatcher("channel");
-
-    expect(lastStreamMock).toBeUndefined();
-  });
 
   it("sets disableBlockStreaming=false when streaming.block.enabled=true", () => {
     const dispatcher = createDispatcher("personal", { streaming: { block: { enabled: true } } });

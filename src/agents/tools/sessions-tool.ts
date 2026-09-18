@@ -122,7 +122,7 @@ const SessionsToolSchema = Type.Object(
     ),
     icon: Type.Optional(
       Type.String({
-        description: `Persistent sidebar icon: a single emoji, or a named icon: ${SESSION_ICON_GLYPH_DESCRIPTION}. Empty string clears it. Distinct from attention, which is temporary.`,
+        description: `Persistent sidebar icon: a single emoji, or a named icon: ${SESSION_ICON_GLYPH_DESCRIPTION}, or custom SVG markup/data:image/svg+xml URL (max 16 KiB decoded; self-contained, no scripts or external references). Include xmlns="http://www.w3.org/2000/svg" and viewBox on SVGs. Empty string clears it. Distinct from temporary attention.`,
       }),
     ),
     color: Type.Optional(
@@ -158,7 +158,8 @@ const SessionsToolSchema = Type.Object(
     ),
     pinned: Type.Optional(
       Type.Boolean({
-        description: "Pin session (root sessions only; child/subagent sessions cannot be pinned)",
+        description:
+          "Pin session (root and Home-linked sessions only; spawned, subagent, and nested-child sessions cannot be pinned)",
       }),
     ),
     archived: Type.Optional(

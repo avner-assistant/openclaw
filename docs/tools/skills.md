@@ -201,6 +201,8 @@ Do not edit those managed directories directly. Use the editor, the
 authorized authoring tool. Runtime copies are separate from project files and
 must not be committed with a project.
 
+<a id="agent-skill-allowlists" />
+
 ## Agent allowlists
 
 Skill **location** (precedence) and skill **visibility** (which agent can use
@@ -384,6 +386,8 @@ publish and sync.
     Managed `~/.openclaw/skills` and personal `~/.agents/skills` may contain
     symlinked skill folders, but every `SKILL.md` realpath must still stay
     inside its resolved skill directory.
+    Optional `skill-card.md` files must be regular files inside that directory
+    and no larger than 256 KiB, including when they grow during a read.
   </Accordion>
   <Accordion title="Operator install policy">
     Configure `security.installPolicy` to run a trusted local policy command
@@ -701,22 +705,22 @@ command identities. Other CLI backends use the prompt catalog only.
 ## Snapshots and refresh
 
 OpenClaw snapshots eligible skills **when a session starts** and reuses that
-list for all subsequent turns in the session. Changes to skills or config take
-effect on the next new session.
+list until a refresh trigger below applies.
 
 Managed library selections keep their exact revisions until an explicit
-attach or refresh. The file-watcher behavior below applies to ordinary
-file-backed skill roots, not immutable library revisions.
+attach or refresh, including across Gateway restarts. The refresh triggers
+below apply to ordinary file-backed skill roots.
 
 File-backed skills refresh mid-session when:
 
 - The skills watcher detects a `SKILL.md` change.
+- The Gateway restarts, including when `skills.load.watch` is `false`.
 - A new eligible remote node connects.
 - Native file-watch capacity is exhausted and the next agent turn starts.
 
-The refreshed list is picked up on the next agent turn. If the effective agent
-allowlist changes, OpenClaw refreshes the snapshot to keep visible skills
-aligned.
+The refreshed list is picked up on the next agent turn in the same session.
+If the effective agent allowlist changes, OpenClaw refreshes the snapshot to
+keep visible skills aligned.
 
 When native watch capacity is exhausted, OpenClaw logs one warning and stops
 the skills watchers. With watching enabled, later agent turns refresh file-backed
@@ -756,6 +760,10 @@ restoring watch capacity to enable native watching again.
 
     Offline nodes do **not** make remote-only skills visible. If a node stops
     answering bin probes, OpenClaw clears its cached bin matches.
+
+    Connect-time bin probes wait briefly for the node's command handlers.
+    Gateway shutdown cancels this readiness wait and still joins probes that
+    have already started.
 
   </Accordion>
 </AccordionGroup>

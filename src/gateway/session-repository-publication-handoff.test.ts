@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { managedWorktrees } from "../agents/worktrees/service.js";
 import { loadSessionEntry, upsertSessionEntryCore } from "../config/sessions/session-accessor.js";
-import { registerClonedProjectRegistry } from "../projects/project-registry.js";
+import { registerClonedProjectRegistry } from "../projects/project-registry.test-support.js";
 import {
   openOpenClawStateDatabase,
   runOpenClawStateWriteTransaction,
@@ -443,7 +443,15 @@ it("can hold publisher exclusion during an existing reclaim claim without taking
     const { seedActivePlacement, REQUEST } =
       await import("./worker-environments/placement-dispatch-test-fixtures.js");
     const { placementTurnOwner } = await import("./worker-environments/placement-record.js");
-    const placements = createWorkerSessionPlacementStore({ database: openOpenClawStateDatabase() });
+    const { seedAttachedPlacementEnvironment } =
+      await import("./worker-environments/placement-test-fixtures.js");
+    const database = openOpenClawStateDatabase();
+    const placements = createWorkerSessionPlacementStore({ database });
+    seedAttachedPlacementEnvironment(database, {
+      environmentId: "handoff-worker",
+      sessionId: REQUEST.sessionId,
+      ownerEpoch: 1,
+    });
     const active = seedActivePlacement(placements, {
       environmentId: "handoff-worker",
       ownerEpoch: 1,

@@ -9,6 +9,7 @@ import { syncSelectedSessionMessageSubscription } from "./chat-history-subscript
 import { createState, type TestState } from "./chat-history.inflight.test-support.ts";
 import { loadChatHistory } from "./chat-history.ts";
 import type { ChatState } from "./chat-state-contract.ts";
+import { ChatAttachmentReadLifecycle } from "./components/chat-attachments.ts";
 import {
   getChatSessionProjection,
   publishChatSessionProjection,
@@ -49,12 +50,16 @@ it.each(["main", "workspace"])(
     state.agentsList = { defaultId: "main", mainKey: "workspace", scope: "global" };
     const request = vi.spyOn(state.client!, "request");
     await loadChatHistory(state);
-    expect(request).toHaveBeenCalledWith("chat.history", {
-      sessionKey,
-      agentId: "main",
-      limit: 80,
-      maxBytes: 256 * 1024,
-    });
+    expect(request).toHaveBeenCalledWith(
+      "chat.history",
+      {
+        sessionKey,
+        agentId: "main",
+        limit: 80,
+        maxBytes: 256 * 1024,
+      },
+      { signal: expect.any(AbortSignal) },
+    );
   },
 );
 
@@ -260,7 +265,11 @@ describe("rewindChatHistory", () => {
       },
     );
 
-    const result = await rewindChatHistory(state as never, "user-entry");
+    const result = await rewindChatHistory(
+      state as never,
+      "user-entry",
+      new ChatAttachmentReadLifecycle(() => {}),
+    );
 
     expect(state.sessions.rewind).toHaveBeenCalledWith(
       state.sessionKey,
@@ -324,7 +333,11 @@ describe("rewindChatHistory", () => {
       },
     );
 
-    const result = await rewindChatHistory(state as never, "user-entry");
+    const result = await rewindChatHistory(
+      state as never,
+      "user-entry",
+      new ChatAttachmentReadLifecycle(() => {}),
+    );
 
     expect(
       readChatMessagesFromCache(state.chatMessagesBySession, state, {
@@ -351,7 +364,11 @@ describe("rewindChatHistory", () => {
       refreshReplacement: vi.fn(async () => null),
     });
 
-    const pending = rewindChatHistory(state as never, "user-entry");
+    const pending = rewindChatHistory(
+      state as never,
+      "user-entry",
+      new ChatAttachmentReadLifecycle(() => {}),
+    );
     state.connected = false;
     state.connectionEpoch += 1;
     state.connected = true;

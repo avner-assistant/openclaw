@@ -10,10 +10,13 @@ import {
 import type { RouteId } from "../app-route-paths.ts";
 import type { NativeDeviceSettingsCapability } from "../app/native-device-settings.ts";
 import { t } from "../i18n/index.ts";
+import { registerAppsEnglish } from "../i18n/locales/en-apps.ts";
 import { loadModelCatalog, modelCatalogRefreshError } from "../lib/model-catalog-store.ts";
 import type { PluginListResult } from "../lib/plugins/index.ts";
 import { SETTINGS_SEARCH_TARGETS } from "../pages/config/settings-targets.ts";
 import type { IconName } from "./icons.ts";
+
+registerAppsEnglish();
 
 type CommandPaletteCatalogCategory =
   | "agents"
@@ -115,7 +118,7 @@ function getCommandPaletteBaseItems(
     {
       id: "nav-plugins",
       label: t("palette.items.plugins"),
-      icon: "puzzle",
+      icon: "plug",
       category: "navigation",
       action: "nav:plugins",
     },
@@ -356,7 +359,7 @@ export async function loadCommandPaletteCatalogItems(params: {
     ...(plugins?.plugins ?? []).map((plugin) => ({
       id: `plugin-${plugin.id}`,
       label: plugin.name,
-      icon: "puzzle" as const,
+      icon: "plug" as const,
       category: "plugins" as const,
       routeId: "plugins" as const,
       description: plugin.description,

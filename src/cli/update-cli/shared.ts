@@ -3,7 +3,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { parseStrictPositiveInteger } from "@openclaw/normalization-core/number-coercion";
-import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { theme } from "../../../packages/terminal-core/src/theme.js";
 import { hasErrnoCode } from "../../infra/errors.js";
 import { resolveRequiredHomeDir } from "../../infra/home-dir.js";
@@ -13,6 +12,14 @@ import { normalizePackageTagInput } from "../../infra/package-tag.js";
 import { parseSemver } from "../../infra/runtime-guard.js";
 import { fetchNpmTagVersion } from "../../infra/update-check.js";
 import {
+  normalizeUpdateFailureFacts,
+  type UpdateFailureFact,
+} from "../../infra/update-failure-facts.js";
+import {
+  createFreeBsdPkgOwnershipInspection,
+  type FreeBsdPkgOwnershipInspection,
+} from "../../infra/update-freebsd-pkg-ownership.js";
+import {
   canResolveRegistryVersionForPackageTarget,
   createGlobalInstallEnv,
   detectGlobalInstallManagerByPresence,
@@ -20,21 +27,36 @@ import {
   type GlobalInstallManager,
 } from "../../infra/update-global.js";
 import type { UpdateRequesterAuthority } from "../../infra/update-requester-authority.js";
+import type { UpdateRecoveryFence } from "../../infra/update-run-recovery.js";
 import { runStep } from "../../infra/update-runner-command.js";
+import { resolveUnmanagedUpdateInstallReason } from "../../infra/update-runner-install-surface.js";
 import type { UpdateStepProgress, UpdateStepResult } from "../../infra/update-runner.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import { defaultRuntime } from "../../runtime.js";
+import type { UpdateRecoveryStep } from "../../shared/update-outcome.js";
+import { UPDATE_INSTALL_SKIP_GUIDANCE } from "../../shared/update-outcome.js";
 import { pathExists } from "../../utils.js";
 import { COMPLETION_SKIP_PLUGIN_COMMANDS_ENV } from "../completion-runtime.js";
 import { isJsonOutputModeActive } from "../json-output-mode.js";
+import { resolveNodeRunner } from "./node-runner.js";
+
+export { resolveNodeRunner } from "./node-runner.js";
 
 export type UpdateCommandOptions = {
+  /** In-process executor only; workers must reacquire authority, never deserialize this. */
+  /** Legacy live context is unsupported; its presence is refusal-only. */
+  recovery?: unknown;
+  reapplyLocalOverrides?: boolean;
   /** Internal orchestration context, shared across update phases and child processes. */
   run?: {
     runId: string;
+    defaultStepTimeoutMs?: number;
+    activationTimeoutMs?: number;
     env: NodeJS.ProcessEnv;
     /** Prepared before replacement; never load the old authority graph after activation. */
     requesterAuthority?: UpdateRequesterAuthority;
+    /** Live local executor only. A child must independently acquire its owner. */
+    executorFence?: UpdateRecoveryFence;
   };
   acceptCapabilities?: boolean;
   json?: boolean;
@@ -68,13 +90,23 @@ export type UpdateWizardOptions = {
 };
 
 export class UpdatePreMutationError extends Error {
+  readonly recoverySteps?: readonly UpdateRecoveryStep[];
+  readonly failureFacts: UpdateFailureFact[];
+
   constructor(
     readonly reason: string,
     message: string,
-    options?: ErrorOptions,
+    options?: ErrorOptions & {
+      failureFacts?: readonly UpdateFailureFact[];
+      recoverySteps?: readonly UpdateRecoveryStep[];
+    },
   ) {
     super(message, options);
     this.name = "UpdatePreMutationError";
+    this.recoverySteps = options?.recoverySteps;
+    this.failureFacts = normalizeUpdateFailureFacts(
+      options?.failureFacts ?? [{ check: reason, code: reason, message }],
+    );
   }
 }
 
@@ -198,15 +230,6 @@ function resolveDefaultGitDir(): string {
   return path.join(home, "openclaw");
 }
 
-/** Prefer the current Node executable, falling back to `node` when run through another shim. */
-export function resolveNodeRunner(): string {
-  const base = normalizeLowercaseStringOrEmpty(path.basename(process.execPath));
-  if (base === "node" || base === "node.exe") {
-    return process.execPath;
-  }
-  return "node";
-}
-
 export function tryResolveInvocationCwd(): string | undefined {
   try {
     return process.cwd();
@@ -237,11 +260,12 @@ export async function runUpdateStep(params: {
   timeoutMs: number;
   progress?: UpdateStepProgress;
   env?: NodeJS.ProcessEnv;
+  runCommand?: Parameters<typeof runStep>[0]["runCommand"];
 }): Promise<UpdateStepResult> {
   return await runStep({
     ...params,
     cwd: params.cwd ?? process.cwd(),
-    runCommand: runCommandWithTimeout,
+    runCommand: params.runCommand ?? runCommandWithTimeout,
     stepIndex: 0,
     totalSteps: 0,
   });
@@ -414,16 +438,24 @@ export async function resolveGlobalManager(params: {
   root: string;
   installKind: "git" | "package" | "unknown";
   timeoutMs: number;
+  pkgOwnership?: FreeBsdPkgOwnershipInspection;
 }): Promise<GlobalInstallManager> {
+  await (
+    params.pkgOwnership ?? createFreeBsdPkgOwnershipInspection(params.timeoutMs)
+  ).assertUnowned(params.root);
   if (params.installKind === "package") {
+    const diagnostics: string[] = [];
     const detected = await detectGlobalInstallManagerForRoot(
       runCommandWithTimeout,
       params.root,
       params.timeoutMs,
+      diagnostics,
     );
     if (!detected) {
-      throw new Error(
-        "Update refused: package manager owner is unknown; no changes were made. Run this OpenClaw install through its active npm, pnpm, or Bun global shim, or reinstall it with that package manager, then retry.",
+      const reason = resolveUnmanagedUpdateInstallReason();
+      throw new UpdatePreMutationError(
+        reason,
+        `${UPDATE_INSTALL_SKIP_GUIDANCE[reason]} Inspected: ${diagnostics.join("; ")}.`,
       );
     }
     return detected;
@@ -483,19 +515,40 @@ export async function tryWriteCompletionCache(
   return "failed";
 }
 
+export async function requestUpdateDowngradeConfirmation(params: {
+  json: boolean;
+  currentVersion: string | null;
+  targetVersion: string | null;
+  tag: string;
+}): Promise<"confirmed" | "cancelled" | "confirmation-required"> {
+  if (!process.stdin.isTTY || params.json) {
+    return "confirmation-required";
+  }
+  const { confirm, isCancel } = await import("@clack/prompts");
+  const { stylePromptMessage } =
+    await import("../../../packages/terminal-core/src/prompt-style.js");
+  const targetLabel = params.targetVersion ?? `${params.tag} (unknown)`;
+  const message = `Downgrading from ${params.currentVersion} to ${targetLabel} can break configuration. Continue?`;
+  const ok = await confirm({ message: stylePromptMessage(message), initialValue: false });
+  return isCancel(ok) || !ok ? "cancelled" : "confirmed";
+}
+
 export async function confirmUpdateDowngrade(params: {
   opts: UpdateCommandOptions;
   currentVersion: string | null;
   targetVersion: string | null;
   tag: string;
 }): Promise<boolean> {
-  const { confirm, isCancel } = await import("@clack/prompts");
   const { finishUpdateRun } = await import("../../infra/update-run-ledger.js");
-  const { stylePromptMessage } =
-    await import("../../../packages/terminal-core/src/prompt-style.js");
   const { opts, currentVersion, targetVersion, tag } = params;
+  const decision = await requestUpdateDowngradeConfirmation({
+    json: Boolean(opts.json),
+    currentVersion,
+    targetVersion,
+    tag,
+  });
   const run = opts.run!;
-  if (!process.stdin.isTTY || opts.json) {
+  if (decision === "confirmation-required") {
     finishUpdateRun(
       run.runId,
       { status: "skipped", reason: "downgrade-confirmation-required" },
@@ -507,14 +560,7 @@ export async function confirmUpdateDowngrade(params: {
     defaultRuntime.exit(1);
     return false;
   }
-
-  const targetLabel = targetVersion ?? `${tag} (unknown)`;
-  const message = `Downgrading from ${currentVersion} to ${targetLabel} can break configuration. Continue?`;
-  const ok = await confirm({
-    message: stylePromptMessage(message),
-    initialValue: false,
-  });
-  if (isCancel(ok) || !ok) {
+  if (decision === "cancelled") {
     finishUpdateRun(run.runId, { status: "skipped", reason: "cancelled" }, { env: run.env });
     if (!opts.json) {
       defaultRuntime.log(theme.muted("Update cancelled."));
@@ -522,6 +568,5 @@ export async function confirmUpdateDowngrade(params: {
     defaultRuntime.exit(0);
     return false;
   }
-
   return true;
 }

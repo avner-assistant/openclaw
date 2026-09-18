@@ -40,7 +40,7 @@ error. It never reads a retained proposal as a substitute for a missing skill.
 `skills.curator.status` reports live skill usage recorded from trusted
 `skill.used` events, retained pre-cron collection review records, and per-workspace
 experience review outcomes. Current collection reviews use automation run history.
-Age-based skill lifecycle curation is retired.
+No skill is archived or expired by age. Every skill reports as `active`.
 `skills.curator.pin`, `skills.curator.unpin`, and `skills.curator.restore` remain
 registered for existing clients, but always return an error explaining that the
 weekly collection review manages the skill collection.
@@ -127,8 +127,31 @@ files stay in place, and restore reports why it cannot use them. Completed
 history archives do not block migration of the remaining backups.
 If cleanup stops after publishing a restorable backup, the next migration
 verifies the saved manifest and all copied files before removing the old copy.
+If no configured agent uses a legacy backup's recorded workspace, Doctor checks
+its post-cleanup result hashes against every configured agent's Workshop skills.
+Exactly one complete match identifies the owner even when the old workspace is
+gone. Empty, partial, changed, or ambiguous matches stay preserved; Doctor names
+the agents considered and their verification results. Follow the
+[manual backup recovery procedure](/tools/skill-workshop/collection-review#when-an-older-backup-cannot-be-restored-automatically)
+without changing the current workspace or rewriting the backup manifest.
+After a successful repair, restart the Gateway to clear its startup warning.
 Skills that were symlinked into a workspace stay where they are as workspace
 skills; the migration marks their proposals stale instead of moving them.
+
+Doctor also checks saved automation command arguments, working directories,
+condition scripts, and agent messages for literal references to relocated
+Workshop skills. It names each affected automation and field during Doctor
+repair and on later checks. Retained apply history must establish the original
+skill directory; Doctor does not guess it from the current workspace or skill
+name when that history is unavailable.
+
+Review each reported field before updating the automation. Doctor offers a
+replacement for a complete argument or working-directory path only when the
+mapped target exists inside the relocated skill. For paths embedded in scripts
+or messages, it reports the directory relocation separately and leaves the
+complete target unresolved for manual review. Missing or ambiguous targets also
+stay unresolved. Doctor does not rewrite automation content, change schedules,
+or run the automation to check it.
 
 If moving the skills empties a workspace, migration retires obsolete
 workspace-survival evidence only when saved pre-move facts prove that the same

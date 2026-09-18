@@ -1,19 +1,50 @@
 import { note } from "../../packages/terminal-core/src/note.js";
-import { staleUpdateRunGuidance } from "../infra/update-run-activity.js";
-import { listUpdateRuns } from "../infra/update-run-ledger.js";
+import {
+  UPDATE_ACTIVATION_TIMEOUT_REASON,
+  UPDATE_ENVIRONMENT_FAILURE_REASONS,
+} from "../shared/update-outcome.js";
 
 /** Startup and proven-pristine preflights do not need a public ledger snapshot. */
-export function noteStaleUpdateRuns(options: {
+export async function noteStaleUpdateRuns(options: {
   requireStartupMigrationCheckpoint?: boolean;
   skipPristineStartupStateMigrations?: boolean;
-}): void {
+}): Promise<void> {
   if (options.requireStartupMigrationCheckpoint || options.skipPristineStartupStateMigrations) {
     return;
   }
-  for (const run of listUpdateRuns({ active: true, limit: 100 })) {
+  const [
+    { staleUpdateRunGuidance },
+    { listUpdateRunsAsync },
+    { renderUpdateRunReport },
+    { updateRunWarningMessages },
+  ] = await Promise.all([
+    import("../infra/update-run-activity.js"),
+    import("../infra/update-run-reader.js"),
+    import("../infra/update-run-report.js"),
+    import("../infra/update-run-step.js"),
+  ]);
+  for (const run of await listUpdateRunsAsync({ active: true, limit: 100 })) {
     const guidance = staleUpdateRunGuidance(run);
     if (guidance) {
       note(`Update ${run.runId}: ${guidance}`, "Update history");
+    }
+  }
+  const [latest] = await listUpdateRunsAsync({ limit: 1 });
+  if (latest) {
+    if (
+      latest.status === "failed" &&
+      latest.reason &&
+      (latest.reason === UPDATE_ACTIVATION_TIMEOUT_REASON ||
+        UPDATE_ENVIRONMENT_FAILURE_REASONS.has(latest.reason))
+    ) {
+      note(`Update ${latest.runId}: ${renderUpdateRunReport(latest).markdown}`, "Update history");
+    }
+    const warnings = updateRunWarningMessages(latest.steps);
+    if (warnings.length) {
+      note(
+        `Recorded warnings from update ${latest.runId} (a later repair may have resolved them):\n${warnings.slice(-3).join("\n")}`,
+        "Update history",
+      );
     }
   }
 }

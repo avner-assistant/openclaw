@@ -27,10 +27,10 @@ import { OutboundDeliveryError } from "../../infra/outbound/deliver-types.js";
 import { resolveOutboundTargetWithPlugin } from "../../infra/outbound/targets-resolve-shared.js";
 import { buildOutboundMediaLoadOptions } from "../../media/load-options.js";
 import { loadWebMediaRaw } from "../../media/web-media.js";
-import { loadBundledPluginPublicSurface } from "../../plugin-sdk/test-helpers/public-surface-loader.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";
 import { AGENT_HARNESS_SESSION_KEY_RESERVED_MESSAGE } from "../../sessions/agent-harness-session-key.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
+import { loadBundledPluginFacade } from "../../test-utils/bundled-plugin-public-surface.js";
 import {
   createChannelTestPluginBase,
   createTestRegistry,
@@ -46,6 +46,7 @@ import {
 import { DEDUPE_MAX, DEDUPE_TTL_MS } from "../server-constants.js";
 import { startGatewayMaintenanceTimers } from "../server-maintenance.js";
 import { createGatewayMaintenanceStateForTest } from "../test-helpers.maintenance-state.js";
+import { messageActionContextFromSessionKeyForTests } from "./send.test-helpers.js";
 import type { GatewayRequestContext } from "./types.js";
 
 type ResolveOutboundTarget = typeof import("../../infra/outbound/targets.js").resolveOutboundTarget;
@@ -83,7 +84,6 @@ const mocks = vi.hoisted(() => ({
   >(async () => ({ messageId: "poll-1" })),
   getChannelPlugin: vi.fn(),
   loadOpenClawPlugins: vi.fn(),
-  applyPluginAutoEnable: vi.fn(),
   getRuntimeConfigSnapshot: vi.fn(),
   getRuntimeConfigSourceSnapshot: vi.fn(),
   loadSessionEntry: vi.fn(
@@ -109,10 +109,12 @@ vi.mock("../../channels/plugins/index.js", () => ({
   normalizeChannelId: (value: string) => (value === "webchat" ? null : value),
 }));
 
-vi.mock("../../channels/plugins/message-action-dispatch.js", () => ({
+vi.mock("../../channels/plugins/message-action-dispatch.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../channels/plugins/message-action-dispatch.js")>()),
   dispatchChannelMessageAction: mocks.dispatchChannelMessageAction,
-  prepareExternalMessageActionTargetForResolution: (ctx: { params: Record<string, unknown> }) =>
-    ctx.params,
+  prepareExternalMessageActionTargetForResolution: (ctx: { params: Record<string, unknown> }) => ({
+    params: ctx.params,
+  }),
   shouldDeferExternalMessageActionTargetResolution: () => false,
 }));
 
@@ -139,37 +141,6 @@ function resolveAgentIdFromSessionKeyForTests(params: {
   return explicitAgentId ?? "main";
 }
 
-function messageActionContextFromSessionKeyForTests(sessionKey: string): {
-  expiresAtMs: number;
-  toolContext?: {
-    currentChannelProvider?: string;
-    currentChannelId?: string;
-    currentChatType?: "direct" | "group" | "channel";
-  };
-} {
-  const parts = sessionKey.split(":");
-  const provider = parts[2];
-  const peerKind = parts[3];
-  const peerId = parts.slice(4).join(":");
-  const currentChatType =
-    peerKind === "direct" || peerKind === "dm"
-      ? "direct"
-      : peerKind === "group" || peerKind === "channel"
-        ? peerKind
-        : undefined;
-  return {
-    expiresAtMs: Date.now() + 60_000,
-    toolContext:
-      provider && peerId
-        ? {
-            currentChannelProvider: provider,
-            currentChannelId: peerId,
-            currentChatType,
-          }
-        : undefined,
-  };
-}
-
 vi.mock("../../agents/agent-scope.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../agents/agent-scope.js")>()),
   resolveSessionAgentId: ({
@@ -183,11 +154,6 @@ vi.mock("../../agents/agent-scope.js", async (importOriginal) => ({
   resolveAgentConfig: () => undefined,
   resolveDefaultAgentId: () => "main",
   resolveAgentWorkspaceDir: () => TEST_AGENT_WORKSPACE,
-}));
-
-vi.mock("../../config/plugin-auto-enable.js", () => ({
-  applyPluginAutoEnable: ({ config, env }: { config: unknown; env?: unknown }) =>
-    mocks.applyPluginAutoEnable({ config, env }),
 }));
 
 vi.mock("../../config/runtime-snapshot.js", async () => {
@@ -291,12 +257,14 @@ async function runSendWithClient(
   params: Record<string, unknown>,
   client?: { connect?: { scopes?: string[] }; internal?: Record<string, unknown> } | null,
   context: GatewayRequestContext = makeContext(),
+  sessionMutationCommitGuard?: () => void,
 ) {
   const respond = vi.fn();
   await expectDefined(sendHandlers.send, "sendHandlers.send test invariant").call(sendHandlers, {
     params: params as never,
     respond,
     context,
+    sessionMutationCommitGuard,
     req: { type: "req", id: "1", method: "send" },
     client: (client ?? null) as never,
     isWebchatConnect: () => false,
@@ -322,6 +290,21 @@ async function runPollWithClient(
     isWebchatConnect: () => false,
   });
   return { respond };
+}
+
+function createTelegramSourceSendRequest(to: string, message: string, idempotencyKey: string) {
+  return {
+    channel: "telegram",
+    action: "send",
+    params: { to, message },
+    sessionKey: "agent:main:telegram:direct:chat-123",
+    agentId: "main",
+    toolContext: {
+      currentChannelProvider: "telegram",
+      currentChannelId: "chat-123",
+    },
+    idempotencyKey,
+  };
 }
 
 async function runMessageActionRequest(
@@ -727,11 +710,6 @@ describe("gateway send mirroring", () => {
     vi.clearAllMocks();
     registrySeq += 1;
     setActivePluginRegistry(createTestRegistry([]), `send-test-${registrySeq}`);
-    mocks.applyPluginAutoEnable.mockImplementation(({ config }) => ({
-      config,
-      changes: [],
-      autoEnabledReasons: {},
-    }));
     mocks.getRuntimeConfigSnapshot.mockReturnValue(null);
     mocks.getRuntimeConfigSourceSnapshot.mockReturnValue(null);
     mocks.loadSessionEntry.mockImplementation((sessionKey: string) => ({
@@ -872,12 +850,7 @@ describe("gateway send mirroring", () => {
 
   it("uses the resolved runtime config for message.action when the source snapshot matches", async () => {
     const sourceConfig = createDiscordSourceConfig();
-    const runtimeConfig = createDiscordTestConfig("resolved-token");
-    mocks.applyPluginAutoEnable.mockImplementation(({ config }) => ({
-      config,
-      changes: [],
-      autoEnabledReasons: {},
-    }));
+    const runtimeConfig = createDiscordTestConfig("resolved-token", true);
     mocks.getRuntimeConfigSnapshot.mockReturnValue(runtimeConfig);
     mocks.getRuntimeConfigSourceSnapshot.mockReturnValue(sourceConfig);
 
@@ -890,50 +863,8 @@ describe("gateway send mirroring", () => {
     expect(response?.[0]).toBe(true);
   });
 
-  it("matches message.action runtime config against the canonical pre-auto-enable source config", async () => {
-    const sourceConfig = createDiscordSourceConfig();
-    const autoEnabledSourceConfig = createDiscordSourceConfig(true);
-    const autoEnabledRuntimeConfig = createDiscordTestConfig("resolved-token", true);
-    mocks.applyPluginAutoEnable
-      .mockReturnValueOnce({
-        config: autoEnabledSourceConfig,
-        changes: [{ path: "channels.discord.enabled", value: true }],
-        autoEnabledReasons: {},
-      })
-      .mockReturnValueOnce({
-        config: autoEnabledRuntimeConfig,
-        changes: [{ path: "channels.discord.enabled", value: true }],
-        autoEnabledReasons: {},
-      });
-    mocks.getRuntimeConfigSnapshot.mockReturnValue(autoEnabledRuntimeConfig);
-    mocks.getRuntimeConfigSourceSnapshot.mockReturnValue(sourceConfig);
-
-    const { respond } = await runDiscordChannelInfo(
-      "idem-action-runtime-config-auto-enabled",
-      sourceConfig,
-    );
-
-    expect(lastDispatchChannelMessageActionCall()?.cfg).toBe(autoEnabledRuntimeConfig);
-    expect(mocks.applyPluginAutoEnable).toHaveBeenNthCalledWith(1, {
-      config: sourceConfig,
-      env: undefined,
-    });
-    expect(mocks.applyPluginAutoEnable).toHaveBeenNthCalledWith(2, {
-      config: autoEnabledRuntimeConfig,
-      env: undefined,
-    });
-    const response = firstRespondCall(respond);
-    expect(response?.[0]).toBe(true);
-  });
-
-  it("keeps the post-auto-enable request config for message.action when the runtime source snapshot does not match", async () => {
-    const sourceConfig = createDiscordSourceConfig();
-    const autoEnabledRequestConfig = createDiscordSourceConfig(true);
-    mocks.applyPluginAutoEnable.mockReturnValue({
-      config: autoEnabledRequestConfig,
-      changes: [{ path: "channels.discord.enabled", value: true }],
-      autoEnabledReasons: {},
-    });
+  it("keeps the scoped request config for message.action when the runtime source snapshot does not match", async () => {
+    const requestConfig = createDiscordSourceConfig(true);
     mocks.getRuntimeConfigSnapshot.mockReturnValue(createDiscordTestConfig("stale-runtime-token"));
     mocks.getRuntimeConfigSourceSnapshot.mockReturnValue({
       channels: {
@@ -945,9 +876,13 @@ describe("gateway send mirroring", () => {
       },
     });
 
-    await runDiscordChannelInfo("idem-action-stale-runtime-config", sourceConfig);
+    const { respond } = await runDiscordChannelInfo(
+      "idem-action-stale-runtime-config",
+      requestConfig,
+    );
 
-    expect(lastDispatchChannelMessageActionCall()?.cfg).toBe(autoEnabledRequestConfig);
+    expect(lastDispatchChannelMessageActionCall()?.cfg).toBe(requestConfig);
+    expect(firstRespondCall(respond)[0]).toBe(true);
   });
 
   it("does not read the runtime config snapshot for send requests", async () => {
@@ -1501,40 +1436,50 @@ describe("gateway send mirroring", () => {
     expect(error?.retryable).toBeUndefined();
   });
 
-  it("does not send after delegated authority closes during session preparation", async () => {
-    const preparation = createDeferred<null>();
-    mocks.resolveOutboundSessionRoute.mockReturnValueOnce(preparation.promise);
-    let authorityActive = true;
-    const context = {
-      ...makeContext(),
-      validateAgentRuntimeApprovalAuthority: () => authorityActive,
-    } as GatewayRequestContext;
-    const request = runSendWithClient(
-      {
-        channel: "slack",
-        to: "channel:C1",
-        message: "must not escape",
-        sessionKey: "agent:main:slack:channel:C1",
-        idempotencyKey: "idem-send-authority-race",
-      },
-      agentRuntimeClient("agent:main:slack:channel:C1"),
-      context,
-    );
-    await vi.waitFor(() => expect(mocks.resolveOutboundSessionRoute).toHaveBeenCalledOnce());
-    authorityActive = false;
-    preparation.resolve(null);
+  it.each(["delegated", "caller"] as const)(
+    "does not send after %s authority closes during session preparation",
+    async (authority) => {
+      const preparation = createDeferred<null>();
+      mocks.resolveOutboundSessionRoute.mockReturnValueOnce(preparation.promise);
+      let authorityActive = true;
+      const context = {
+        ...makeContext(),
+        validateAgentRuntimeApprovalAuthority: () => authority === "caller" || authorityActive,
+      } as GatewayRequestContext;
+      const request = runSendWithClient(
+        {
+          channel: "slack",
+          to: "channel:C1",
+          message: "must not escape",
+          sessionKey: "agent:main:slack:channel:C1",
+          idempotencyKey: "idem-send-authority-race",
+        },
+        agentRuntimeClient("agent:main:slack:channel:C1"),
+        context,
+        authority === "caller"
+          ? () => {
+              if (!authorityActive) {
+                throw new Error("in-process caller closed");
+              }
+            }
+          : undefined,
+      );
+      await vi.waitFor(() => expect(mocks.resolveOutboundSessionRoute).toHaveBeenCalledOnce());
+      authorityActive = false;
+      preparation.resolve(null);
 
-    const { respond } = await request;
-    expect(firstRespondCall(respond)[0]).toBe(false);
-    expect(firstRespondCall(respond)[2]?.message).toContain("authority is no longer active");
-    expect(mocks.deliverOutboundPayloads).not.toHaveBeenCalled();
-    expect(mocks.ensureOutboundSessionEntry).not.toHaveBeenCalled();
-  });
+      const { respond } = await request;
+      expect(firstRespondCall(respond)[0]).toBe(false);
+      expect(firstRespondCall(respond)[2]?.message).toContain("authority is no longer active");
+      expect(mocks.deliverOutboundPayloads).not.toHaveBeenCalled();
+      expect(mocks.ensureOutboundSessionEntry).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([false, true])(
     "keeps Telegram plugin action sends bound to their live owner (close during first send: %s)",
     async (closeDuringFirstSend) => {
-      const { telegramMessageActions } = await loadBundledPluginPublicSurface<{
+      const { telegramMessageActions } = await loadBundledPluginFacade<{
         telegramMessageActions: NonNullable<ChannelPlugin["actions"]>;
       }>({ pluginId: "telegram", artifactBasename: "runtime-api.js" });
       const { dispatchChannelMessageAction } = await vi.importActual<
@@ -1651,6 +1596,71 @@ describe("gateway send mirroring", () => {
       expect(platformSend).not.toHaveBeenCalled();
     },
   );
+
+  it("fences delegated reads when their originating turn closes during provider work", async () => {
+    const entered = createDeferred<null>();
+    const resume = createDeferred<null>();
+    const providerRequest = vi.fn();
+    mocks.dispatchChannelMessageAction.mockImplementationOnce(
+      async (ctx: { assertDirectAdapterHandoff?: () => void }) => {
+        entered.resolve(null);
+        await resume.promise;
+        ctx.assertDirectAdapterHandoff?.();
+        providerRequest();
+        return { details: { ok: true } };
+      },
+    );
+    const sessionKey = "agent:main:slack:channel:C1";
+    const operationalRunInstance = createOperationalRunInstanceRef("read-turn-revocation");
+    const delegatedAuthority = claimAgentRunDelegatedAuthority(operationalRunInstance);
+    const turnCapability = mintMessageActionTurnCapability({
+      agentId: "main",
+      runId: operationalRunInstance.runId,
+      sessionKey,
+    });
+    const client = {
+      internal: {
+        agentRuntimeIdentity: {
+          kind: "agentRuntime" as const,
+          agentId: "main",
+          sessionKey,
+          operationalRunInstance,
+          delegatedAuthority: { kind: "local" as const, ...delegatedAuthority },
+          messageActionContext: {
+            ...messageActionContextFromSessionKeyForTests(sessionKey),
+            turnCapability,
+          },
+        },
+      },
+    };
+    try {
+      const request = runMessageActionRequest(
+        {
+          channel: "slack",
+          action: "read",
+          params: { channelId: "C2", limit: 1 },
+          sessionKey,
+          idempotencyKey: "read-turn-revocation",
+        },
+        client,
+        {
+          ...makeContext(),
+          validateAgentRuntimeApprovalAuthority: createAgentRuntimeApprovalAuthorityValidator(),
+        } as GatewayRequestContext,
+      );
+      await entered.promise;
+      revokeMessageActionTurnCapability(turnCapability);
+      resume.resolve(null);
+      const { respond } = await request;
+      expect(firstRespondCall(respond)[0]).toBe(false);
+      expect(firstRespondCall(respond)[2]?.message).toContain("authority is no longer active");
+      expect(providerRequest).not.toHaveBeenCalled();
+    } finally {
+      resume.resolve(null);
+      revokeMessageActionTurnCapability(turnCapability);
+      releaseAgentRunDelegatedAuthority(delegatedAuthority);
+    }
+  });
 
   it("does not send after turn capability closes while delegated authority remains active", async () => {
     const enteredDelivery = createDeferred<null>();
@@ -2307,48 +2317,21 @@ describe("gateway send mirroring", () => {
     );
   });
 
-  it("auto-picks the single configured channel for send", async () => {
+  it("auto-picks the single configured channel from the published runtime config for send", async () => {
+    const runtimeConfig = { channels: { slack: {} }, plugins: { allow: ["slack"] } };
     mockDeliverySuccess("m-single-send");
 
-    const { respond } = await runSend({
-      to: "x",
-      message: "hi",
-      idempotencyKey: "idem-missing-channel",
-    });
+    const { respond } = await runSendWithClient(
+      { to: "x", message: "hi", idempotencyKey: "idem-missing-channel" },
+      null,
+      { ...makeContext(), getRuntimeConfig: () => runtimeConfig },
+    );
 
-    expect(mocks.resolveMessageChannelSelection).toHaveBeenCalled();
-    expect(mocks.deliverOutboundPayloads).toHaveBeenCalled();
+    expect(mocks.resolveMessageChannelSelection).toHaveBeenCalledWith({ cfg: runtimeConfig });
+    expect(deliveryCall()?.cfg).toBe(runtimeConfig);
     const response = firstRespondCall(respond);
     expect(response?.[0]).toBe(true);
     expect(response?.[1]?.messageId).toBe("m-single-send");
-    expect(response?.[2]).toBeUndefined();
-    expect(response?.[3]?.channel).toBe("slack");
-  });
-
-  it("auto-picks the single configured channel from the auto-enabled config snapshot for send", async () => {
-    const autoEnabledConfig = { channels: { slack: {} }, plugins: { allow: ["slack"] } };
-    mocks.applyPluginAutoEnable.mockReturnValue({
-      config: autoEnabledConfig,
-      changes: [],
-      autoEnabledReasons: {},
-    });
-    mockDeliverySuccess("m-single-send-auto");
-
-    const { respond } = await runSend({
-      to: "x",
-      message: "hi",
-      idempotencyKey: "idem-missing-channel-auto-enabled",
-    });
-
-    expect(mocks.applyPluginAutoEnable).toHaveBeenCalledWith({
-      config: {},
-    });
-    expect(mocks.resolveMessageChannelSelection).toHaveBeenCalledWith({
-      cfg: autoEnabledConfig,
-    });
-    const response = firstRespondCall(respond);
-    expect(response?.[0]).toBe(true);
-    expect(response?.[1]?.messageId).toBe("m-single-send-auto");
     expect(response?.[2]).toBeUndefined();
     expect(response?.[3]?.channel).toBe("slack");
   });
@@ -3919,21 +3902,13 @@ describe("gateway send mirroring", () => {
       new Error("transcript unavailable"),
     );
 
-    const { respond } = await runMessageActionRequest({
-      channel: "telegram",
-      action: "send",
-      params: {
-        to: "chat-123",
-        message: "visible source reply",
-      },
-      sessionKey: "agent:main:telegram:direct:chat-123",
-      agentId: "main",
-      toolContext: {
-        currentChannelProvider: "telegram",
-        currentChannelId: "chat-123",
-      },
-      idempotencyKey: "idem-source-message-action-mirror-failed",
-    });
+    const { respond } = await runMessageActionRequest(
+      createTelegramSourceSendRequest(
+        "chat-123",
+        "visible source reply",
+        "idem-source-message-action-mirror-failed",
+      ),
+    );
 
     const call = firstRespondCall(respond);
     expect(call[0]).toBe(true);
@@ -3991,21 +3966,11 @@ describe("gateway send mirroring", () => {
       sendHandlers["message.action"],
       'sendHandlers["message.action"] test invariant',
     )({
-      params: {
-        channel: "telegram",
-        action: "send",
-        params: {
-          to: "chat-123",
-          message: "visible media caption",
-        },
-        sessionKey: "agent:main:telegram:direct:chat-123",
-        agentId: "main",
-        toolContext: {
-          currentChannelProvider: "telegram",
-          currentChannelId: "chat-123",
-        },
-        idempotencyKey: "idem-async-source-message-action",
-      } as never,
+      params: createTelegramSourceSendRequest(
+        "chat-123",
+        "visible media caption",
+        "idem-async-source-message-action",
+      ) as never,
       respond,
       context: makeContext(),
       req: { type: "req", id: "1", method: "message.action" },
@@ -4051,21 +4016,11 @@ describe("gateway send mirroring", () => {
       sendHandlers["message.action"],
       'sendHandlers["message.action"] test invariant',
     )({
-      params: {
-        channel: "telegram",
-        action: "send",
-        params: {
-          to: "chat-123",
-          message: "first visible reply",
-        },
-        sessionKey: "agent:main:telegram:direct:chat-123",
-        agentId: "main",
-        toolContext: {
-          currentChannelProvider: "telegram",
-          currentChannelId: "chat-123",
-        },
-        idempotencyKey: "idem-ordered-source-message-action-1",
-      } as never,
+      params: createTelegramSourceSendRequest(
+        "chat-123",
+        "first visible reply",
+        "idem-ordered-source-message-action-1",
+      ) as never,
       respond: firstRespond,
       context: makeContext(),
       req: { type: "req", id: "1", method: "message.action" },
@@ -4079,21 +4034,11 @@ describe("gateway send mirroring", () => {
       sendHandlers["message.action"],
       'sendHandlers["message.action"] test invariant',
     )({
-      params: {
-        channel: "telegram",
-        action: "send",
-        params: {
-          to: "chat-123",
-          message: "second visible reply",
-        },
-        sessionKey: "agent:main:telegram:direct:chat-123",
-        agentId: "main",
-        toolContext: {
-          currentChannelProvider: "telegram",
-          currentChannelId: "chat-123",
-        },
-        idempotencyKey: "idem-ordered-source-message-action-2",
-      } as never,
+      params: createTelegramSourceSendRequest(
+        "chat-123",
+        "second visible reply",
+        "idem-ordered-source-message-action-2",
+      ) as never,
       respond: secondRespond,
       context: makeContext(),
       req: { type: "req", id: "2", method: "message.action" },
@@ -4297,21 +4242,13 @@ describe("gateway send mirroring", () => {
       jsonResult({ ok: true, messageId: "tg-external" }),
     );
 
-    const { respond } = await runMessageActionRequest({
-      channel: "telegram",
-      action: "send",
-      params: {
-        to: "other-chat",
-        message: "external visible reply",
-      },
-      sessionKey: "agent:main:telegram:direct:chat-123",
-      agentId: "main",
-      toolContext: {
-        currentChannelProvider: "telegram",
-        currentChannelId: "chat-123",
-      },
-      idempotencyKey: "idem-external-message-action",
-    });
+    const { respond } = await runMessageActionRequest(
+      createTelegramSourceSendRequest(
+        "other-chat",
+        "external visible reply",
+        "idem-external-message-action",
+      ),
+    );
 
     expect(firstRespondCall(respond)[0]).toBe(true);
     expect(mocks.appendAssistantMessageToSessionTranscript).not.toHaveBeenCalled();
@@ -4561,7 +4498,12 @@ describe("gateway send mirroring", () => {
             resolveDefaultTo: ({ accountId }) => `${accountId ?? "default"}-room`,
           },
         }),
-        actions: { describeMessageTool: () => ({ actions: ["send"] }) },
+        actions: {
+          describeMessageTool: () => ({ actions: ["send"] }),
+          messageActionTargetAliases: {
+            send: { aliases: ["roomId"], deliveryTargetAliases: ["roomId"] },
+          },
+        },
         messaging: {
           targetResolver: { looksLikeId: () => true, hint: "<room>" },
         },
@@ -4612,6 +4554,14 @@ describe("gateway send mirroring", () => {
         gatewayMode: true,
         nativeDeclines: false,
         expectedTarget: "secondary-room",
+      },
+      {
+        name: "a selected plugin target alias",
+        params: { roomId: "owner-room" },
+        accountId: undefined,
+        gatewayMode: false,
+        nativeDeclines: false,
+        expectedTarget: "owner-room",
       },
     ])("routes $name through one canonical outbound send", async (testCase) => {
       if (testCase.nativeDeclines) {

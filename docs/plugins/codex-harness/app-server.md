@@ -52,6 +52,11 @@ operator action is required. Ping and pong frames are transport-level health
 checks: they do not start a Codex turn or invoke a model. Local stdio and Unix
 transports do not perform these remote connection checks.
 
+WebSocket and Unix socket shutdown settles when the connection closes, including
+when the server disconnected first. If the peer cannot complete the closing
+handshake, OpenClaw terminates its socket at the shutdown deadline. A closed
+connection does not prove that work on the remote app-server has stopped.
+
 Local stdio app-server sessions default to the trusted local operator
 posture: `approvalPolicy: "never"`, `approvalsReviewer: "user"`, and
 `sandbox: "danger-full-access"`. If local Codex requirements disallow that
@@ -106,6 +111,10 @@ only decisions that the native request can preserve. For example, a command
 that permits one execution but not session trust offers allow-once and deny;
 byte-bound script approvals also remain one-shot. File prompts support both
 one-shot and session approval.
+
+If another connected Codex client answers a native approval request, OpenClaw
+dismisses the matching pending prompt without sending a second answer or treating
+that resolution as a timeout or tool failure.
 
 Terminal operator decisions reuse the Gateway's authoritative approval row and
 its exact execution binding. When execution identity collection is enabled,
@@ -270,7 +279,7 @@ Malformed or unknown options and code-loading options such as `--require` or
 - `OPENCLAW_CODEX_APP_SERVER_APPROVAL_POLICY`
 - `OPENCLAW_CODEX_APP_SERVER_SANDBOX`
 
-`OPENCLAW_CODEX_APP_SERVER_GUARDIAN=1` was removed. Use
+`OPENCLAW_CODEX_APP_SERVER_GUARDIAN=1` was removed in 2026.4.22. Use
 `plugins.entries.codex.config.appServer.mode: "guardian"` instead, or
 `OPENCLAW_CODEX_APP_SERVER_MODE=guardian` for one-off local testing. Config
 is preferred for repeatable deployments because it keeps the plugin

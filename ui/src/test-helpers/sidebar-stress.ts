@@ -296,6 +296,9 @@ export function geometry(sidebar: HTMLElement) {
             bare: r.parentElement?.classList.contains("session-glyph--bare"),
           };
         }),
+        traces: [...row.querySelectorAll<SVGSVGElement>(".session-glyph__trace")].map((trace) =>
+          trace.getBoundingClientRect(),
+        ),
         stacks: [...row.querySelectorAll<HTMLElement>(".session-owner-stack")].map((s) =>
           s.getBoundingClientRect(),
         ),

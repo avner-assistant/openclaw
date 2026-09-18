@@ -6,7 +6,9 @@ read_when:
 title: "Health checks"
 ---
 
-Short guide to verify channel connectivity without guessing.
+Short guide to verify Gateway and channel health without guessing. It covers the
+CLI health checks, the HTTP probe endpoints, the dedicated `health` command, and
+uptime monitoring.
 
 ## Quick checks
 
@@ -33,6 +35,16 @@ default agent, or the first configured agent when there is no default; it is not
 a fleet total.
 
 ## Deep diagnostics
+
+`openclaw health --json` reports `modelRuntime.degraded: true` when a large
+fleet's model preparation exceeds the startup budget. `pendingAgents` names the
+agents still preparing and `stage` identifies the current acquisition phase.
+The Gateway remains running and completed agents remain usable. Background
+preparation clears the degraded status when all runtimes are ready.
+
+Health and status collection groups fast session-store reads into short work
+slices, keeping busy background preparation from delaying every individual read.
+Slow reads finish their transaction before yielding to other Gateway work.
 
 - Creds on disk: `ls -l ~/.openclaw/credentials/whatsapp/<accountId>/creds.json` (mtime should be recent).
 - Session store: `ls -l ~/.openclaw/agents/<agentId>/agent/openclaw-agent.sqlite`. Count and recent recipients are surfaced via `status`.
@@ -72,6 +84,24 @@ The Gateway exposes three unauthenticated `GET`/`HEAD` probe pairs:
 
 Remote unauthenticated startup responses contain only `ok` and `status`. Local-direct and authenticated callers also receive `version`, `uptimeMs`, and `pendingReason` while startup is pending. Readiness details follow the same local-or-authenticated gate because they can name failing subsystems.
 
+### Plugin replacement recovery
+
+During plugin replacement or recovery, `/readyz` returns `503`. Detailed responses
+include `failing: ["plugin-reload"]` and a `pluginReload` object with the affected
+`pluginIds`, the current `phase` (`reloading`, `recovering`, or `failed`), and any
+recovery `deadlineAtMs` and actionable `reason`. These owner-reported facts bypass
+the channel readiness cache, so a failed replacement cannot appear as only a
+generic channel outage or stale healthy result.
+
+The health monitor does not spend channel restart attempts while replacement
+holds channel admission paused. After successful rollback, the previous plugin
+configuration restarts its channels and ordinary readiness checks resume. If
+automatic recovery reaches its deadline, `phase: "failed"` retains the failure
+reason and next action. Admission pauses are released, allowing the monitor to
+restart callable channels; a plugin whose admitted work or cleanup still owns
+resources requires the reported repair or retry before it can restart. See
+[Config hot reload](/gateway/configuration/hot-reload) for the recovery contract.
+
 ### CPU pressure and event-loop delay
 
 Detailed readiness can include the latest completed `eventLoop` diagnostic
@@ -82,6 +112,11 @@ including worker and native threads, divided by elapsed wall time. The unit is
 core equivalents: `1` means one CPU core fully occupied over the interval, and
 parallel work can produce values above `1`. It is not a percentage of the host's
 total CPU capacity.
+
+The Control UI's **System busyness** overlay reads the same sampler through
+`status.eventLoop` on both Node and Bun. Its CPU percentage uses `100%` for one
+fully occupied core. CPU and delay show a dash until the first sample completes;
+a persistent dash means the telemetry is unavailable, not zero CPU usage.
 
 Event-loop delay and utilization describe the main thread separately. A `cpu`
 degradation reason reports process CPU pressure with delay co-evidence; it does
@@ -102,7 +137,7 @@ When no `x-openclaw-session-key` header or `user` field is provided, `/v1/chat/c
 
 - **BetterStack:** Set health check URL to `https://<your-gateway-host>:<port>/health`
 - **UptimeRobot:** Add a new HTTP monitor with URL `https://<your-gateway-host>:<port>/health`
-- **Generic:** Any HTTP GET to `/health` returns 200 with `{"ok":true}` when the gateway is healthy
+- **Generic:** Any HTTP GET to `/health` returns 200 with `{"ok":true,"status":"live"}` while the gateway's HTTP server is live
 
 ## When something fails
 

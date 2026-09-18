@@ -5,6 +5,7 @@ import ai.openclaw.app.gateway.ChatSendAck
 import ai.openclaw.app.gateway.GatewayLoadedImage
 import ai.openclaw.app.gateway.GatewayLoadedMedia
 import ai.openclaw.app.gateway.GatewayMediaKind
+import ai.openclaw.app.gateway.GatewayMethod
 import ai.openclaw.app.gateway.GatewayRequestDefinitiveFailure
 import ai.openclaw.app.gateway.GatewayRequestNotEnqueued
 import ai.openclaw.app.gateway.GatewayRequestOutcomeUnknown
@@ -21,10 +22,10 @@ import ai.openclaw.app.i18n.NativeText
 import ai.openclaw.app.i18n.nativeText
 import ai.openclaw.app.i18n.resolveOptionalNativeText
 import ai.openclaw.app.i18n.verbatimText
-import ai.openclaw.app.parseGatewayModels
+import ai.openclaw.app.parseGatewayModelCatalog
 import ai.openclaw.app.resolveAgentIdFromMainSessionKey
 import ai.openclaw.app.ui.chat.chatModelSendBlocked
-import ai.openclaw.app.ui.chat.thinkingSupportedForSelection
+import ai.openclaw.app.ui.chat.providerQualifiedRef
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -69,6 +70,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal const val SESSION_LIST_FETCH_LIMIT = 200
 internal const val SESSION_UNREAD_ACK_CAPABILITY = "session-unread-ack-contract"
 private const val SESSION_SCOPED_CHAT_METADATA_CAPABILITY = "session-scoped-chat-metadata"
+private const val SESSION_SCOPED_MODEL_CATALOG_CAPABILITY = "session-scoped-model-catalog"
 private val QUESTION_REFRESH_RETRY_DELAYS_MS = longArrayOf(1_000L, 2_000L, 4_000L)
 private val SWARM_REFRESH_RETRY_DELAYS_MS = longArrayOf(1_000L, 2_000L, 4_000L)
 private const val WEAR_AGENT_PULSE_SWARM_MAX_ROWS = 1_000
@@ -166,12 +168,12 @@ private class BranchListingUnsupportedException : IllegalStateException("session
 
 private data class ChatMetadataScope(
   val agentId: String,
-  val sessionKey: String?,
+  val sessionKey: String,
 ) {
-  fun params(): JsonObject =
+  fun params(sessionScoped: Boolean): JsonObject =
     buildJsonObject {
       put("agentId", JsonPrimitive(agentId))
-      sessionKey?.let { put("sessionKey", JsonPrimitive(it)) }
+      if (sessionScoped) put("sessionKey", JsonPrimitive(sessionKey))
     }
 }
 
@@ -401,7 +403,7 @@ class ChatController internal constructor(
   private val activeSessionReads = mutableSetOf<SessionSettingsRead>()
   private val progressCardUpgradeError = nativeText("Update the gateway to load progress cards for this agent.")
   private val sessionSettingsRefreshError = nativeText("Could not refresh session settings. Refresh before sending.")
-  private val chatMetadataRefreshError = nativeText("Could not refresh models. Previous choices are unchanged. Tap Refresh to retry.")
+  private val chatMetadataRefreshError = nativeText("Could not refresh models. Tap Refresh to try again.")
 
   // Guarded by gatewayScopeApplyLock; stable gateway keys retain choices across reconnects.
   private val lastSelectedChatSessionByOwner = mutableMapOf<ChatAgentSessionSelectionOwner, RememberedChatSession>()
@@ -1122,9 +1124,13 @@ class ChatController internal constructor(
   }
 
   /** Restores the selected gateway's local state without waiting for transport availability. */
-  fun restoreSelectedGatewayOfflineState() {
-    refresh()
-    scope.launch { publishOutbox() }
+  suspend fun restoreSelectedGatewayOfflineState() {
+    val cacheReady = CompletableDeferred<Unit>()
+    refreshCommands()
+    refreshHistoryForRecovery(forceHealth = true, cacheReady = cacheReady)
+    // Only local hydration gates the handoff. Never await live history or network health here.
+    cacheReady.await()
+    publishOutbox()
   }
 
   /** Purges cached transcripts and queued sends for one retired authentication scope. */
@@ -1609,12 +1615,6 @@ class ChatController internal constructor(
     Reconcile,
     FinalizeMutation,
   }
-
-  /** Rewinds the current transcript at one canonical history entry. */
-  suspend fun rewindSessionAtEntry(
-    sessionKey: String,
-    entryId: String,
-  ): String? = rewindSessionAtEntryResult(sessionKey, entryId)?.editorText
 
   suspend fun rewindSessionAtEntryResult(
     sessionKey: String,
@@ -3335,7 +3335,8 @@ class ChatController internal constructor(
     attachments: List<OutgoingAttachment>,
     expectedOwner: ChatComposerOwner,
     idempotencyKey: String? = null,
-  ): Boolean = sendMessageAwaitAcceptance(message, thinkingLevel, attachments, expectedOwner, idempotencyKey)
+    canAdmit: () -> Boolean = { true },
+  ): Boolean = sendMessageAwaitAcceptance(message, thinkingLevel, attachments, expectedOwner, idempotencyKey, canAdmit)
 
   internal suspend fun wasOutboxCommandAdmitted(id: String): Boolean = commandOutbox.wasAdmitted(id)
 
@@ -3359,6 +3360,7 @@ class ChatController internal constructor(
     attachments: List<OutgoingAttachment>,
     expectedOwner: ChatComposerOwner?,
     idempotencyKey: String? = null,
+    canAdmit: () -> Boolean = { true },
   ): Boolean {
     val sendCacheScope = currentCacheScope()
     val sendGatewayId = sendCacheScope?.gatewayId
@@ -3393,13 +3395,13 @@ class ChatController internal constructor(
     // Session settings and sends share one ordering boundary; the first post-selection turn
     // must not leave with stale model or thinking state while sessions.patch is in flight.
     if (!waitForPendingSessionSettings(sessionKey)) return false
-    if (!ownsCapturedUi()) return false
+    if (!canAdmit() || !ownsCapturedUi()) return false
     if (chatModelSendBlocked(_healthOk.value, _selectedModelRef.value, _modelCatalog.value)) return false
     // agent-command.ts throws for explicit unsupported levels, so hidden controls must send off.
     // Applied at enqueue time too so durable rows never persist a level the selected model
     // rejects; reconnect flushes with a cleared catalog fail open, matching pre-gating behavior.
     val thinking =
-      if (thinkingSupportedForCurrentSelection()) {
+      if (shouldSendThinkingLevel()) {
         normalizeThinking(thinkingLevel)
       } else {
         "off"
@@ -3416,6 +3418,7 @@ class ChatController internal constructor(
         thinkingLevel = thinking,
         attachments = attachments,
         canPublishUi = ::ownsCapturedUi,
+        canAdmit = canAdmit,
         ownerAgentId = capturedOwner.agentId,
         idempotencyKey = idempotencyKey,
       ) ?: return false
@@ -4478,7 +4481,10 @@ class ChatController internal constructor(
    * owned until that authoritative snapshot resolves them; resetting healthOk here
    * would block sends after reconnect.
    */
-  private fun refreshHistoryForRecovery(forceHealth: Boolean = false) {
+  private fun refreshHistoryForRecovery(
+    forceHealth: Boolean = false,
+    cacheReady: CompletableDeferred<Unit>? = null,
+  ) {
     val (key, generation) =
       synchronized(gatewayScopeApplyLock) {
         // Automatic hydration retries history failures without dismissing unrelated action errors.
@@ -4504,7 +4510,7 @@ class ChatController internal constructor(
       synchronized(pendingRuns) {
         pendingRuns + optimisticMessagesByRunId.keys + unresolvedRepliesByRunId.keys
       }
-    bootstrap(sessionKey = key, generation = generation, runIdsToReconcile = runIdsToReconcile)
+    bootstrap(sessionKey = key, generation = generation, runIdsToReconcile = runIdsToReconcile, cacheReady = cacheReady)
   }
 
   // Once a chat is selected, cancelling its UI caller must not abandon hydration.
@@ -4512,38 +4518,47 @@ class ChatController internal constructor(
     sessionKey: String,
     generation: Long,
     runIdsToReconcile: Set<String> = emptySet(),
-  ) = scope.async {
-    val healthRefresh = synchronized(gatewayScopeApplyLock) { pendingHealthRefresh?.takeIf { it.historyGeneration == generation } }
-    try {
-      // Cache-first cold open: live history always replaces cached rows wholesale.
-      primeFromCache(sessionKey, generation)
-      val historyResult =
-        fetchAndApplyHistory(
-          sessionKey,
-          generation,
-          purpose = HistoryRefreshPurpose.RestoreSession,
-          runIdsToReconcile = runIdsToReconcile,
-          refreshBranches = true,
-        )
-      if (historyResult !is HistoryRefreshResult.Applied) return@async
-      if (isSwarmEnabled()) refreshSwarmSessions()
-    } catch (err: CancellationException) {
-      throw err
-    } catch (err: Throwable) {
-      synchronized(gatewayScopeApplyLock) {
-        if (!isCurrentHistoryLoad(sessionKey, _sessionKey.value, generation, historyLoadGeneration.get())) return@async
-        updateErrorText(err.message, historyGeneration = generation)
-      }
-    } finally {
-      finishHistoryHealth(healthRefresh, generation)
-      synchronized(gatewayScopeApplyLock) {
-        if (isCurrentHistoryLoad(sessionKey, _sessionKey.value, generation, historyLoadGeneration.get())) {
-          _historyLoading.value = false
-          scheduleRecoveryHistoryReconciliation(sessionKey, generation, runIdsToReconcile)
+    cacheReady: CompletableDeferred<Unit>? = null,
+  ) = scope
+    .async {
+      val healthRefresh = synchronized(gatewayScopeApplyLock) { pendingHealthRefresh?.takeIf { it.historyGeneration == generation } }
+      try {
+        // Cache-first cold open: live history always replaces cached rows wholesale.
+        try {
+          primeFromCache(sessionKey, generation)
+        } finally {
+          cacheReady?.complete(Unit)
+        }
+        val historyResult =
+          fetchAndApplyHistory(
+            sessionKey,
+            generation,
+            purpose = HistoryRefreshPurpose.RestoreSession,
+            runIdsToReconcile = runIdsToReconcile,
+            refreshBranches = true,
+          )
+        if (historyResult !is HistoryRefreshResult.Applied) return@async
+        if (isSwarmEnabled()) refreshSwarmSessions()
+      } catch (err: CancellationException) {
+        throw err
+      } catch (err: Throwable) {
+        synchronized(gatewayScopeApplyLock) {
+          if (!isCurrentHistoryLoad(sessionKey, _sessionKey.value, generation, historyLoadGeneration.get())) return@async
+          updateErrorText(err.message, historyGeneration = generation)
+        }
+      } finally {
+        finishHistoryHealth(healthRefresh, generation)
+        synchronized(gatewayScopeApplyLock) {
+          if (isCurrentHistoryLoad(sessionKey, _sessionKey.value, generation, historyLoadGeneration.get())) {
+            _historyLoading.value = false
+            scheduleRecoveryHistoryReconciliation(sessionKey, generation, runIdsToReconcile)
+          }
         }
       }
+    }.also { hydration ->
+      // A disposed controller may cancel a queued bootstrap before its body starts.
+      hydration.invokeOnCompletion { cacheReady?.complete(Unit) }
     }
-  }
 
   private fun finishHistoryHealth(
     refresh: HealthRefresh?,
@@ -5074,7 +5089,7 @@ class ChatController internal constructor(
     val agentId = resolveAgentIdForSessionKey(sessionKey) ?: return null
     // Stable v2026.7.1-2 accepts only agentId. Retire this negotiation only when the
     // minimum supported Gateway contract guarantees session-scoped chat.metadata.
-    return ChatMetadataScope(agentId, sessionKey.takeIf { gatewayAdvertisesCapability(SESSION_SCOPED_CHAT_METADATA_CAPABILITY) == true })
+    return ChatMetadataScope(agentId, sessionKey)
   }
 
   private fun clearChatMetadata(nextScope: ChatMetadataScope? = null) {
@@ -5099,31 +5114,57 @@ class ChatController internal constructor(
     var shouldRefreshSwarm = false
     var shouldDisableSwarm = false
     try {
-      val res = requestGatewayBound(requestCacheScope?.gatewayId, "chat.metadata", metadataScope.params().toString())
+      val res =
+        requestGatewayBound(
+          requestCacheScope?.gatewayId,
+          "chat.metadata",
+          metadataScope.params(gatewayAdvertisesCapability(SESSION_SCOPED_CHAT_METADATA_CAPABILITY) == true).toString(),
+        )
       val root = json.parseToJsonElement(res).asObjectOrNull()
       val metadataSwarmEnabled = root?.get("swarmEnabled").asBooleanOrNull() == true
+      synchronized(gatewayScopeApplyLock) {
+        if (requestSequence != chatMetadataRequestSequence.get() || requestCacheScope != currentCacheScope() || metadataScope != currentChatMetadataScope()) return
+        _commands.value = parseChatCommands(json, res)
+        synchronized(swarmLock) { swarmEnabled = metadataSwarmEnabled }
+        shouldRefreshSwarm = metadataSwarmEnabled
+        shouldDisableSwarm = !metadataSwarmEnabled
+      }
+      val catalogParams =
+        buildJsonObject {
+          put("agentId", JsonPrimitive(metadataScope.agentId))
+          put("sessionKey", JsonPrimitive(metadataScope.sessionKey))
+          put("view", JsonPrimitive("configured"))
+          put("includeDetails", JsonPrimitive(true))
+        }
+      val catalogSupported = gatewayAdvertisesCapability(SESSION_SCOPED_MODEL_CATALOG_CAPABILITY) == true
+      val catalogResult =
+        if (catalogSupported) {
+          json
+            .parseToJsonElement(
+              requestGatewayBound(requestCacheScope?.gatewayId, GatewayMethod.ModelsList.rawValue, catalogParams.toString()),
+            ).jsonObject
+        } else {
+          null
+        }
       synchronized(gatewayScopeApplyLock) {
         if (
           requestSequence == chatMetadataRequestSequence.get() &&
           requestCacheScope == currentCacheScope() &&
           metadataScope == currentChatMetadataScope()
         ) {
-          _commands.value = parseChatCommands(json, res)
-          val models = parseGatewayModels(root?.get("models") as? JsonArray)
-          _modelCatalog.value = models
-          // chat.metadata cannot distinguish a valid empty catalog from its timeout fallback.
-          // Retry one empty response, then accept empty so health events cannot poll forever.
-          chatMetadataLoadState =
-            when {
-              models.isNotEmpty() -> ChatMetadataLoadState.Loaded
-              chatMetadataLoadState == ChatMetadataLoadState.RetryEmptyCatalog -> ChatMetadataLoadState.Loaded
-              else -> ChatMetadataLoadState.RetryEmptyCatalog
+          val catalog = parseGatewayModelCatalog(catalogResult)
+          _modelCatalog.value = catalog.models
+          val refreshFailed = catalog.refreshFailed
+          chatMetadataLoadState = ChatMetadataLoadState.Loaded
+          _sessions.value.firstOrNull { it.key == _sessionKey.value }?.let(::publishSelectedSessionSettings)
+          if (requestSelection != null && isCurrentSessionAction(requestSelection)) {
+            if (!catalogSupported && _errorText.value == null) {
+              updateLocalizedErrorText(nativeText("Update your Gateway to use session model choices."))
+            } else if (refreshFailed && (_errorText.value == null || _errorText.value == chatMetadataRefreshError)) {
+              updateLocalizedErrorText(chatMetadataRefreshError)
+            } else if (!refreshFailed && _errorText.value == chatMetadataRefreshError) {
+              updateErrorText(null)
             }
-          synchronized(swarmLock) { swarmEnabled = metadataSwarmEnabled }
-          shouldRefreshSwarm = metadataSwarmEnabled
-          shouldDisableSwarm = !metadataSwarmEnabled
-          if (requestSelection != null && isCurrentSessionAction(requestSelection) && _errorText.value == chatMetadataRefreshError) {
-            updateErrorText(null)
           }
         }
       }
@@ -5143,6 +5184,7 @@ class ChatController internal constructor(
         }
       }
     }
+    if (requestSequence != chatMetadataRequestSequence.get() || requestCacheScope != currentCacheScope() || metadataScope != currentChatMetadataScope()) return
     when {
       shouldRefreshSwarm -> refreshSwarmSessions()
       shouldDisableSwarm -> resetSwarmProgress()
@@ -5437,6 +5479,7 @@ class ChatController internal constructor(
     thinkingLevel: String,
     attachments: List<OutgoingAttachment>,
     canPublishUi: () -> Boolean,
+    canAdmit: () -> Boolean,
     ownerAgentId: String,
     idempotencyKey: String?,
   ): ChatOutboxItem? {
@@ -5465,6 +5508,8 @@ class ChatController internal constructor(
     val result =
       try {
         historyPublicationMutex.withLock {
+          // Recheck the caller and selected attempt after the history wait, immediately before enqueue.
+          if (!canAdmit()) return null
           commandOutbox.enqueue(
             gatewayId = outboxScope.gatewayId,
             sessionKey = sessionKey,
@@ -6216,7 +6261,7 @@ class ChatController internal constructor(
       }
       // Reconnect rechecks the visible model; other queued owners keep their captured level.
       val thinking =
-        if (direct == null && sessionKey == _sessionKey.value && !thinkingSupportedForCurrentSelection()) "off" else item.thinkingLevel
+        if (direct == null && sessionKey == _sessionKey.value && !shouldSendThinkingLevel()) "off" else item.thinkingLevel
       val params = buildChatSendParams(sessionKey, ownerAgentId, item.text, thinking, item.id, attachments)
       return OutboxSendResult.Acknowledged(parseChatSendAck(json, requestGatewayBound(gatewayId, "chat.send", params)))
     }
@@ -7663,7 +7708,11 @@ class ChatController internal constructor(
       idempotencyKey = obj["idempotencyKey"].asStringOrNull(),
       runId =
         normalizeChatRunId(metadata?.get("runId"))
-          ?: if (role == "user") normalizeChatRunId(metadata?.get("idempotencyKey")) ?: normalizeChatRunId(obj["idempotencyKey"]) else null,
+          ?: if (role == "user") {
+            normalizeChatRunId(metadata?.get("idempotencyKey")) ?: normalizeChatRunId(obj["idempotencyKey"])
+          } else {
+            normalizeChatRunId(obj["runId"]) ?: normalizeChatRunId(obj["openclawStreamFallback"].asObjectOrNull()?.get("runId"))
+          },
       steerTargetRunId =
         metadata
           ?.get("steerTargetRunId")
@@ -7672,6 +7721,8 @@ class ChatController internal constructor(
           ?.takeIf(String::isNotEmpty),
       entryId = metadata?.get("id").asJsonStringOrNull()?.takeIf { it.isNotBlank() },
       turnBoundary = metadata?.get("turnBoundary") == JsonPrimitive(true),
+      phase = if (role == "assistant") parseChatAssistantPhase(obj) else null,
+      isError = isChatToolError(obj) || obj["stopReason"].asStringOrNull() in setOf("error", "aborted"),
       isSyntheticDisplay = obj["openclawMessageToolMirror"].asObjectOrNull() != null || obj["openclawStreamFallback"].asObjectOrNull() != null,
       truncated =
         truncated == JsonPrimitive(true) ||
@@ -7684,6 +7735,7 @@ class ChatController internal constructor(
       deliveryMirror = parseChatDeliveryMirror(obj["openclawDeliveryMirror"]),
       usage = parseChatMessageUsage(obj),
       cost = parseChatMessageCost(obj),
+      sourceTools = parseChatSourceTools(obj, role),
     )
   }
 
@@ -7947,10 +7999,19 @@ class ChatController internal constructor(
         is SessionSettingsChange.Model -> {
           val provider = change.ref?.substringBefore('/', missingDelimiterValue = "")?.takeIf(String::isNotEmpty)
           val model = change.ref?.let { it.substringAfter('/', missingDelimiterValue = it) }
+          val nextProvider = resolution?.modelProvider ?: provider ?: base.modelProvider.takeIf { change.ref != null }
+          val nextModel = resolution?.model ?: model
+          val nextRuntime = resolution?.agentRuntimeId ?: resolvedEntry?.agentRuntimeId
+          val sameModel =
+            base.modelProvider != null && base.model != null &&
+              nextProvider == base.modelProvider && nextModel == base.model &&
+              (nextRuntime == null || nextRuntime == base.agentRuntimeId)
           applied.copy(
-            modelProvider = resolution?.modelProvider ?: provider ?: base.modelProvider.takeIf { change.ref != null },
-            model = resolution?.model ?: model,
-            thinkingDefault = null,
+            modelProvider = nextProvider,
+            model = nextModel,
+            agentRuntimeId = nextRuntime ?: base.agentRuntimeId.takeIf { sameModel },
+            thinkingLevels = resolution?.thinkingLevels ?: resolvedEntry?.thinkingLevels ?: base.thinkingLevels.takeIf { sameModel },
+            thinkingDefault = resolvedEntry?.thinkingDefault ?: base.thinkingDefault.takeIf { sameModel },
           )
         }
 
@@ -8025,23 +8086,18 @@ class ChatController internal constructor(
     entry: ChatSessionEntry?,
     fallbackLevel: String = _thinkingLevel.value,
   ) {
-    val advertised = entry?.thinkingLevels
+    val model =
+      _modelCatalog.value.firstOrNull {
+        val runtimeId = it.agentRuntime?.get("id").asStringOrNull()
+        it.providerQualifiedRef() == entry?.providerQualifiedModelRef() &&
+          (entry.agentRuntimeId == null || runtimeId == null || entry.agentRuntimeId == runtimeId)
+      }
+    val sessionProfile = entry?.thinkingLevels != null || entry?.thinkingDefault != null
+    val advertised = if (sessionProfile) entry.thinkingLevels else model?.thinkingLevels
+    val advertisedDefault = if (sessionProfile) entry.thinkingDefault else model?.thinkingDefault
     if (advertised == null) {
       _thinkingLevelSelection.value = defaultChatThinkingLevelSelection
-      val requestedLevel =
-        entry
-          ?.thinkingLevel
-          ?.takeIf { it.isNotBlank() }
-          ?.let(::normalizeThinking)
-          ?: normalizeThinking(fallbackLevel)
-      _thinkingLevel.value =
-        if (entry?.thinkingLevel != null) {
-          requestedLevel
-        } else {
-          requestedLevel.takeIf { candidate ->
-            defaultChatThinkingLevelSelection.options.any { it.id == candidate }
-          } ?: "off"
-        }
+      _thinkingLevel.value = normalizeThinking(entry?.thinkingLevel ?: advertisedDefault ?: fallbackLevel)
       return
     }
     val options =
@@ -8053,29 +8109,30 @@ class ChatController internal constructor(
             label = option.label.trim().takeIf { it.isNotEmpty() } ?: id,
           )
         }.distinctBy { it.id }
-        .ifEmpty { listOf(ChatThinkingLevelOption(id = "off", label = "Off")) }
     _thinkingLevelSelection.value =
       ChatThinkingLevelSelection(
         options = options,
         isGatewayProvided = true,
       )
-    val selected = entry.thinkingLevel?.let(::normalizeThinking)
+    val selected = entry?.thinkingLevel?.let(::normalizeThinking)
     val currentLevel = normalizeThinking(fallbackLevel)
-    val defaultLevel = entry.thinkingDefault?.let(::normalizeThinking)
+    val defaultLevel = advertisedDefault?.let(::normalizeThinking)
     // Lightweight picker metadata can omit a Gateway-validated effective level.
     // Preserve that send state; only local/default fallbacks require picker membership.
     _thinkingLevel.value =
       selected
-        ?: listOf(currentLevel, defaultLevel).firstOrNull { candidate -> options.any { it.id == candidate } }
-        ?: options.first().id
+        ?: listOf(defaultLevel, currentLevel).firstOrNull { candidate -> options.any { it.id == candidate } }
+        ?: options.firstOrNull()?.id
+        ?: "off"
   }
 
-  private fun thinkingSupportedForCurrentSelection(): Boolean {
+  private fun shouldSendThinkingLevel(): Boolean {
     val selection = _thinkingLevelSelection.value
     return if (selection.isGatewayProvided) {
       selection.options.any { it.id != "off" }
     } else {
-      thinkingSupportedForSelection(_selectedModelRef.value, _modelCatalog.value)
+      // Missing picker metadata must not overwrite a saved request level with Off.
+      true
     }
   }
 
@@ -8367,7 +8424,6 @@ class ChatController internal constructor(
 
 private enum class ChatMetadataLoadState {
   Unloaded,
-  RetryEmptyCatalog,
   Loaded,
 }
 
@@ -8387,7 +8443,8 @@ internal fun isCurrentHistoryLoad(
  */
 internal fun parseChatMessageContent(el: JsonElement): ChatMessageContent? {
   val obj = el.asObjectOrNull() ?: return null
-  return when (val type = obj["type"].asStringOrNull() ?: "text") {
+  val rawType = obj["type"].asStringOrNull() ?: "text"
+  return when (val type = normalizeChatToolContentType(rawType) ?: rawType) {
     "text", "input_text", "output_text" -> {
       ChatMessageContent(
         type = "text",
@@ -8440,11 +8497,11 @@ internal fun parseChatMessageContent(el: JsonElement): ChatMessageContent? {
       )
     }
 
-    "toolCall", "tool_call", "toolcall", "tool_use" -> {
+    "toolCall" -> {
       parseToolActivityContent(obj, resultBlock = false)
     }
 
-    "toolResult", "tool_result", "toolresult", "tool_result_block" -> {
+    "toolResult" -> {
       parseToolActivityContent(obj, resultBlock = true)
     }
 
@@ -8452,6 +8509,31 @@ internal fun parseChatMessageContent(el: JsonElement): ChatMessageContent? {
       null
     }
   }
+}
+
+private fun parseChatAssistantPhase(obj: JsonObject): String? {
+  if (!obj["openclawStreamFallback"]
+      .asObjectOrNull()
+      ?.get("itemId")
+      .asJsonStringOrNull()
+      .isNullOrBlank()
+  ) {
+    return "commentary"
+  }
+  val phases =
+    obj["content"].asArrayOrNull().orEmpty().mapNotNull { element ->
+      val block = element.asObjectOrNull() ?: return@mapNotNull null
+      if (block["type"].asStringOrNull() !in setOf("text", "input_text", "output_text")) return@mapNotNull null
+      val signature = block["textSignature"].asJsonStringOrNull() ?: return@mapNotNull null
+      val metadata = runCatching { Json.parseToJsonElement(signature).asObjectOrNull() }.getOrNull()
+      if (metadata?.get("v") != JsonPrimitive(1)) return@mapNotNull null
+      val phase = metadata["phase"].asStringOrNull()?.takeIf { it == "commentary" || it == "final_answer" } ?: return@mapNotNull null
+      phase to !block["text"].asStringOrNull().isNullOrBlank()
+    }
+  // Mixed-phase messages keep every explicit answer outside the work disclosure.
+  if (phases.any { (phase, visible) -> phase == "final_answer" && visible }) return "final_answer"
+  obj["phase"].asStringOrNull()?.takeIf { it == "commentary" || it == "final_answer" }?.let { return it }
+  return phases.map { it.first }.distinct().singleOrNull()
 }
 
 // Match gateway-client user-turn ownership, including the persisted user suffix.
@@ -8569,7 +8651,7 @@ private fun parseToolActivityContent(
         name = name.ifEmpty { "tool" },
         detail = toolDetail(args),
         result = result,
-        isError = obj["isError"] == JsonPrimitive(true),
+        isError = isChatToolError(obj),
         arguments = toolPresentationArguments(args),
       ),
   )
@@ -8579,7 +8661,7 @@ private fun parseTopLevelToolResult(obj: JsonObject): ChatMessageContent? {
   val synthetic =
     buildMap<String, JsonElement> {
       put("type", JsonPrimitive("toolResult"))
-      listOf("toolCallId", "tool_call_id", "toolUseId", "tool_use_id", "callId", "name", "toolName", "tool_name", "isError", "content", "result", "text").forEach { key ->
+      listOf("toolCallId", "tool_call_id", "toolUseId", "tool_use_id", "callId", "name", "toolName", "tool_name", "isError", "is_error", "content", "result", "text").forEach { key ->
         obj[key]?.let { put(key, it) }
       }
     }

@@ -33,6 +33,80 @@ afterAll(() => {
 });
 
 describe("app-tool-stream approval lifecycle", () => {
+  it.each([
+    ...["start", "input_delta", "update", "result", "review"].map((phase) => ({
+      phase,
+      parentToolCallId: "outer",
+    })),
+    ...["start", "input_delta", "update", "result", "review"].map((phase) => ({
+      phase,
+      parentToolCallId: undefined,
+    })),
+  ])(
+    "keeps text streaming through $phase activity (parent: $parentToolCallId)",
+    ({ phase, parentToolCallId }) => {
+      useToolStreamFakeTimers();
+      const host = createHost({
+        chatRunId: "run-1",
+        chatStream: "I'll check",
+        chatStreamStartedAt: TOOL_STREAM_TEST_NOW,
+      });
+      try {
+        handleAgentEvent(
+          host,
+          agentEvent("run-1", 1, "tool", {
+            phase,
+            toolCallId: "call",
+            parentToolCallId,
+            name: "read",
+            review: { id: "review", label: "Approval", status: "approved" },
+          }),
+        );
+        expect(host.chatStream).toBe("I'll check");
+        expect(host.chatStreamStartedAt).toBe(TOOL_STREAM_TEST_NOW);
+        expect(host.chatStreamSegments).toEqual([]);
+        expect(host.toolStreamById.size).toBe(1);
+      } finally {
+        resetToolStream(host);
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("preserves producer parent identity through live completion without reading arguments", () => {
+    const host = createHost();
+    handleAgentEvent(
+      host,
+      agentEvent("nested-run", 1, "tool", {
+        phase: "start",
+        name: "exec",
+        toolCallId: "child",
+        parentToolCallId: "outer",
+        args: { command: "gh auth login", parentToolCallId: "argument-is-not-provenance" },
+      }),
+    );
+    handleAgentEvent(
+      host,
+      agentEvent("nested-run", 2, "tool", {
+        phase: "result",
+        name: "exec",
+        toolCallId: "child",
+        isError: true,
+        result: { content: [{ type: "text", text: "gh: command not found" }] },
+      }),
+    );
+    const entry = [...host.toolStreamById.values()][0];
+    expect(extractToolCardsCached(entry?.message)).toMatchObject([
+      {
+        callId: "child",
+        runId: "nested-run",
+        parentToolCallId: "outer",
+        completed: true,
+        isError: true,
+      },
+    ]);
+  });
+
   it("carries browser tab details through the completed live result, including empty text", () => {
     const host = createHost();
     handleAgentEvent(
@@ -636,7 +710,7 @@ describe("app-tool-stream result blocks", () => {
         }),
       );
 
-      expect(host.sessions.refreshReplacement).toHaveBeenCalledOnce();
+      expect(host.sessions.reconcileMutation).toHaveBeenCalledOnce();
       expect(host.sessions.state.modelOverrides).toEqual({});
     },
   );
