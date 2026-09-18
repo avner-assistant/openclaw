@@ -3,6 +3,8 @@ import fs from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { sanitizeEnvVars } from "../agents/sandbox/sanitize-env-vars.js";
 import * as pluginConfigState from "../plugins/config-state.js";
+import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
+import { buildPluginMetadataProviderFacts } from "../plugins/plugin-metadata-provider-facts.js";
 import { resolveLocalProviderAuthEvidence } from "./provider-auth-evidence.js";
 import {
   getProviderEnvVars,
@@ -14,7 +16,7 @@ import {
 
 type MockManifestPlugin = {
   id: string;
-  origin: string;
+  origin: PluginManifestRecord["origin"];
   enabled?: boolean;
   enabledByDefault?: boolean;
   kind?: "memory" | "context-engine" | Array<"memory" | "context-engine">;
@@ -78,7 +80,7 @@ function manifestRegistry(...plugins: MockManifestPlugin[]): MockManifestRegistr
 
 function setupPlugin(
   id: string,
-  origin: string,
+  origin: PluginManifestRecord["origin"],
   provider: MockSetupProvider,
   extra: Omit<MockManifestPlugin, "id" | "origin" | "setup"> = {},
 ): MockManifestPlugin {
@@ -86,7 +88,19 @@ function setupPlugin(
 }
 
 function metadataSnapshot(...plugins: MockManifestPlugin[]) {
+  const records: PluginManifestRecord[] = plugins.map((plugin) => ({
+    channels: [],
+    providers: [],
+    cliBackends: [],
+    skills: [],
+    hooks: [],
+    rootDir: `/plugins/${plugin.id}`,
+    source: `/plugins/${plugin.id}/index.js`,
+    manifestPath: `/plugins/${plugin.id}/openclaw.plugin.json`,
+    ...plugin,
+  }));
   return {
+    owners: buildPluginMetadataProviderFacts(records),
     index: {
       plugins: plugins.map((plugin) => ({
         pluginId: plugin.id,
@@ -112,7 +126,7 @@ function useInstalledPlugins(...plugins: MockManifestPlugin[]): void {
 
 function useInstalledSetupPlugin(
   id: string,
-  origin: string,
+  origin: PluginManifestRecord["origin"],
   provider: MockSetupProvider,
   extra?: Omit<MockManifestPlugin, "id" | "origin" | "setup">,
 ): void {
@@ -125,7 +139,11 @@ function useRegistryPlugins(...plugins: MockManifestPlugin[]): void {
   );
 }
 
-function useRegistrySetupPlugin(id: string, origin: string, provider: MockSetupProvider): void {
+function useRegistrySetupPlugin(
+  id: string,
+  origin: PluginManifestRecord["origin"],
+  provider: MockSetupProvider,
+): void {
   useRegistryPlugins(setupPlugin(id, origin, provider));
 }
 
@@ -199,6 +217,7 @@ describe("provider env vars dynamic manifest metadata", () => {
   it("scrubs usage credentials using host metadata rather than the candidate sandbox env", () => {
     const configuredSnapshot = {
       workspaceDir: "/workspace",
+      owners: buildPluginMetadataProviderFacts([]),
       index: {
         plugins: [
           {

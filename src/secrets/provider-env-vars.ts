@@ -18,7 +18,6 @@ import {
   loadPluginMetadataSnapshot,
   type PluginMetadataSnapshot,
 } from "../plugins/plugin-metadata-snapshot.js";
-import { listSetupProviderIds } from "../plugins/setup-descriptors.js";
 import { hasKind } from "../plugins/slots.js";
 import { appendUniqueEnvVarCandidates } from "../shared/env-var-candidates.js";
 
@@ -209,11 +208,11 @@ function resolveManifestProviderAuthEnvVarCandidates(
   sortedAliases: readonly (readonly [string, string])[],
 ): Record<string, string[]> {
   const candidates: Record<string, string[]> = {};
-  for (const plugin of snapshot.plugins) {
-    if (!shouldUsePluginProviderEnvVars(plugin, params)) {
+  for (const { plugin, envProviders } of snapshot.owners.providerAuthContributions) {
+    if (envProviders.length === 0 || !shouldUsePluginProviderEnvVars(plugin, params)) {
       continue;
     }
-    for (const provider of plugin.setup?.providers ?? []) {
+    for (const provider of envProviders) {
       appendUniqueEnvVarCandidates(candidates, provider.id, provider.envVars ?? []);
     }
   }
@@ -235,15 +234,9 @@ function resolveManifestRuntimeAuthFacts(
   const evidenceByProvider: Record<string, ProviderAuthEvidence[]> = {};
   const refs = new Set<string>();
   const isEnabled = createInstalledPluginEnabledPredicate(snapshot.index.plugins, params?.config);
-  for (const plugin of snapshot.plugins) {
-    const evidenceProviders = (plugin.setup?.providers ?? []).filter(
-      (provider) => provider.authEvidence?.length,
-    );
-    const fallbackProviders =
-      plugin.setup?.requiresRuntime !== false && (plugin.setup?.providers || plugin.providers)
-        ? listSetupProviderIds(plugin)
-        : [];
-    if (evidenceProviders.length === 0 && fallbackProviders.length === 0) {
+  for (const { plugin, evidenceProviders, fallbackProviderRefs } of snapshot.owners
+    .providerAuthContributions) {
+    if (evidenceProviders.length === 0 && fallbackProviderRefs.length === 0) {
       continue;
     }
     // Package contributions are fixed, but their eligibility follows current config.
@@ -256,8 +249,8 @@ function resolveManifestRuntimeAuthFacts(
         appendUniqueAuthEvidence(evidenceByProvider, provider.id, provider.authEvidence ?? []);
       }
     }
-    for (const providerId of fallbackProviders) {
-      appendUniqueProviderRef(refs, providerId);
+    for (const providerId of fallbackProviderRefs) {
+      refs.add(providerId);
     }
   }
   for (const [alias, target] of sortedAliases) {
