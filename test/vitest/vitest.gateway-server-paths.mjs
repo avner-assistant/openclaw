@@ -41,6 +41,7 @@ export const gatewayDatabaseWorkerTestFiles = [
   "src/gateway/server-methods/models-list.freshness.integration.test.ts",
   "src/gateway/server-methods/models-list.membership.integration.test.ts",
   "src/gateway/server-methods/models-list.native-lifecycle.integration.test.ts",
+  "src/gateway/server-methods/models-list.worker-recovery.integration.test.ts",
   "src/gateway/server-methods/native-hook-relay.test.ts",
   "src/gateway/server-methods/nodes.test.ts",
   "src/gateway/server-methods/projects.test.ts",
