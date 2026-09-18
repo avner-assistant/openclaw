@@ -5888,7 +5888,76 @@ td.data-table-key-col {
   transition-timing-function: linear;
 }
 
+.hover-marquee--loop {
+  --hover-marquee-fade-width: 20px;
+}
+
+.hover-marquee--loop > .hover-marquee__text {
+  transition: none;
+}
+
+.hover-marquee--loop.hover-marquee--scrolling {
+  animation: hover-marquee-loop-fade var(--hover-marquee-duration) linear infinite;
+}
+
+.hover-marquee--loop.hover-marquee--scrolling > .hover-marquee__text {
+  animation: hover-marquee-loop var(--hover-marquee-duration) linear infinite;
+}
+
+@keyframes hover-marquee-loop {
+  0%,
+  90%,
+  100% {
+    transform: translateX(0);
+  }
+
+  40%,
+  50% {
+    transform: translateX(var(--hover-marquee-shift));
+  }
+}
+
+/* Fade only the clipped edge during endpoint pauses, including RTL names. */
+@keyframes hover-marquee-loop-fade {
+  0%,
+  90%,
+  100% {
+    mask-image: linear-gradient(
+      var(--hover-marquee-fade-direction),
+      black calc(100% - var(--hover-marquee-fade-width)),
+      transparent
+    );
+  }
+
+  1%,
+  39%,
+  51%,
+  89% {
+    mask-image: linear-gradient(
+      var(--hover-marquee-fade-direction),
+      transparent,
+      black var(--hover-marquee-fade-width),
+      black calc(100% - var(--hover-marquee-fade-width)),
+      transparent
+    );
+  }
+
+  40%,
+  50% {
+    mask-image: linear-gradient(
+      var(--hover-marquee-fade-direction),
+      transparent,
+      black var(--hover-marquee-fade-width)
+    );
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .hover-marquee--loop.hover-marquee--scrolling,
+  .hover-marquee--loop.hover-marquee--scrolling > .hover-marquee__text {
+    animation: none;
+  }
+
   .hover-marquee > .hover-marquee__text {
     transform: none;
     transition: none;
