@@ -594,7 +594,7 @@ export async function finishUpdate(params: FinishUpdateParams): Promise<UpdateRu
       await restart();
     }
     if (deferPluginConvergence) {
-      const parkGateway = async () => {
+      ({ resultWithPostUpdate, postUpdateConfigSnapshot } = await convergePlugins(async () => {
         const before = currentServiceStop();
         if (!before) {
           throw new Error("Plugin maintenance lost its update service owner.");
@@ -625,8 +625,7 @@ export async function finishUpdate(params: FinishUpdateParams): Promise<UpdateRu
         }
         stopped.windowsTaskAutoStartRecovery?.beginMutation();
         pendingRestartAtMs ??= stopped.stoppedAtMs;
-      };
-      ({ resultWithPostUpdate, postUpdateConfigSnapshot } = await convergePlugins(parkGateway));
+      }));
       const requiresInstallRootRefresh =
         restartContext.serviceUpdateVerdict?.kind === "owned" &&
         restartContext.serviceUpdateVerdict.requiresInstallRootRefresh;

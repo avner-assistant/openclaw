@@ -8,6 +8,7 @@ import {
 } from "@openclaw/normalization-core/string-coerce";
 import { SUPPORTED_NODE_VERSIONS } from "../../node-version.mjs";
 import { note } from "../../packages/terminal-core/src/note.js";
+import { formatGatewayServiceInstallationDrift } from "../cli/daemon-cli/shared.js";
 import { replaceConfigFile, type OpenClawConfig } from "../config/config.js";
 import { ConfigWritePostCommitError } from "../config/io.write-errors.js";
 import { isDefaultInstallIdentity, resolveGatewayPort, resolveIsNixMode } from "../config/paths.js";
@@ -588,7 +589,7 @@ export async function maybeRepairGatewayServiceConfig(
         })
       : expectedPlan;
   if (installationDrift && expectedRoot) {
-    note(installationDrift, "Gateway service installation");
+    note(formatGatewayServiceInstallationDrift(installationDrift), "Gateway service installation");
     try {
       await assertGatewayServiceInstallationRepairAllowed({
         service,
