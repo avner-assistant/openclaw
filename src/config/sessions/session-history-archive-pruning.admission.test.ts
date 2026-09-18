@@ -135,6 +135,72 @@ it("does not invent an admission mode when a warm database rejects a different o
 
 const boundaries = ["drain", "presence", "row", "unpublished", "removed-file"] as const;
 
+it.each([false, true])(
+  "does not wait for a pinned reader during page reclamation (free pages: %s)",
+  async (withFreePages) => {
+    const options = { agentId: "main", env: state.env };
+    const database = openOpenClawAgentDatabase(options);
+    database.db.exec("PRAGMA wal_autocheckpoint = 0");
+    if (withFreePages) {
+      database.db
+        .prepare("INSERT INTO cache_entries(scope, key, blob, updated_at) VALUES (?, ?, ?, ?)")
+        .run("checkpoint-proof", "padding", Buffer.alloc(4 * 1024 * 1024), 1);
+      database.db.prepare("DELETE FROM cache_entries WHERE scope = ?").run("checkpoint-proof");
+    }
+    expect(database.walMaintenance.checkpoint()).toBe(true);
+    const busyTimeout = database.db.prepare("PRAGMA busy_timeout").get();
+    const reader = realOpen(database.path, { readOnly: true });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      reader.exec("BEGIN");
+      reader.prepare("SELECT COUNT(*) FROM cache_entries").get();
+      database.db
+        .prepare("INSERT INTO cache_entries(scope, key, blob, updated_at) VALUES (?, ?, ?, ?)")
+        .run("checkpoint-proof", "new-frame", Buffer.from("retained"), 2);
+      const freePages = () =>
+        Number(database.db.prepare("PRAGMA freelist_count").get()?.freelist_count);
+      const before = freePages();
+      expect(withFreePages ? before > 512 : before === 0).toBe(true);
+      const diagnostics = { trigger: "initial" as const };
+      const startedAt = performance.now();
+      let releasedAt = 0;
+      const released = new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
+          reader.exec("ROLLBACK");
+          releasedAt = performance.now() - startedAt;
+          resolve();
+        }, 10);
+      });
+      await reclaimSqliteFreePages(options, diagnostics, { maxPasses: 1 });
+      const elapsedMs = performance.now() - startedAt;
+      expect(freePages()).toBe(before);
+      expect(diagnostics).toMatchObject({ checkpointCalls: 1, checkpointIncomplete: 1 });
+      expect(database.db.prepare("PRAGMA busy_timeout").get()).toEqual(busyTimeout);
+      await released;
+      // This is a lock-wait bound, not a sub-millisecond performance benchmark.
+      expect(elapsedMs).toBeLessThan(1_000);
+      expect(releasedAt).toBeLessThan(1_000);
+      await reclaimSqliteFreePages(options);
+      expect(freePages()).toBe(0);
+      expect(
+        database.db
+          .prepare("SELECT blob FROM cache_entries WHERE scope = ? AND key = ?")
+          .get("checkpoint-proof", "new-frame")?.blob,
+      ).toEqual(new Uint8Array(Buffer.from("retained")));
+      expect(database.walMaintenance.checkpoint()).toBe(true);
+      expect(fs.statSync(`${database.path}-wal`).size).toBe(0);
+      expect(database.db.prepare("PRAGMA busy_timeout").get()).toEqual(busyTimeout);
+    } finally {
+      clearTimeout(timer);
+      if (reader.isTransaction) {
+        reader.exec("ROLLBACK");
+      }
+      reader.close();
+    }
+  },
+  20_000,
+);
+
 it("bounds background page reclamation and checks authority before resuming it", async () => {
   const options = { agentId: "main", env: state.env };
   const database = openOpenClawAgentDatabase(options);

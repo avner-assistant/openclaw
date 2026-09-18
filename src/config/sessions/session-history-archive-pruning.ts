@@ -3,6 +3,8 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { setImmediate } from "node:timers/promises";
 import { executeSqliteQuerySync } from "../../infra/kysely-sync.js";
+import { runWithSqliteBusyTimeout } from "../../infra/sqlite-busy-timeout.js";
+import { runSqliteImmediateTransactionSync } from "../../infra/sqlite-transaction.js";
 import {
   openOpenClawAgentDatabase,
   runOpenClawAgentWriteTransaction,
@@ -49,20 +51,26 @@ async function withArchivePruningDatabase<T>(
 function checkpointArchivePruning(
   database: OpenClawAgentDatabase,
   diagnostics: SqliteSessionArchivePruningDiagnostics | undefined,
-): void {
-  if (!diagnostics) {
-    database.walMaintenance.checkpoint();
-    return;
-  }
-  diagnostics.checkpointCalls = (diagnostics.checkpointCalls ?? 0) + 1;
+): boolean {
   const startedAt = performance.now();
   try {
-    const completed = database.walMaintenance.checkpoint();
-    diagnostics.checkpointIncomplete = (diagnostics.checkpointIncomplete ?? 0) + Number(!completed);
+    // Online cleanup must leave readers serviceable instead of holding the writer
+    // lock while their release waits for this same event loop. Retirement keeps its policy.
+    const completed = runWithSqliteBusyTimeout(database.db, 0, () =>
+      database.walMaintenance.checkpoint(),
+    );
+    if (diagnostics) {
+      diagnostics.checkpointCalls = (diagnostics.checkpointCalls ?? 0) + 1;
+      diagnostics.checkpointIncomplete =
+        (diagnostics.checkpointIncomplete ?? 0) + Number(!completed);
+    }
+    return completed;
   } finally {
-    const elapsedMs = performance.now() - startedAt;
-    diagnostics.checkpointMs = (diagnostics.checkpointMs ?? 0) + elapsedMs;
-    diagnostics.checkpointMaxMs = Math.max(diagnostics.checkpointMaxMs ?? 0, elapsedMs);
+    if (diagnostics) {
+      const elapsedMs = performance.now() - startedAt;
+      diagnostics.checkpointMs = (diagnostics.checkpointMs ?? 0) + elapsedMs;
+      diagnostics.checkpointMaxMs = Math.max(diagnostics.checkpointMaxMs ?? 0, elapsedMs);
+    }
   }
 }
 
@@ -83,7 +91,9 @@ export async function reclaimSqliteFreePages(
       diagnostics,
       (database) => {
         limits?.assertCurrent?.();
-        checkpointArchivePruning(database, diagnostics);
+        if (!checkpointArchivePruning(database, diagnostics)) {
+          return undefined;
+        }
         // sqlite-allow-raw -- Physical budget decisions need current SQLite page accounting.
         const freePages = () =>
           timeArchivePruningSync(diagnostics, "queryMs", () =>
@@ -100,10 +110,18 @@ export async function reclaimSqliteFreePages(
           diagnostics.vacuumPasses = (diagnostics.vacuumPasses ?? 0) + 1;
           diagnostics.vacuumPagesRequested = (diagnostics.vacuumPagesRequested ?? 0) + pages;
         }
-        timeArchivePruningSync(diagnostics, "vacuumMs", () => {
-          database.db.exec(`PRAGMA incremental_vacuum(${pages});`); // sqlite-allow-raw -- Bounded maintenance outside a transaction.
-        });
-        checkpointArchivePruning(database, diagnostics);
+        timeArchivePruningSync(diagnostics, "vacuumMs", () =>
+          runWithSqliteBusyTimeout(database.db, 0, () =>
+            runSqliteImmediateTransactionSync(
+              database.db,
+              () => database.db.exec(`PRAGMA incremental_vacuum(${pages});`), // sqlite-allow-raw -- Bounded physical maintenance in one synchronous commit section.
+              { busyTimeoutMs: 0, operationLabel: "incremental-vacuum" },
+            ),
+          ),
+        );
+        if (!checkpointArchivePruning(database, diagnostics)) {
+          return undefined;
+        }
         if (freePages() >= before) {
           return undefined;
         }
