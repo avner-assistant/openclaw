@@ -22,6 +22,7 @@ export type Row = {
     typeof rowProjection.readSessionRowInputs
   >["presentation"]["activeModel"];
   facts?: ReturnType<typeof readSessionRowFacts>;
+  hasBoard?: boolean;
   membership: ReadonlySet<string>;
   parents: Set<string>;
   generation: string | symbol;
@@ -197,7 +198,8 @@ export function changesRowStructure(row: Row, entry: Row["storedEntry"]): boolea
     previous.lifecycleRevision !== entry.lifecycleRevision ||
     previous.parentSessionKey !== entry.parentSessionKey ||
     previous.spawnedBy !== entry.spawnedBy ||
-    previous.incognito !== entry.incognito
+    previous.incognito !== entry.incognito ||
+    previous.archivedAt !== entry.archivedAt
   );
 }
 
@@ -221,4 +223,17 @@ export function parentReference(
   }
   const agentId = parseAgentSessionKey(key)?.agentId ?? fallbackAgentId;
   return logical(agentId, resolveStoredSessionKeyForAgentStore({ cfg, agentId, sessionKey: key }));
+}
+
+/** Drop reader-only graphs while retaining cold metadata and index identity. */
+export function dematerialize(row: Row): Row {
+  return {
+    ...row,
+    materialized: undefined,
+    materializedSequence: undefined,
+    facts: undefined,
+    membership: new Set<string>(),
+    lastMessagePreview: undefined,
+    fallbackModel: undefined,
+  };
 }

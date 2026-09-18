@@ -139,7 +139,7 @@ it("cancels a pending trailing transcript refresh on disposal", async () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await projection.ensureMaterialized();
     expect(projection.materializedCount).toBe(before);
-    expect(projection.select()).toEqual([]);
+    expect(projection.selectEntries()).toEqual([]);
   });
 });
 
@@ -360,7 +360,7 @@ it("does not revive resident rows after disposal with a topology refresh pending
     sessionChanges.emit({ all: true, scope: "config" });
     projection.dispose();
     expect(projection.selectEntries()).toEqual([]);
-    expect(projection.select()).toEqual([]);
+    expect(projection.selectEntries()).toEqual([]);
   });
 });
 

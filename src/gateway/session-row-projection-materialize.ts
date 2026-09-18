@@ -67,15 +67,17 @@ export function readResidentSessionRow(params: {
     inputs.lastMessagePreview = row.lastMessagePreview;
   }
   inputs.subagentRunInputs = params.subagentInputs;
+  const facts = readSessionRowFacts({
+    cfg,
+    target: row,
+    entry: row.entry,
+    context: params.gatewayContext,
+  });
   return {
     materialized: materializeSessionRow(inputs),
     fallbackModel: presentation.activeModel,
-    facts: readSessionRowFacts({
-      cfg,
-      target: row,
-      entry: row.entry,
-      context: params.gatewayContext,
-    }),
+    facts,
+    hasBoard: facts.hasBoard,
     membership: new Set(
       listSessionMembers({ ...row.storeTarget, sessionKey: row.key }).map(
         (member) => member.identityId,

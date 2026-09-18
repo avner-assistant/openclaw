@@ -55,12 +55,8 @@ export function readSessionRowFacts(params: {
         : "stop-first"
       : undefined;
   const activitySummary = projectSessionActivitySummary({ key, agentId, storeTarget, cfg, entry });
-  const board = withOpenClawAgentDatabaseReadOnly(
-    (database) => readBoardSessionKeys(database, key).length > 0,
-    { agentId: storeTarget.agentId, path: storeTarget.storePath },
-  );
   return {
-    hasBoard: board.found && board.value,
+    hasBoard: readSessionRowHasBoard({ key, storeTarget }),
     present: () => ({
       ...(placement
         ? {
@@ -79,4 +75,17 @@ export function readSessionRowFacts(params: {
       activitySummary: activitySummary ? { ...activitySummary } : undefined,
     }),
   };
+}
+
+/** Selection can check board membership without materializing placement or display fields. */
+export function readSessionRowHasBoard(target: {
+  key: string;
+  storeTarget: GatewayStoredSessionTarget["storeTarget"];
+}) {
+  const { key, storeTarget } = target;
+  const board = withOpenClawAgentDatabaseReadOnly(
+    (database) => readBoardSessionKeys(database, key).length > 0,
+    { agentId: storeTarget.agentId, path: storeTarget.storePath },
+  );
+  return board.found && board.value;
 }
