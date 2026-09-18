@@ -10,7 +10,7 @@ const startedAt = Date.now();
 // An exit-time native wait cannot service the later SIGUSR2 diagnostic request.
 if (process.execArgv.includes("--trace-exit") && require("node:worker_threads").isMainThread) {
   const { writeSync } = require("node:fs");
-  const emit = process.emit;
+  const emit = process.emit.bind(process);
   const writeExitBoundary = (phase, exitCode) => {
     try {
       const listeners = phase === "exit-listeners-enter" ? process.listeners("exit") : undefined;
@@ -36,11 +36,11 @@ if (process.execArgv.includes("--trace-exit") && require("node:worker_threads").
   };
   process.emit = function (event, ...args) {
     if (this !== process || event !== "exit") {
-      return Reflect.apply(emit, this, [event, ...args]);
+      return emit(event, ...args);
     }
     writeExitBoundary("exit-listeners-enter", args[0]);
     try {
-      const result = Reflect.apply(emit, this, [event, ...args]);
+      const result = emit(event, ...args);
       writeExitBoundary("exit-listeners-return", args[0]);
       return result;
     } catch (error) {
