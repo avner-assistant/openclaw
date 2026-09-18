@@ -520,7 +520,10 @@ export function renderGroupedMessage(
   const renderOrderedContent = () => {
     const prepared = prepareMarkdownMedia(orderedContent, (item) => {
       if (item.type === "image") {
-        return renderMessageImages([item.image], imageRenderOptions);
+        return renderMessageImages([item.image], {
+          ...imageRenderOptions,
+          presentationKey: JSON.stringify([messageKey, "inline", images.indexOf(item.image)]),
+        });
       }
       return renderAssistantAttachments(
         [item],
@@ -563,7 +566,7 @@ export function renderGroupedMessage(
     ${renderPairingQrExpiryNotices(expiredPairingQrCount)}
     ${renderMessageImages(
       renderInOrder ? supplementalImages : images,
-      imageRenderOptions,
+      { ...imageRenderOptions, presentationKey: JSON.stringify([messageKey, "gallery"]) },
       videoPreviews.map(
         (item) => html`
           <div class="chat-image-frame chat-video-preview">

@@ -1,3 +1,5 @@
+import { sha256 } from "@noble/hashes/sha2.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { html, noChange, nothing, type TemplateResult } from "lit";
 import { AsyncDirective, directive } from "lit/async-directive.js";
 import { Directive } from "lit/directive.js";
@@ -30,6 +32,7 @@ import {
   clearChatMediaResourceRefresh,
   isChatMediaResourceCurrent,
   notifyChatMediaResourceSubscribers,
+  observeChatImageFrame,
   observeChatMediaResource,
   observeChatMediaResourceSubscriber,
   readManagedImageBlob,
@@ -67,11 +70,13 @@ class MessageImageResourceDirective extends AsyncDirective {
   private pendingPreview: Promise<string | null> | undefined;
   private presentationKey = Symbol("image-presentation");
   private frameStyle: string | undefined;
+  private frameSlot: string | undefined;
+  private frameSourceKey = "";
   private retained: RetainedInlineImage | { status: "unavailable" } | undefined;
   // Resource updates stay in this part; row ResizeObserver owns layout changes.
   private readonly refreshImage = () => {
     if (this.isConnected && this.image) {
-      this.setValue(this.render(this.image, this.options));
+      this.setValue(this.render(this.image, this.options, this.frameSlot));
     }
   };
   private readonly onSettled = (event: Event, source: string) => {
@@ -98,9 +103,14 @@ class MessageImageResourceDirective extends AsyncDirective {
     }
   };
 
-  override render(image: ImageBlock, options: ImageRenderOptions | undefined) {
+  override render(image: ImageBlock, options: ImageRenderOptions | undefined, frameSlot?: string) {
+    this.frameSlot = frameSlot;
     const previous = this.image;
     if (previous?.url !== image.url || previous?.artifactId !== image.artifactId) {
+      // Retained geometry must not keep an uploaded base64 payload alive.
+      this.frameSourceKey = image.url.startsWith("data:")
+        ? `data:${bytesToHex(sha256(new TextEncoder().encode(image.url)))}`
+        : image.url;
       this.managed = isManagedOutgoingMediaSource(image.url);
       this.pendingPreview = undefined;
       this.releaseRetainedImage();
@@ -296,6 +306,13 @@ class MessageImageResourceDirective extends AsyncDirective {
     content: TemplateResult | typeof nothing,
     loading = false,
   ) {
+    const frame = observeChatImageFrame(
+      this.frameSourceKey,
+      img.artifactId,
+      this.options,
+      this.frameSlot,
+    );
+    this.frameStyle ??= frame?.style;
     if (this.frameStyle === undefined) {
       const sized =
         Number.isFinite(img.width) &&
@@ -311,6 +328,9 @@ class MessageImageResourceDirective extends AsyncDirective {
       const height = Math.min(360, width / ratio);
       // Late facts and canonical handoff must not resize already presented pixels.
       this.frameStyle = `--chat-image-width: ${width}px; --chat-image-ratio: ${width} / ${height}`;
+    }
+    if (frame) {
+      frame.style = this.frameStyle;
     }
     return html`<span
       class="chat-image-frame chat-image-frame--image ${this.managed ? "chat-image-frame--managed" : ""}"
@@ -520,7 +540,17 @@ class MessageImagesDirective extends Directive {
       ${repeat(
         this.slots,
         ({ key }) => key,
-        ({ image }) => html`${renderMessageImageResource(image, opts)}`,
+        ({ image }, index) =>
+          html`${renderMessageImageResource(
+            image,
+            opts,
+            JSON.stringify([
+              image.factIndex === undefined ? `inline:${index}` : `fact:${image.factIndex}`,
+              isInlineImageSource(image.url) || isCanonicalInboundMediaSource(image.url)
+                ? undefined
+                : opts?.policyKey,
+            ]),
+          )}`,
       )}
       ${previews}
     </div>`;

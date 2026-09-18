@@ -33,6 +33,7 @@ export type ArtifactDownloadResolver = (params: {
 }) => Promise<{ url: string; expiresAt?: string } | null>;
 
 export type ImageRenderOptions = {
+  presentationKey?: string;
   sessionKey?: string;
   agentId?: string;
   policyKey?: string;
@@ -101,6 +102,7 @@ export type ChatMediaResource<Value> = {
 type ChatMediaSubscriber = {
   resources: Map<string, ChatMediaResource<unknown>>;
   children: Set<() => void>;
+  imageFrames?: Map<string, { sourceKey: string; artifactId?: string; style?: string }>;
   owner?: () => void;
 };
 
@@ -130,9 +132,44 @@ function getChatMediaSubscriber(subscriber: () => void): ChatMediaSubscriber {
 }
 
 function pruneChatMediaSubscriber(subscriber: () => void, state: ChatMediaSubscriber): void {
-  if (!state.owner && state.children.size === 0 && state.resources.size === 0) {
+  if (
+    !state.owner &&
+    state.children.size === 0 &&
+    state.resources.size === 0 &&
+    !state.imageFrames?.size
+  ) {
     chatMediaSubscribers.delete(subscriber);
   }
+}
+
+export function observeChatImageFrame(
+  sourceKey: string,
+  artifactId: string | undefined,
+  options: ImageRenderOptions | undefined,
+  slot: string | undefined,
+): { style?: string } | undefined {
+  if (!options?.onRequestUpdate || options.presentationKey === undefined || slot === undefined) {
+    return undefined;
+  }
+  // The pane owns geometry across row removal; its existing release clears it.
+  const frames = (getChatMediaSubscriber(options.onRequestUpdate).imageFrames ??= new Map());
+  const key = JSON.stringify([
+    options.connectionEpoch,
+    options.authToken?.trim(),
+    options.resourceBasePath,
+    options.sessionKey,
+    options.agentId,
+    options.canonicalMessageKey,
+    options.localSubmission,
+    options.presentationKey,
+    slot,
+  ]);
+  let frame = frames.get(key);
+  if (!frame || frame.sourceKey !== sourceKey || frame.artifactId !== artifactId) {
+    frame = { sourceKey, artifactId };
+    frames.set(key, frame);
+  }
+  return frame;
 }
 
 function detachChatMediaResourceSubscriber(

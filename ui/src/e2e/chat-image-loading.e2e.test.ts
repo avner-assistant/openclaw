@@ -139,6 +139,17 @@ suite.define(() => {
             await expect.poll(() => image.getAttribute("width")).toBe("480");
             await waitForChatScrollIdle(page);
             expect(await geometry()).toEqual(returned);
+            await page.locator(".chat-scroll-to-bottom").click();
+            await expect.poll(() => image.count()).toBe(0);
+            await thread.hover();
+            await page.mouse.wheel(0, -100_000);
+            await image.waitFor({ state: "visible" });
+            await image.evaluate((element) => (element as HTMLImageElement).decode());
+            await expect.poll(async () => (await geometry()).height).toBe(before.height);
+            const remounted = await geometry();
+            expect(remounted.imageWidth).toBe(before.imageWidth);
+            expect(remounted.imageHeight).toBe(before.imageHeight);
+            expect(Math.abs(await gap())).toBeLessThanOrEqual(1);
           }
         },
       );
