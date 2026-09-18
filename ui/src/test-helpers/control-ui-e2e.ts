@@ -2141,14 +2141,31 @@ function installControlUiMockGateway(
       }
       return next;
     });
+    const spawnedBy =
+      isRecord(params) && typeof params.spawnedBy === "string" ? params.spawnedBy.trim() : "";
+    const childSessions = spawnedBy
+      ? projectedSessions.filter((row) => {
+          if (!isRecord(row) || row.key === spawnedBy) {
+            return false;
+          }
+          const controller =
+            typeof row.controlOwnerSessionKey === "string" ? row.controlOwnerSessionKey.trim() : "";
+          // Fixtures declare current control and navigation lineage; they do not run a registry.
+          return [controller || row.spawnedBy, row.parentSessionKey].some(
+            (owner) => typeof owner === "string" && owner.trim() === spawnedBy,
+          );
+        })
+      : projectedSessions;
     if (!scenario.sessionArchiveFiltering) {
       return {
         ...response,
-        ...(sessions.materializedCount() > 0 ? { count: projectedSessions.length } : {}),
-        sessions: projectedSessions,
+        ...(childSessions.length !== projectedSessions.length || sessions.materializedCount() > 0
+          ? { count: childSessions.length }
+          : {}),
+        sessions: childSessions,
       };
     }
-    const filteredSessions = projectedSessions.filter(
+    const filteredSessions = childSessions.filter(
       (row) =>
         isRecord(row) &&
         (archivedFilter === "all" || (row.archived === true) === (archivedFilter === "archived")),

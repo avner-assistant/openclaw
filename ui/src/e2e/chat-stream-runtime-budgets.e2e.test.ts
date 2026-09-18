@@ -1,6 +1,7 @@
 import { appendFile } from "node:fs/promises";
 import path from "node:path";
 import { beforeEach, expect, it } from "vitest";
+import type { ApplicationContext } from "../app/context.ts";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import {
   createChatFlowE2eSuite,
@@ -10,7 +11,7 @@ import {
   waitForChatScrollIdle,
 } from "./chat-flow.test-support.ts";
 import { createControlUiE2eContextOptions } from "./control-ui-e2e-suite.test-support.ts";
-import { waitForCommittedComposerDraft } from "./settle.test-support.ts";
+import { waitForCommittedComposerDraft, waitForCommittedState } from "./settle.test-support.ts";
 
 // Durable runtime budgets for the chat streaming surface. Byte budgets
 // (scripts/check-control-ui-performance.mts) cannot see rendering work, so
@@ -545,10 +546,30 @@ function buildLongTranscriptFixture(messageCount: number): Array<Record<string, 
 suite.define(() => {
   it("commits a streamed delta burst in frame-bound transcript batches", async () => {
     await suite.withPage(createControlUiE2eContextOptions(), async ({ page }) => {
-      const gateway = await installMockGateway(page);
+      const gateway = await installMockGateway(page, { deferredMethods: ["sessions.describe"] });
       await page.goto(`${suite.server.baseUrl}chat`);
       await gateway.waitForRequest("chat.startup");
       const runId = await openStreamingTurn(page, gateway, "burst coalescing probe");
+
+      // Release the startup fact read after Send so it observes the running turn,
+      // then join its publication before measuring stream invalidations.
+      await gateway.waitForRequest("sessions.describe");
+      await gateway.resolveDeferred("sessions.describe");
+      await waitForCommittedState(
+        page,
+        ({ sessionKey }) => {
+          const app = document.querySelector<
+            HTMLElement & { runtime?: { context: ApplicationContext } }
+          >("openclaw-app");
+          return (
+            app?.runtime?.context.sessions.state.result?.sessions.some(
+              (row) =>
+                row.key === sessionKey && row.status === "running" && row.hasActiveRun === true,
+            ) === true
+          );
+        },
+        { sessionKey: "agent:main:main" },
+      );
 
       await installRenderProbe(page);
       await resetRenderProbe(page);
