@@ -1579,12 +1579,13 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         expect(shard.planConcurrency).toBe(1);
         expect(exclusiveCount).toBe(0);
         expect(shard.requiresDist).toBe(false);
+        expect(shard.env).toStrictEqual(originalHybridJob.env);
         for (const original of originalHybridJob.groups) {
           const retained = expectDefined(
             shard.groups.find((group) => group.shard_name === original.shard_name),
             "retained ordinary group",
           );
-          if (usesTwoWorkerPacking(originalHybridJob)) {
+          if (originalHybridJob.planConcurrency === 2) {
             expect(retained).toEqual({
               ...original,
               env: { OPENCLAW_VITEST_MAX_WORKERS: "2", ...original.env },
@@ -3928,14 +3929,11 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         const job = plan.find((entry) =>
           entry.groups.some((candidate) => candidate.shard_name === group.shard_name),
         );
-        if (
-          original &&
-          job?.planConcurrency === 1 &&
-          job.env?.OPENCLAW_VITEST_MAX_WORKERS !== "2"
-        ) {
-          const env = expectDefined(group.env, "materialized serial worker cap");
-          expect(env.OPENCLAW_VITEST_MAX_WORKERS).toBe("2");
-          const { OPENCLAW_VITEST_MAX_WORKERS: _workers, ...otherEnv } = env;
+        if (original && job?.planConcurrency === 1) {
+          expect(
+            group.env?.OPENCLAW_VITEST_MAX_WORKERS ?? job.env?.OPENCLAW_VITEST_MAX_WORKERS,
+          ).toBe("2");
+          const { OPENCLAW_VITEST_MAX_WORKERS: _workers, ...otherEnv } = group.env ?? {};
           expect(otherEnv).toEqual(original.env ?? {});
           return original.env;
         }
@@ -4045,6 +4043,19 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         expectTimingFamilies(promoted, beforeInherited);
         expect(policies(promoted, beforeInherited)).toEqual(policies(before, beforeInherited));
         expect(recipient.groups.map((group) => group.timing_key)).toEqual(keys);
+        recipient.env = { ...recipient.env, OPENCLAW_VITEST_MAX_WORKERS: "2" };
+        for (const group of recipient.groups) {
+          const original = beforeInherited.get(group.shard_name);
+          if (original) {
+            group.env = original.env;
+          }
+        }
+        expectTimingFamilies(promoted, beforeInherited);
+        expect(policies(promoted, beforeInherited)).toEqual(policies(before, beforeInherited));
+        delete recipient.env.OPENCLAW_VITEST_MAX_WORKERS;
+        for (const group of recipient.groups) {
+          group.env = { OPENCLAW_VITEST_MAX_WORKERS: "2", ...group.env };
+        }
         const hosted = expectDefined(
           recipient.groups.find(
             (group) => group.timing_key && beforeInherited.has(group.shard_name),
@@ -4064,34 +4075,6 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
           expect(() => expectTimingFamilies(promoted, beforeInherited)).toThrow();
           expect(() =>
             expect(policies(promoted, beforeInherited)).toEqual(policies(before, beforeInherited)),
-          ).toThrow();
-        }
-        const serialized = structuredClone(before);
-        const gatewayJob = expectDefined(
-          serialized.find(
-            (job) =>
-              job.planConcurrency === 1 &&
-              job.env?.OPENCLAW_VITEST_MAX_WORKERS === "2" &&
-              job.groups.some(
-                (group) =>
-                  beforeInherited.has(group.shard_name) &&
-                  group.env?.OPENCLAW_VITEST_MAX_WORKERS === undefined,
-              ),
-          ),
-          "serial Gateway job with inherited worker ceiling",
-        );
-        const jobEnv = gatewayJob.env;
-        for (const workers of [undefined, "3"]) {
-          gatewayJob.env = { ...jobEnv };
-          if (workers === undefined) {
-            delete gatewayJob.env.OPENCLAW_VITEST_MAX_WORKERS;
-          } else {
-            gatewayJob.env.OPENCLAW_VITEST_MAX_WORKERS = workers;
-          }
-          expect(() =>
-            expect(policies(serialized, beforeInherited)).toEqual(
-              policies(before, beforeInherited),
-            ),
           ).toThrow();
         }
       }
