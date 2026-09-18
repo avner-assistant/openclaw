@@ -569,25 +569,6 @@ suite.define(() => {
         { serializedQuery: JSON.stringify(childList.params) },
       );
 
-      // The delayed swarm child query publishes roster metadata after first paint.
-      // Observe its committed result before measuring stream-driven invalidations.
-      const childList = await gateway.waitForRequest("sessions.list", {
-        match: { spawnedBy: "agent:main:main" },
-      });
-      const childScope = requireRecord(childList.params);
-      await expect
-        .poll(() =>
-          page.evaluate((scope) => {
-            const app = document.querySelector<
-              HTMLElement & {
-                runtime?: { context: ApplicationContext };
-              }
-            >("openclaw-app");
-            const snapshot = app?.runtime?.context.sessions.listSnapshot(scope);
-            return Boolean(snapshot?.result && !snapshot.loading && !snapshot.error);
-          }, childScope),
-        )
-        .toBe(true);
       await waitForChatScrollIdle(page);
       await installRenderProbe(page);
       await resetRenderProbe(page);
