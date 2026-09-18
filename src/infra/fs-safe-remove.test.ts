@@ -2,9 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { __setFsSafeTestHooksForTest } from "@openclaw/fs-safe/test-hooks";
 import { afterEach, describe, expect, it } from "vitest";
+import { createRebindableDirectoryAlias } from "../test-utils/symlink-rebind-race.js";
 import { createTrackedTempDirs } from "../test-utils/tracked-temp-dirs.js";
 import { removePathWithinRoot } from "./fs-safe-remove.js";
-import { createRebindableDirectoryAlias } from "./symlink-rebind-race.test-support.js";
 
 const tempDirs = createTrackedTempDirs();
 

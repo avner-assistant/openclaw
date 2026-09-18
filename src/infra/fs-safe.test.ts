@@ -5,6 +5,10 @@ import path from "node:path";
 import { __setFsSafeTestHooksForTest } from "@openclaw/fs-safe/test-hooks";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { withEnv, withEnvAsync } from "../test-utils/env.js";
+import {
+  createRebindableDirectoryAlias,
+  withRealpathSymlinkRebindRace,
+} from "../test-utils/symlink-rebind-race.js";
 import { createTrackedTempDirs } from "../test-utils/tracked-temp-dirs.js";
 import {
   resolveOpenedFileRealPathForHandle,
@@ -13,10 +17,6 @@ import {
   root as openRoot,
   writeExternalFileWithinRoot,
 } from "./fs-safe.js";
-import {
-  createRebindableDirectoryAlias,
-  withRealpathSymlinkRebindRace,
-} from "./symlink-rebind-race.test-support.js";
 
 const tempDirs = createTrackedTempDirs();
 

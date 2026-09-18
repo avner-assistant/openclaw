@@ -6,9 +6,9 @@ import JSZip from "jszip";
 import * as tar from "tar";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createSuiteTempRootTracker } from "../test-helpers/temp-dir.js";
+import { withRealpathSymlinkRebindRace } from "../test-utils/symlink-rebind-race.js";
 import { createZipCentralDirectoryArchive } from "../test-utils/zip-central-directory-fixture.js";
 import { extractArchive, resolvePackedRootDir } from "./archive.js";
-import { withRealpathSymlinkRebindRace } from "./symlink-rebind-race.test-support.js";
 
 const fixtureRootTracker = createSuiteTempRootTracker({ prefix: "openclaw-archive-" });
 const directorySymlinkType = process.platform === "win32" ? "junction" : undefined;
