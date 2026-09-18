@@ -26,6 +26,7 @@ import {
   completeCleanupBookkeeping,
   scheduleRequesterSettleWake,
 } from "./subagent-registry-lifecycle-wake.js";
+import type { PendingRequesterSettleWakeCommit } from "./subagent-registry-requester-wake-commit.js";
 import { settleRequesterTurnAfterSessionSpawns } from "./subagent-registry-requester-yield.js";
 import type { SubagentCompletionRequest, SubagentRunRecord } from "./subagent-registry.types.js";
 import { compareSubagentRunGeneration } from "./subagent-run-generation.js";
@@ -37,6 +38,10 @@ export type { SubagentLifecycleOptions } from "./subagent-registry-lifecycle-con
 const RESTORED_REQUESTER_SETTLE_WAKE_CONCURRENCY = 2;
 
 export class SubagentLifecycleController {
+  readonly pendingRequesterSettleWakeCommits = new WeakMap<
+    SubagentRunRecord,
+    PendingRequesterSettleWakeCommit
+  >();
   private readonly scheduledResumeTimers = new Set<ReturnType<typeof setTimeout>>();
   private pendingRequesterSettleWakeRearms = new WeakSet<SubagentRunRecord>();
   private readonly scheduledRequesterSettleWakeRuns = new WeakSet<SubagentRunRecord>();
