@@ -102,6 +102,7 @@ class CallbackScenarioTest(unittest.TestCase):
         self.assertEqual(clock[0], 140)
         self.assertEqual(recorder.events[0]["status"], "failed")
         self.assertIsNone(recorder.events[0]["messageId"])
+        self.assertEqual(recorder.events[0]["sendOutcome"], "unknown")
         self.assertEqual(recorder.summary()["sutRevisionTexts"], ["Observed reply"])
         self.assertEqual([event["kind"] for event in recorder.events], ["action", "message"])
 

@@ -54,9 +54,6 @@ export function parseTelegramTestCredential(value) {
     schemaVersion: 1,
     environment: "test",
     groupId: requireIntegerString(payload, "groupId", /^-?\d+$/u),
-    ...(payload.forumGroupId === undefined
-      ? {}
-      : { forumGroupId: requireIntegerString(payload, "forumGroupId", /^-\d+$/u) }),
     sutToken: requireString(payload, "sutToken"),
     sutUsername: requireString(payload, "sutUsername").replace(/^@/u, ""),
     sutBotId: requireIntegerString(payload, "sutBotId", /^\d+$/u),

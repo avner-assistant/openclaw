@@ -115,7 +115,6 @@ function parseArgs(argv) {
     output: "",
     chat: "",
     dm: false,
-    forum: false,
     // Messages posted as the QA user before the driven turn, so history-scoped
     // scenarios (historyLimit, context visibility) have prior turns to scope.
     preSend: [],
@@ -153,7 +152,6 @@ function parseArgs(argv) {
       );
     } else if (arg === "--chat") args.chat = argv[++i] || "";
     else if (arg === "--dm") args.dm = true;
-    else if (arg === "--forum") args.forum = true;
     else if (arg === "--pre-send") args.preSend.push(argv[++i] || "");
     else if (arg === "--scenario") args.scenarioPath = argv[++i] || "";
     else if (arg === "--source-gateway") args.sourceGateway = true;
@@ -169,10 +167,6 @@ function parseArgs(argv) {
       "--record captures live evidence; use --expect/--any-sut-reply only without --record.",
     );
   }
-  if (args.forum && (args.dm || args.chat))
-    throw new Error(
-      "Use --forum by itself to select the leased persistent forum, or --chat for an explicit target.",
-    );
   if (args.photos.length && args.textProvided && args.caption) {
     throw new Error("Use --text or --caption as the photo caption, not both.");
   }
@@ -224,7 +218,6 @@ Runtime:
 Chat selection:
   --dm                direct chat with the leased SUT
   --chat TARGET       TDLib id, username, or supported Telegram link
-  --forum             persistent forumGroupId from the leased credential
   Scenario send actions accept forumTopicId for a specific forum topic.
 
 Backends:
@@ -638,12 +631,14 @@ async function runCronScenarioAction({
   message,
   bestEffort,
   isStopped,
+  assertActionsActive,
 }) {
   let jobId;
   let runResult;
   let cronError;
   try {
     if (isStopped()) throw new Error("Cron scenario cancelled after lease loss.");
+    assertActionsActive();
     const added = await runCommand(
       "pnpm",
       [
@@ -675,6 +670,7 @@ async function runCronScenarioAction({
     jobId = JSON.parse(added.stdout).id;
     if (typeof jobId !== "string" || !jobId) throw new Error("cron add returned no id");
     if (isStopped()) throw new Error("Cron scenario cancelled after lease loss.");
+    assertActionsActive();
     const run = await runCommand(
       "pnpm",
       ["openclaw", "cron", "run", jobId, "--wait", "--wait-timeout", "1m", "--json"],
@@ -954,8 +950,7 @@ async function checkScenarioCredential(credential, { signal, args }) {
     signal,
     dm: args?.dm,
     chat: args?.chat,
-    requireForum:
-      args?.forum || args?.scenario?.actions.some((action) => action.forumTopicId !== undefined),
+    requireForum: args?.scenario?.actions.some((action) => action.forumTopicId !== undefined),
   });
 }
 
@@ -974,14 +969,9 @@ export async function runTelegramTestScenario({
         scope.assertActive();
         credential = await scope.acquire(acquireCredential({ signal: scope.signal }));
         scope.observeLease(credential);
-        if (args?.forum && !credential.forumGroupId)
-          throw new Error(
-            "The leased bot has no persistent forum reference; prepare its fixture before --forum proof.",
-          );
-        const selectedArgs = args?.forum ? { ...args, chat: credential.forumGroupId } : args;
-        await checkCredential(credential, { signal: scope.signal, args: selectedArgs });
+        await checkCredential(credential, { signal: scope.signal, args });
         scope.assertActive();
-        const result = await driveScenario(selectedArgs, repoRoot, credential, {
+        const result = await driveScenario(args, repoRoot, credential, {
           signal: scope.signal,
         });
         scope.assertActive();
@@ -1056,11 +1046,29 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
     writePrivateJson(normalizedScenarioPath, args.scenario);
     fs.mkdirSync(scenarioBarrierDir, { recursive: true, mode: 0o700 });
   }
+  // Fence scenario mutations, not the lease: the recorder must keep observing.
+  const actionFailurePath = args.scenario
+    ? path.join(scenarioBarrierDir, "action-failure.json")
+    : "";
+  let actionFailure;
+  const readActionFailure = () => {
+    if (!actionFailure && actionFailurePath && fs.existsSync(actionFailurePath)) {
+      actionFailure = readJson(actionFailurePath);
+    }
+    return actionFailure;
+  };
+  const assertScenarioActionsActive = () => {
+    if (readActionFailure()) {
+      throw new Error(`Scenario actions stopped after uncertain send: ${actionFailure.error}`);
+    }
+  };
 
   let mock;
   let gateway;
+  let scenarioWatcher;
   try {
     leaseHealth.assertHealthy();
+    if (args.scenario) scenarioWatcher = fs.watch(scenarioBarrierDir, readActionFailure);
     if (args.backend === "mock") {
       fs.writeFileSync(requestLog, "");
       mock = spawnProcess(
@@ -1136,6 +1144,7 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
       telegramApiRoot: creds.telegramApiRoot,
     });
     const startGateway = async () => {
+      assertScenarioActionsActive();
       const command = "node";
       const gatewayArgs = args.sourceGateway
         ? [
@@ -1270,6 +1279,7 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
     }
     const scenarioStartedAt = recorderReady?.startedAtUnixMs ?? Date.now();
     let controlsStopped = false;
+    const scenarioActionsStopped = () => controlsStopped || Boolean(readActionFailure());
     const gatewayActions = [];
     let followupControlSeq = 0;
     const runFollowupControl = async (command, action) => {
@@ -1281,6 +1291,7 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
       });
       const deadline = Date.now() + action.timeoutMs;
       while (Date.now() < deadline) {
+        assertScenarioActionsActive();
         const status = readJson(followupControlStatusPath);
         if (status.seq === seq) {
           if (status.status !== "completed") {
@@ -1315,12 +1326,13 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
         const backgroundActions = [];
         for (const { action, index } of actions) {
           if (
-            !(await waitForScenarioOffset(scenarioStartedAt, action.atMs, () => controlsStopped))
+            !(await waitForScenarioOffset(scenarioStartedAt, action.atMs, scenarioActionsStopped))
           ) {
             break;
           }
           const beganAt = Date.now();
           leaseHealth.assertHealthy();
+          if (scenarioActionsStopped()) break;
           if (action.type === "cron") {
             const actionRecord = {
               type: action.type,
@@ -1338,6 +1350,7 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
                   message: action.message,
                   bestEffort: action.bestEffort,
                   isStopped: () => controlsStopped,
+                  assertActionsActive: assertScenarioActionsActive,
                 }).then(
                   (result) => {
                     Object.assign(actionRecord, result);
@@ -1464,6 +1477,7 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
     controlsStopped = true;
     await gatewayControl;
     const gatewayHealthSamples = await gatewayHealth;
+    readActionFailure();
     if (recording && args.scenario) {
       const summary = readJson(outputPath);
       writePrivateJson(outputPath, {
@@ -1471,13 +1485,15 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
         scenario: {
           recorderReady,
           selectedChatTarget,
+          ...(actionFailure ? { actionFailure } : {}),
           gatewayActions,
           gatewayHealth: gatewayHealthSamples,
           telegramApiResponseHolds: creds.telegramProxy.getResponseHoldEvents(),
         },
       });
     }
-    const actionFailed = gatewayActions.some((action) => action.status === "failed");
+    const actionFailed =
+      Boolean(actionFailure) || gatewayActions.some((action) => action.status === "failed");
     const exitCode = code === 0 && !actionFailed ? 0 : (code ?? 1) || 1;
     const requestRows = countNdjsonRows(requestLog);
     const redactRunnerText = (text) =>
@@ -1492,6 +1508,9 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
         mode: recording ? "record" : "probe",
         scratchRemovedAfterExit: true,
         mockRequests: requestRows,
+        ...(actionFailure
+          ? { actionFailure: { ...actionFailure, error: redactRunnerText(actionFailure.error) } }
+          : {}),
         gatewayActions: gatewayActions.map((action) => ({
           type: action.type,
           status: action.status,
@@ -1504,6 +1523,7 @@ async function driveWithTelegramProxy(args, repoRoot, creds, leaseHealth) {
       },
     };
   } finally {
+    scenarioWatcher?.close();
     await stopChild(gateway);
     await stopChild(mock);
   }

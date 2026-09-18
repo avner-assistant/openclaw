@@ -75,21 +75,6 @@ test("validates and restores one isolated Test Server credential", () => {
   fs.rmSync(fixture, { recursive: true, force: true });
 });
 
-test("preserves an optional persistent forum reference without changing the normal group", () => {
-  const { fixture, payload } = makeCredential();
-  try {
-    const parsed = parseTelegramTestCredential({ ...payload, forumGroupId: "-1002042" });
-    assert.equal(parsed.groupId, "-1001");
-    assert.equal(parsed.forumGroupId, "-1002042");
-    assert.throws(
-      () => parseTelegramTestCredential({ ...payload, forumGroupId: "42" }),
-      /invalid forumGroupId/,
-    );
-  } finally {
-    fs.rmSync(fixture, { recursive: true, force: true });
-  }
-});
-
 test("rejects an archive hash mismatch and production credentials", () => {
   const { fixture, payload } = makeCredential();
   assert.throws(

@@ -8,8 +8,8 @@ interpretation, persistent fixtures, forum topics, or a failed run. The primary 
 
 `--chat` accepts a TDLib chat id, `@username`, invite link, or `t.me` link.
 `--dm` targets the selected SUT directly.
-`--forum` selects the leased credential's optional `forumGroupId`; it cannot be
-combined with `--dm` or `--chat`. The normal group remains `groupId`.
+Select a forum explicitly with `--chat`; scenario sends use `forumTopicId` to
+choose a topic within it. The default group comes from the credential's `groupId`.
 
 Prefer DMs for isolated turns. A shared group records unrelated traffic and all
 privacy-disabled pool bots can see its messages. Use a group only when its
@@ -21,10 +21,9 @@ mode captures facts and rejects that flag.
 
 ## Persistent fixtures and topics
 
-Reuse the dedicated normal/forum pair for the leased bot when one is configured.
-The fixture owner verifies the QA user, bot membership, actual group type and
-topic permissions, then publishes the matching references through the broker
-owner. Keep the existing credential rows and disabled states. The runner checks
+Reuse established groups when available. The fixture owner verifies the QA user,
+bot membership, actual group type and topic permissions. Select a forum through
+`--chat`; the broker supplies only the normal group reference. The runner checks
 the selected target on its own lease; a stored reference alone is not readiness.
 
 Keep persistent groups and established bot membership after proof. Remove only
@@ -67,6 +66,11 @@ The direct driver also accepts `send --forum-topic-id <id>`. TDLib 1.8.67 uses
 `topic_id: messageTopicForum` for forum topics; ordinary message threads use
 `messageTopicThread`. Inspect `topicType` and `topicId` on both the sent message
 and the SUT reply. A reply in the general topic does not prove topic routing.
+
+A send confirmation failure stops later scenario actions in both the recorder
+and Node runner. The uncertain send is never retried. Passive Telegram recording
+continues to the original deadline, preserving late updates and the failed
+action in the evidence; the run exits unsuccessfully even if a reply arrives.
 
 Keep one TDLib client per restored state directory. Run custom TDLib inspection
 before the recorder starts or after it exits, under the same live lease. Bot API

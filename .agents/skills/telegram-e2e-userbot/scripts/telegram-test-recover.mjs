@@ -18,13 +18,13 @@ const leaseDir = path.resolve(directory);
 const stateRoot = path.join(leaseDir, "state");
 const receipt = path.join(leaseDir, "lease.json");
 
-function requireOwnedPath(file, directory) {
+function requireOwnedPath(file, directory, privateMode = true) {
   const stat = fs.lstatSync(file);
   if (
     stat.isSymbolicLink() ||
     (directory ? !stat.isDirectory() : !stat.isFile()) ||
     (process.getuid && stat.uid !== process.getuid()) ||
-    (stat.mode & 0o077) !== 0
+    (privateMode && (stat.mode & 0o077) !== 0)
   ) {
     throw new Error("Retained Telegram state must be private, owned and free of symlinks.");
   }
@@ -43,6 +43,7 @@ function validateRetainedLayout() {
   requireOwnedPath(receipt, false);
   if (!fs.existsSync(stateRoot) && !fs.lstatSync(stateRoot, { throwIfNoEntry: false })) return;
   requireOwnedPath(stateRoot, true);
+  requireOwnedPath(path.join(stateRoot, "user-driver"), true);
   const layout = [
     [stateRoot, new Set(["credentials.local.json", "user-driver"])],
     [
@@ -62,7 +63,8 @@ function validateRetainedLayout() {
     for (const name of fs.readdirSync(directory)) {
       const file = path.join(directory, name);
       const stat = fs.lstatSync(file);
-      requireOwnedPath(file, stat.isDirectory());
+      // Private enclosing roots protect ordinary archive directory modes.
+      requireOwnedPath(file, stat.isDirectory(), !stat.isDirectory());
       if (stat.isDirectory()) pending.push(file);
     }
   }

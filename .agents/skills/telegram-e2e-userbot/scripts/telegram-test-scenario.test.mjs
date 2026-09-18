@@ -88,9 +88,7 @@ function fixture() {
         signal,
         dm: args?.dm,
         chat: args?.chat,
-        requireForum:
-          args?.forum ||
-          args?.scenario?.actions.some((action) => action.forumTopicId !== undefined),
+        requireForum: args?.scenario?.actions.some((action) => action.forumTopicId !== undefined),
         ...options,
       }),
   };
@@ -214,6 +212,7 @@ for (const selector of [
           stdout: JSON.stringify({
             ok: true,
             chatId: "-1002042",
+            isForum: true,
             type: { "@type": "chatTypeSupergroup", supergroup_id: 2042, is_channel: false },
           }),
         };
@@ -239,7 +238,11 @@ for (const selector of [
     };
     let delivered = false;
     await runTelegramTestScenario({
-      args: { chat: selector, dm: false },
+      args: {
+        chat: selector,
+        dm: false,
+        scenario: { actions: [{ type: "send", atMs: 0, text: "topic", forumTopicId: 42 }] },
+      },
       acquireCredential: async () => f.credential,
       checkCredential: f.check,
       driveScenario: async (args, _root, credential) => {
@@ -404,50 +407,8 @@ test("explicit SUT private chat follows the DM route without group checks", asyn
   assert.equal(f.releaseCount(), 1);
 });
 
-test("persistent forum selection reaches the stored forum rather than the normal group", async () => {
+test("a forum topic cannot silently target an ordinary explicit group", async () => {
   const f = fixture();
-  f.credential.forumGroupId = "-1002042";
-  const command = f.options.runCommandImpl;
-  f.options.runCommandImpl = async (name, args) => {
-    if (args.includes("resolve-chat")) {
-      assert.equal(args[args.indexOf("--chat") + 1], "-1002042");
-      return {
-        status: 0,
-        stdout: JSON.stringify({
-          ok: true,
-          chatId: "-1002042",
-          isForum: true,
-          type: { "@type": "chatTypeSupergroup", supergroup_id: 2042 },
-        }),
-      };
-    }
-    assert.ok(args.includes("status"));
-    return await command(name, args);
-  };
-  const fetch = f.options.fetchImpl;
-  f.options.fetchImpl = async (url, init) =>
-    new URL(url).pathname.endsWith("/getChat")
-      ? Response.json({ ok: true, result: { id: -1002042, type: "supergroup", is_forum: true } })
-      : await fetch(url, init);
-  let delivered = false;
-  await runTelegramTestScenario({
-    args: { forum: true },
-    acquireCredential: async () => f.credential,
-    checkCredential: f.check,
-    driveScenario: async (args, _root, credential) => {
-      assert.equal(args.chat, "-1002042");
-      assert.equal(credential.chatTarget.recorderSelector, "-1002042");
-      delivered = true;
-    },
-  });
-  assert.equal(delivered, true);
-  assert.equal(f.credential.testGroup, undefined);
-  assert.equal(f.releaseCount(), 1);
-});
-
-test("a persistent forum reference cannot silently target an ordinary group", async () => {
-  const f = fixture();
-  f.credential.forumGroupId = "-3000";
   const command = f.options.runCommandImpl;
   f.options.runCommandImpl = async (name, args) => {
     if (args.includes("resolve-chat"))
@@ -470,7 +431,10 @@ test("a persistent forum reference cannot silently target an ordinary group", as
       : await fetch(url, init);
   await assert.rejects(
     runTelegramTestScenario({
-      args: { forum: true },
+      args: {
+        chat: "-3000",
+        scenario: { actions: [{ type: "send", atMs: 0, text: "topic", forumTopicId: 42 }] },
+      },
       acquireCredential: async () => f.credential,
       checkCredential: f.check,
       driveScenario: async () => assert.fail("ordinary group cannot prove a forum topic"),

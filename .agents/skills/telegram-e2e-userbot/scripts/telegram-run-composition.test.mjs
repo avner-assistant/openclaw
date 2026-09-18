@@ -69,6 +69,46 @@ async function composition(mode) {
     });
   `,
   );
+  if (mode === "uncertain-send") {
+    fs.writeFileSync(
+      path.join(root, "record-fixture.py"),
+      `
+import importlib.util
+import sys
+import time
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("tg_record", sys.argv.pop(1))
+record = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = record
+spec.loader.exec_module(record)
+
+class Client:
+    observed = False
+    def next_update(self, timeout):
+        time.sleep(timeout)
+        if self.observed:
+            return None
+        self.observed = True
+        return {"@type": "updateNewMessage", "message": {
+            "id": 42, "chat_id": 42, "date": int(time.time()), "sender_id": {"user_id": 42},
+            "content": {"@type": "messageText", "text": {"text": "Late incoming observation"}},
+        }}
+
+class Driver:
+    client = Client()
+    def resolve_chat(self, selector):
+        return 42
+    def send_text(self, *args, **kwargs):
+        with Path("send-attempts").open("a") as attempts:
+            attempts.write("send")
+        raise record.driver.DriverError("Timed out waiting for Telegram message send confirmation")
+
+record.build_driver = lambda: ({"sutId": "42", "sutUsername": "sut_bot"}, {}, Driver())
+sys.exit(record.main())
+`,
+    );
+  }
   fs.writeFileSync(
     path.join(root, "uv"),
     `#!${process.execPath}
@@ -76,6 +116,13 @@ async function composition(mode) {
     if(process.argv.includes('status')) { console.log(JSON.stringify({ok:true,authorized:true,testDc:true,tdlibVersion:'1.8.67',user:{id:123}})); }
     else if(process.argv.includes('prepare-group')) { console.log(JSON.stringify({ok:true,groupId:'-1001',status:'created'})); }
     else if(process.argv.includes('cleanup-group')) { console.log(JSON.stringify({ok:true,groupId:'-1001',status:'deleted'})); }
+    else if(${JSON.stringify(mode)}==='uncertain-send') {
+      const index=process.argv.findIndex(value=>value.endsWith('user-record.py'));
+      const result=require('node:child_process').spawnSync('python3', [
+        '-B', ${JSON.stringify(path.join(root, "record-fixture.py"))}, ...process.argv.slice(index)
+      ], {stdio:'inherit'});
+      process.exit(result.status ?? 1);
+    }
     else {
       const index=process.argv.indexOf('--ready-file');
       if(index>=0) fs.writeFileSync(process.argv[index+1],JSON.stringify({schemaVersion:1,startedAtUnixMs:Date.now(),chatId:-1001}));
@@ -174,7 +221,23 @@ async function composition(mode) {
       ? [{ type: "patchConfig", atMs: 0, patch: { messages: { responsePrefix: "test" } } }]
       : mode === "control"
         ? [{ type: "followupDrainWaitHeld", atMs: 0, timeoutMs: 60_000 }]
-        : [{ type: "send", atMs: 0, text: "fixture" }];
+        : mode === "uncertain-send"
+          ? [
+              { type: "send", atMs: 0, text: "uncertain" },
+              {
+                type: "command",
+                atMs: 200,
+                argv: [
+                  process.execPath,
+                  "-e",
+                  "require('node:fs').writeFileSync('later-side-effect', 'executed')",
+                ],
+                cwd: "repo",
+                timeoutMs: 1000,
+              },
+              { type: "send", atMs: 300, text: "must not send" },
+            ]
+          : [{ type: "send", atMs: 0, text: "fixture" }];
   const run = runTelegramTestScenario({
     repoRoot: root,
     signal: controller.signal,
@@ -196,7 +259,7 @@ async function composition(mode) {
     },
   });
   const outcome = run.then(
-    () => ({ ok: true }),
+    (result) => ({ ok: true, result }),
     (error) => ({ ok: false, error }),
   );
   return {
@@ -361,6 +424,47 @@ test("uninterrupted composition completes strict readiness and drive on one leas
         true,
         "every child must terminate before successful completion",
       );
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("uncertain recorder send fences later Node actions while recording incoming updates", async () => {
+  const f = await composition("uncertain-send");
+  try {
+    const outcome = await deadline(f.outcome, "uncertain-send composition did not finish", 10000);
+    assert.equal(outcome.ok, true, String(outcome.error));
+    assert.equal(outcome.result.exitCode, 1);
+    assert.equal(outcome.result.report.completed, false);
+    assert.equal(fs.existsSync(path.join(f.root, "later-side-effect")), false);
+    assert.equal(fs.readFileSync(path.join(f.root, "send-attempts"), "utf8"), "send");
+    const events = fs
+      .readFileSync(path.join(f.root, "events"), "utf8")
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.deepEqual(
+      events.map((event) => event.kind),
+      ["action", "message"],
+    );
+    assert.equal(events[0].status, "failed");
+    assert.equal(events[0].sendOutcome, "unknown");
+    assert.equal(events[0].messageId, null);
+    assert.match(events[0].error, /send confirmation/);
+    assert.equal(events[1].text, "Late incoming observation");
+    assert.ok(events[1].elapsedMs >= 200, "observation must outlast the blocked Node action");
+    const summary = JSON.parse(fs.readFileSync(path.join(f.root, "summary.json"), "utf8"));
+    assert.equal(summary.recordingComplete, true);
+    assert.equal(summary.sentMessageId, null);
+    assert.deepEqual(summary.sentMessageIds, []);
+    assert.deepEqual(summary.sutRevisionTexts, ["Late incoming observation"]);
+    assert.equal(summary.scenario.actionFailure.sendOutcome, "unknown");
+    assert.equal(summary.scenario.actionFailure.actionIndex, 0);
+    assert.deepEqual(summary.scenario.gatewayActions, []);
+    assert.equal(f.releaseCount(), 1);
+    for (const { child } of f.children) {
+      assert.equal(child.exitCode !== null || child.signalCode !== null, true);
     }
   } finally {
     await f.cleanup();
