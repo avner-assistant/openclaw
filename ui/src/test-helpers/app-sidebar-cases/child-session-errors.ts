@@ -123,9 +123,9 @@ describe("AppSidebar child-session load errors", () => {
   });
 
   it.each(["main", "agent:main:main"])(
-    "keeps subagents under the %s main session through child-load recovery",
+    "keeps Home unique while recovering conversations spawned by %s",
     async (parentKey) => {
-      const childKey = "agent:main:subagent:recovered";
+      const childKey = "agent:main:dashboard:recovered";
       const gateway = createGateway({} as GatewayBrowserClient);
       const harness = createSessionsHarness("main", [parentKey]);
       harness.list
@@ -137,7 +137,8 @@ describe("AppSidebar child-session load errors", () => {
       harness.publishList({ result: sessionResult([parentSession(parentKey, childKey)]) });
 
       await waitForFast(() => expect(harness.list).toHaveBeenCalledOnce());
-      expect(sidebar.querySelector(`[data-session-key="${parentKey}"]`)).not.toBeNull();
+      expect(sidebar.querySelectorAll(".nav-item--home")).toHaveLength(1);
+      expect(sidebar.querySelector(`[data-session-key="${parentKey}"]`)).toBeNull();
       await waitForFast(() => {
         const alert = sidebar.querySelector(`[data-child-session-error="${parentKey}"]`);
         expect(alert?.getAttribute("role")).toBe("alert");
@@ -152,17 +153,10 @@ describe("AppSidebar child-session load errors", () => {
       await waitForFast(() =>
         expect(sidebar.querySelector("[data-child-session-error]")).toBeNull(),
       );
-      expect(sidebar.querySelector(`[data-session-key="${childKey}"]`)).toBeNull();
-      sidebar
-        .querySelector<HTMLButtonElement>(`[data-child-session-toggle="${parentKey}"]`)
-        ?.click();
       await waitForFast(() =>
-        expect(
-          sidebar.querySelector(
-            `[data-session-tree="${parentKey}"] [data-session-key="${childKey}"]`,
-          ),
-        ).not.toBeNull(),
+        expect(sidebar.querySelector(`[data-session-key="${childKey}"]`)).not.toBeNull(),
       );
+      expect(sidebar.querySelector(`[data-session-key="${parentKey}"]`)).toBeNull();
       expect(sidebar.querySelector("[data-child-session-error]")).toBeNull();
     },
   );
