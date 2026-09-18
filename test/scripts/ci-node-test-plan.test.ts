@@ -4065,6 +4065,20 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
       expectTimingFamilies(after, afterInherited);
       expect(policies(after, afterInherited)).toEqual(policies(before, beforeInherited));
       if (runnerBackend === "hybrid") {
+        const serial = structuredClone(before);
+        const serialGroup = expectDefined(
+          serial
+            .filter(
+              (job) => job.planConcurrency === 1 && job.env?.OPENCLAW_VITEST_MAX_WORKERS === "2",
+            )
+            .flatMap((job) => job.groups)
+            .find((group) => group.env?.OPENCLAW_VITEST_MAX_WORKERS === undefined),
+          "already-serial group using its job worker cap",
+        );
+        serialGroup.env = { ...serialGroup.env, OPENCLAW_VITEST_MAX_WORKERS: "2" };
+        expect(() =>
+          expect(policies(serial, beforeInherited)).toEqual(policies(before, beforeInherited)),
+        ).toThrow();
         const promoted = structuredClone(before);
         const recipient = expectDefined(
           promoted.find(
