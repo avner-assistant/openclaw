@@ -914,6 +914,9 @@ src/plugins/plugin-scope.ts
 src/plugins/plugin-sdk-native-resolver.ts
 src/plugins/plugin-setup-module.ts
 src/plugins/plugin-source-build.ts
+src/plugins/plugin-source-capture-context.ts
+src/plugins/plugin-source-capture-directory.ts
+src/plugins/plugin-source-capture-path.ts
 src/plugins/plugin-source-references.ts
 src/plugins/portable-icon-paths.ts
 src/plugins/provider-config-owner.ts
