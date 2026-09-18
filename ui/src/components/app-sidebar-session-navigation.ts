@@ -15,6 +15,7 @@ import {
   sessionNavigationTarget,
 } from "../lib/sessions/route-navigation.ts";
 import {
+  isSubagentSessionKey,
   normalizeAgentId,
   resolveUiDefaultAgentId,
   resolveUiSessionRowAgentId,
@@ -279,11 +280,13 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
         session.childSessionKeys.length > 0 &&
         (session.visuallyActive || this.isSessionChildrenExpanded(session))
       ) {
-        revalidating.add(session.key);
+        for (const key of session.childLoadParentKeys ?? [session.key]) {
+          revalidating.add(key);
+        }
       }
     }
     const mainRow = this.mainSessionRow();
-    if (mainRow && (mainRow.childSessions?.length ?? 0) > 0) {
+    if (mainRow?.childSessions?.some((key) => !isSubagentSessionKey(key))) {
       revalidating.add(mainRow.key);
     }
     return revalidating;
@@ -746,10 +749,13 @@ export class AppSidebarSessionNavigationElement extends AppSidebarBase {
   }
 
   toggleSessionChildren(session: SidebarRecentSession) {
-    if (!this.sessionProjection.toggleChildren(session).expanded) {
-      this.sessionData.discardEmptyChildSessionSnapshot(session.key);
-    } else {
-      this.sessionData.retryChildSessions(session.key);
+    const { expanded } = this.sessionProjection.toggleChildren(session);
+    for (const key of session.childLoadParentKeys ?? [session.key]) {
+      if (expanded) {
+        this.sessionData.retryChildSessions(key);
+      } else {
+        this.sessionData.discardEmptyChildSessionSnapshot(key);
+      }
     }
     this.requestUpdate();
   }

@@ -123,7 +123,7 @@ export function projectSidebarAgentSessionRows({
   const ownsSubagents = (row: GatewaySessionRow) =>
     row.childSessions?.some(isSubagentSessionKey) ||
     subagentParentKeys.has(normalizeDefaultMainSessionAliasForUi(row.key));
-  // Home replaces an ordinary main row, but subagents need an expandable parent.
+  // Home replaces an ordinary main row; retain a row for subagent activity and attention.
   const canonicalMainKeys = agentIds.map((agentId) => host.selectedAgentMainSessionKey(agentId));
   const isMainSession = (key: string) =>
     canonicalMainKeys.some((mainKey) => areUiSessionKeysEquivalent(key, mainKey));
