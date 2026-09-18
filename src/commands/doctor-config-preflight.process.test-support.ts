@@ -111,6 +111,7 @@ export function createSourceRuntime(root: string): string {
     );
   }
   for (const filename of [
+    "node-host-launcher.mjs",
     "node-version.mjs",
     "node-sqlite.mjs",
     "node-runtime-update.mjs",

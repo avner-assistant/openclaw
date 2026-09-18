@@ -18,10 +18,14 @@ const mocks = vi.hoisted(() => {
   return {
     closeMcp,
     closeWorkerSupervisor: vi.fn(async () => undefined),
+    workerHasActiveWork: vi.fn(() => false),
+    pluginHasActiveWork: vi.fn(() => false),
     initializeWorkerSupervisor: vi.fn(async () => undefined),
+    disconnectPlugins: vi.fn<() => Promise<void>>(async () => undefined),
     handleInvoke: vi.fn(async () => undefined),
     progressStartHeartbeats: vi.fn(),
     progressWrite: vi.fn(async (_chunk: string) => undefined),
+    progressFlush: vi.fn<() => Promise<void>>(async () => undefined),
     startMcp: vi.fn(async (_servers: unknown, _deps?: { signal?: AbortSignal }) => ({
       descriptors: [],
       callMcpTool: vi.fn(),
@@ -47,13 +51,14 @@ vi.mock("./node-invoke-progress.js", () => ({
     startHeartbeats: mocks.progressStartHeartbeats,
     write: mocks.progressWrite,
     stop: vi.fn(),
-    flush: vi.fn(async () => undefined),
+    flush: mocks.progressFlush,
   })),
 }));
 
 vi.mock("./node-worker-supervisor.js", () => ({
   createNodeWorkerSupervisor: vi.fn(() => ({
     initialize: mocks.initializeWorkerSupervisor,
+    hasActiveWork: mocks.workerHasActiveWork,
     close: mocks.closeWorkerSupervisor,
   })),
 }));
@@ -66,6 +71,8 @@ vi.mock("./node-worker-workspace.js", () => ({
 
 vi.mock("./plugin-node-host.js", () => ({
   ensureNodeHostPluginRegistry: vi.fn(async () => undefined),
+  hasRegisteredNodeHostCommandActiveWork: mocks.pluginHasActiveWork,
+  notifyRegisteredNodeHostCommandDisconnect: mocks.disconnectPlugins,
   isRegisteredNodeHostCommandDuplex: vi.fn((command: string) => command === "test.duplex"),
   listRegisteredNodeHostCapsAndCommands: vi.fn(() => ({
     caps: ["terminal"],
@@ -92,12 +99,17 @@ beforeEach(() => {
   mocks.closeMcp.mockResolvedValue(undefined);
   mocks.closeWorkerSupervisor.mockResolvedValue(undefined);
   mocks.initializeWorkerSupervisor.mockResolvedValue(undefined);
+  mocks.workerHasActiveWork.mockReturnValue(false);
+  mocks.pluginHasActiveWork.mockReturnValue(false);
+  mocks.disconnectPlugins.mockResolvedValue(undefined);
 });
 
-function createNodeHostClient(request: () => Promise<unknown>): NodeHostClient {
+function createNodeHostClient(
+  request: (...args: Parameters<NodeHostClient["request"]>) => Promise<unknown>,
+): NodeHostClient {
   return {
-    async request<T>() {
-      return (await request()) as T;
+    async request<T>(...args: Parameters<NodeHostClient["request"]>) {
+      return (await request(...args)) as T;
     },
   };
 }
@@ -288,6 +300,118 @@ function holdInvoke(onCommand?: (io: OpenClawPluginNodeHostCommandIo) => void) {
     release: () => release?.(),
   };
 }
+
+describe("node-host update pause", () => {
+  it.each(["system.run", "test.duplex", NODE_DESKTOP_STREAM_COMMAND])(
+    "keeps %s busy from admission through disconnected command settlement",
+    async (command) => {
+      const held = holdInvoke();
+      const request = vi.fn(async () => ({}));
+      const runtime = await startRuntime(createNodeHostClient(request));
+      const invoking = runtime.invoke({ ...frame, command });
+      try {
+        expect(runtime.tryPauseForUpdate()).toBe(false);
+        await vi.waitFor(() => expect(held.signal).toBeDefined());
+        runtime.cancelAll();
+        expect(held.signal?.aborted).toBe(true);
+        expect(runtime.tryPauseForUpdate()).toBe(false);
+
+        held.release();
+        await invoking;
+        await vi.waitFor(() => expect(runtime.tryPauseForUpdate()).toBe(true));
+        await runtime.invoke({ ...frame, id: "during-update", command });
+        expect(mocks.handleInvoke).toHaveBeenCalledOnce();
+        expect(request).toHaveBeenCalledWith("node.invoke.result", {
+          id: "during-update",
+          nodeId: frame.nodeId,
+          ok: false,
+          error: { code: "UNAVAILABLE", message: expect.stringContaining("updating") },
+        });
+
+        runtime.resumeAfterUpdate();
+        await runtime.invoke({ ...frame, id: "after-update", command });
+        expect(mocks.handleInvoke).toHaveBeenCalledTimes(2);
+      } finally {
+        held.release();
+        await invoking;
+        await runtime.close();
+      }
+    },
+  );
+
+  it("waits for superseded commands and buffered output after their replacements finish", async () => {
+    const first = holdInvoke();
+    const second = holdInvoke();
+    const flushed = createDeferred();
+    const runtime = await startRuntime();
+    const original = runtime.invoke(frame);
+    let replacement: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(first.signal).toBeDefined());
+      replacement = runtime.invoke(frame);
+      await vi.waitFor(() => expect(second.signal).toBeDefined());
+      second.release();
+      await replacement;
+      expect(first.signal?.aborted).toBe(true);
+      expect(runtime.tryPauseForUpdate()).toBe(false);
+
+      mocks.progressFlush.mockImplementationOnce(async () => await flushed.promise);
+      first.release();
+      await vi.waitFor(() => expect(mocks.progressFlush).toHaveBeenCalledTimes(2));
+      expect(runtime.tryPauseForUpdate()).toBe(false);
+      flushed.resolve();
+      await original;
+      expect(runtime.tryPauseForUpdate()).toBe(true);
+    } finally {
+      first.release();
+      second.release();
+      flushed.resolve();
+      await Promise.allSettled([original, replacement]);
+      await runtime.close();
+    }
+  });
+
+  it("waits for plugin disconnect cleanup and retains a failed cleanup as busy", async () => {
+    const cleanup = createDeferred();
+    mocks.disconnectPlugins.mockImplementationOnce(async () => await cleanup.promise);
+    const runtime = await startRuntime();
+    try {
+      runtime.cancelAll();
+      expect(runtime.tryPauseForUpdate()).toBe(false);
+      cleanup.reject(new Error("plugin process tree did not terminate"));
+      await runtime.invoke(frame);
+      expect(runtime.tryPauseForUpdate()).toBe(false);
+
+      runtime.cancelAll();
+      await runtime.invoke(frame);
+      expect(runtime.tryPauseForUpdate()).toBe(true);
+    } finally {
+      cleanup.resolve();
+      await runtime.close();
+    }
+  });
+
+  it("waits for MCP startup and retained worker or plugin ownership before pausing", async () => {
+    const startup = createDeferred<Awaited<ReturnType<typeof mocks.startMcp>>>();
+    mocks.startMcp.mockImplementationOnce(async () => await startup.promise);
+    const runtime = await startRuntime();
+    try {
+      expect(runtime.tryPauseForUpdate()).toBe(false);
+      mocks.workerHasActiveWork.mockReturnValue(true);
+      startup.resolve({ descriptors: [], callMcpTool: vi.fn(), close: mocks.closeMcp });
+      await runtime.invoke(frame);
+      expect(runtime.tryPauseForUpdate()).toBe(false);
+      mocks.workerHasActiveWork.mockReturnValue(false);
+      mocks.pluginHasActiveWork.mockReturnValue(true);
+      expect(runtime.tryPauseForUpdate()).toBe(false);
+      mocks.pluginHasActiveWork.mockReturnValue(false);
+      expect(runtime.tryPauseForUpdate()).toBe(true);
+    } finally {
+      startup.resolve({ descriptors: [], callMcpTool: vi.fn(), close: mocks.closeMcp });
+      await runtime.close();
+    }
+  });
+});
 
 describe("node-host invocation cancellation", () => {
   it("does not admit a queued invocation after its connection is retired", async () => {

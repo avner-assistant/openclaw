@@ -41,6 +41,7 @@
     "node-version.mjs",
     "node-runtime-update.mjs",
     "node-runtime-recovery.mjs",
+    "node-host-launcher.mjs",
     "openclaw.mjs",
     "pnpm-workspace.yaml",
     "README.md",

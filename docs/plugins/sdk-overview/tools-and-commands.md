@@ -110,3 +110,11 @@ underscores, or hyphens, and stay within 64 characters. MCP-backed node tools
 can set `agentTool.mcp` metadata so catalog and tool-search surfaces can show
 the remote MCP server/tool identity, but execution still goes through the
 advertised node command.
+
+Node-host commands that retain work after `handle(...)` returns must provide
+`hasActiveWork(): boolean`. Read already-owned state synchronously and report
+busy while background processes, retained streams, or their cleanup remain
+active. The node host uses this together with in-flight invocations when deciding
+whether it can pause for an update. The query also runs for unavailable commands;
+a failed query keeps the host busy. Keep teardown in the command's existing
+lifecycle, such as `onDisconnect`, and report idle only after that work settles.

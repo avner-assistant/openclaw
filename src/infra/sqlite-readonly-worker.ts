@@ -256,7 +256,7 @@ function readSqliteReadOnlyWorkerValue(
 ): SqliteSchemaHeader;
 function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
-  mode: "sync" | "async",
+  mode: "sync" | "async" | "consolidated",
 ): string;
 function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
@@ -288,7 +288,7 @@ function readSqliteReadOnlyWorkerValue(
   if (mode === "schema-header" && "header" in result) {
     return result.header;
   }
-  if ((mode === "sync" || mode === "async") && "location" in result) {
+  if ((mode === "sync" || mode === "async" || mode === "consolidated") && "location" in result) {
     return result.location;
   }
   if (mode === "reclaim" && "warnings" in result) {
@@ -525,6 +525,10 @@ export function runSqliteReadOnlyWorker(
 export function runSqliteReadOnlyWorker(
   pathname: string,
   options: { mode: "sync" | "async"; stagingRoot?: string; signal?: AbortSignal },
+): Promise<string>;
+export function runSqliteReadOnlyWorker(
+  pathname: string,
+  options: { mode: "consolidated"; stagingRoot: string; signal?: AbortSignal },
 ): Promise<string>;
 export function runSqliteReadOnlyWorker(
   pathname: string,

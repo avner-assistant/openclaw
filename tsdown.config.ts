@@ -930,6 +930,15 @@ const configs: UserConfig[] = [
       false,
     ),
   ),
+  nodeBuildConfig(
+    {
+      name: TSDOWN_UNIFIED_CONFIG_GROUP,
+      entry: { "node-host-launcher-bootstrap": "src/node-host/launcher-bootstrap.ts" },
+      deps: unifiedDeps,
+      outputOptions: { codeSplitting: false },
+    },
+    false,
+  ),
   workerDeployBuildConfig(),
   { ...createManagedHandoffBuildConfig(), name: TSDOWN_UNIFIED_CONFIG_GROUP, env },
   nodeBuildConfig(

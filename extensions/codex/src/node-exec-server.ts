@@ -52,6 +52,7 @@ export function createCodexNodeExecServerCommand(): OpenClawPluginNodeHostComman
     cap: CODEX_NODE_EXEC_SERVER_CAPABILITY,
     dangerous: true,
     duplex: true,
+    hasActiveWork: () => activeProcesses.size > 0,
     onDisconnect: async () => {
       await Promise.all([...activeProcesses].map(async (terminate) => await terminate()));
     },

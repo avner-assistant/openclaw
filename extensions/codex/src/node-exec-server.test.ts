@@ -198,6 +198,7 @@ describe("Codex node exec-server", () => {
       await expect(outcome).resolves.toMatchObject({
         message: "Codex node exec-server process tree did not terminate.",
       });
+      expect(command.hasActiveWork?.() ?? false).toBe(true);
       await expect(command.onDisconnect?.()).rejects.toThrow("did not terminate");
     } finally {
       frames.controller.abort();
@@ -480,6 +481,7 @@ describe("Codex node exec-server", () => {
     frames.controller.abort(new Error("malformed-frame fixture closed"));
     await expect(invocation).rejects.toThrow("malformed-frame fixture closed");
     expect(workspace.release).toHaveBeenCalledOnce();
+    expect(command.hasActiveWork?.() ?? false).toBe(false);
   });
 
   it("uses prepared HOME with the actual pinned binary while keeping Codex state private", async ({

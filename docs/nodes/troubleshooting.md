@@ -76,6 +76,14 @@ logger under subsystem `ai.openclaw`, category `node-host-worker`; see
 [macOS logging](/platforms/mac/logging) for capture options. After fixing the cause,
 restart the node host. Explicitly disabled hosting produces no such diagnostic.
 
+## Node runtime version differs from the CLI
+
+A packaged headless node can run a newer private runtime than the globally
+installed CLI. Use `openclaw nodes status --json` to check the connected node's
+version; `openclaw --version` reports the CLI version. For delayed updates,
+opt-outs, fallback, and migration or repair deferrals, see
+[Headless node updates](/install/updating/automatic-updates#headless-node-updates).
+
 ## Foreground requirements
 
 `camera.*` and `screen.*` are foreground-only on iOS/Android nodes.

@@ -3,6 +3,7 @@ import { asOptionalRecord as normalizeRecord } from "@openclaw/normalization-cor
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { NodePluginToolDescriptor } from "../../packages/gateway-protocol/src/schema/nodes.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { logDebug } from "../logger.js";
 import {
   parseComputerUseCapabilityDescriptor,
   type ComputerUseCapabilityDescriptor,
@@ -177,6 +178,24 @@ export async function notifyRegisteredNodeHostCommandDisconnect(): Promise<void>
     if (failures.length > 1) {
       throw new AggregateError(failures, "node-host plugin disconnect cleanup failed");
     }
+  });
+}
+
+/** Retained command work remains owned even when its capability is unavailable. */
+export function hasRegisteredNodeHostCommandActiveWork(): boolean {
+  const registry = resolveNodeHostPluginRegistry();
+  return withPluginRuntimeRegistryScope(registry, () => {
+    for (const entry of registry?.nodeHostCommands ?? []) {
+      try {
+        if (entry.command.hasActiveWork?.()) {
+          return true;
+        }
+      } catch (error) {
+        logDebug(`node-host: plugin work state unavailable: ${String(error)}`);
+        return true;
+      }
+    }
+    return false;
   });
 }
 

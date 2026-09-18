@@ -30,6 +30,7 @@ export function runSqliteWorkerClientOperation<Operations extends SqliteWorkerOp
           stateContext: {
             environment: { ...stateContext.environment },
             coordinatorRuntime: { ...stateContext.coordinatorRuntime },
+            existingSchemaPath: stateContext.existingSchemaPath,
           },
         }
       : {}),
