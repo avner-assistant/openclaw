@@ -4,7 +4,6 @@ import {
   createLazyFacadeObjectValue,
   loadBundledPluginPublicSurfaceModuleSyncCore,
 } from "../plugin-sdk/facade-loader.js";
-import type { NormalizedPluginsConfig } from "../plugins/config-state.js";
 import {
   assertSecretOwnerAvailable,
   isTrustedSecretSurfaceUnavailableError,
@@ -96,7 +95,6 @@ type GitHubPublicApi = {
     fetchImpl?: typeof fetch,
     refresh?: boolean,
   ) => Promise<unknown>;
-  collectGitHubUpgradeWarnings: (policy: NormalizedPluginsConfig) => string[];
 };
 
 /** Host credential selection uses canonical config and degradation state. */

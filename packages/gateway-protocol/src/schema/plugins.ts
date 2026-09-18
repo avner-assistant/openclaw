@@ -2,9 +2,18 @@
 import type { Static, TSchema } from "typebox";
 import { Type } from "typebox";
 import { closedObject } from "./closed-object.js";
+import {
+  ControlUiLinkReaderMetadataSchema,
+  ControlUiLinkReaderDescriptorSchema,
+} from "./control-ui-link-reader.js";
 import { PluginCredentialDescriptorSchema } from "./plugin-credentials.js";
 import type { PluginDeclaredSurfaceGroup } from "./plugin-declared-surface-groups.js";
 import { NonEmptyString } from "./primitives.js";
+
+export {
+  ControlUiLinkReaderMetadataSchema,
+  ControlUiLinkReaderDescriptorSchema,
+} from "./control-ui-link-reader.js";
 
 /**
  * Plugin control-surface protocol schemas.
@@ -14,21 +23,6 @@ import { NonEmptyString } from "./primitives.js";
  */
 /** Arbitrary plugin-owned JSON payload carried opaquely through the gateway. */
 export const PluginJsonValueSchema = Type.Unknown();
-
-export const ControlUiLinkReaderMetadataSchema = closedObject({
-  hosts: Type.Array(Type.String({ minLength: 1, maxLength: 253 }), { minItems: 1, maxItems: 16 }),
-  pathPattern: Type.String({ minLength: 2, maxLength: 1024 }),
-  detailMethod: Type.String({ minLength: 1, maxLength: 128 }),
-  previewMethod: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
-});
-
-export const ControlUiLinkReaderDescriptorSchema = closedObject({
-  pluginId: NonEmptyString,
-  id: NonEmptyString,
-  label: NonEmptyString,
-  icon: Type.Optional(Type.String()),
-  linkReader: ControlUiLinkReaderMetadataSchema,
-});
 
 /** Descriptor for one plugin-provided control UI action or surface. */
 export const PluginControlUiDescriptorSchema = closedObject({

@@ -1,3 +1,4 @@
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ControlUiGitHubError } from "./github-api.js";
 import {
@@ -204,8 +205,8 @@ describe("loadControlUiGitHubPreview", () => {
   );
 
   it("keeps concurrent readers and later cache hits independent of a disconnected caller", async () => {
-    const started = Promise.withResolvers<void>();
-    const repository = Promise.withResolvers<Response>();
+    const started = createDeferred<void>();
+    const repository = createDeferred<Response>();
     let connected = true;
     const identity = managedIdentity("shared-preview-identity", () => {
       if (!connected) {
@@ -745,8 +746,8 @@ describe("loadControlUiGitHubPreview", () => {
   });
 
   it("does not let a failed older request replace an explicit refresh", async () => {
-    const started = Promise.withResolvers<void>();
-    const older = Promise.withResolvers<Response>();
+    const started = createDeferred<void>();
+    const older = createDeferred<Response>();
     const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
       if (fetchMock.mock.calls.length === 1) {
         started.resolve();
