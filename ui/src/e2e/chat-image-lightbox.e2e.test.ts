@@ -1,9 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { chromium, type Browser, type BrowserContext } from "playwright";
 import { beforeEach, afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { finishElementAnimations } from "../test-helpers/animations.ts";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
+import { takeControlUiViewportScreenshot } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import {
   canRunPlaywrightChromium,
   installMockGateway,
@@ -125,6 +126,21 @@ describeControlUiE2e("Control UI image lightbox", () => {
 
       const transcriptTrigger = page.getByRole("button", { name: "Open image OpenClaw banner" });
       await transcriptTrigger.waitFor({ state: "visible", timeout: 10_000 });
+      const transcriptImage = transcriptTrigger.getByRole("img");
+      const contextMenuPrevented = transcriptImage.evaluate(
+        (image) =>
+          new Promise<boolean>((resolve) => {
+            image.addEventListener(
+              "contextmenu",
+              (event) => setTimeout(() => resolve(event.defaultPrevented), 0),
+              { once: true },
+            );
+          }),
+      );
+      await transcriptImage.click({ button: "right" });
+      expect(await contextMenuPrevented).toBe(false);
+      expect(await page.locator(".chat-reply-context-menu").count()).toBe(0);
+      await page.keyboard.press("Escape");
       await transcriptTrigger.click();
 
       const dialog = page.getByRole("dialog", { name: "Image preview: OpenClaw banner" });
@@ -229,6 +245,7 @@ describeControlUiE2e("Control UI image lightbox", () => {
         .toBe(true);
 
       await openChatSidePanelType(page, "Files");
+      await page.locator(".chat-workspace-rail__group-summary", { hasText: "Artifacts" }).click();
       const artifactRow = page.locator(".chat-workspace-rail__file-open", {
         hasText: "openclaw-banner.png",
       });
@@ -240,10 +257,10 @@ describeControlUiE2e("Control UI image lightbox", () => {
       await sidebarTrigger.waitFor({ state: "visible", timeout: 10_000 });
 
       if (captureUiProofEnabled) {
-        await page.screenshot({
-          fullPage: true,
-          path: path.join(proofDir, "01-sidebar-image.png"),
-        });
+        await writeFile(
+          path.join(proofDir, "01-sidebar-image.png"),
+          await takeControlUiViewportScreenshot(page, page.locator(".shell"), [sidebarTrigger]),
+        );
       }
 
       await sidebarTrigger.click();
@@ -252,10 +269,12 @@ describeControlUiE2e("Control UI image lightbox", () => {
       });
       await sidebarDialog.waitFor({ state: "visible" });
       if (captureUiProofEnabled) {
-        await page.screenshot({
-          fullPage: true,
-          path: path.join(proofDir, "02-sidebar-lightbox.png"),
-        });
+        await writeFile(
+          path.join(proofDir, "02-sidebar-lightbox.png"),
+          await takeControlUiViewportScreenshot(page, sidebarDialog, [
+            page.getByRole("button", { name: "Close image preview" }),
+          ]),
+        );
       }
       await page.getByRole("button", { name: "Close image preview" }).click();
       await expect.poll(() => sidebarDialog.count()).toBe(0);
@@ -364,10 +383,10 @@ describeControlUiE2e("Control UI image lightbox", () => {
       expect(zoomedImageBox?.x ?? mobileViewport.width).toBeLessThan(mobileViewport.width);
       expect(zoomedImageBox?.y ?? mobileViewport.height).toBeLessThan(mobileViewport.height);
       if (captureUiProofEnabled) {
-        await page.screenshot({
-          fullPage: true,
-          path: path.join(proofDir, "03-mobile-lightbox.png"),
-        });
+        await writeFile(
+          path.join(proofDir, "03-mobile-lightbox.png"),
+          await takeControlUiViewportScreenshot(page, sidebarDialog, [mobileImage]),
+        );
       }
       await page.keyboard.press("Escape");
       await expect.poll(() => sidebarDialog.count()).toBe(0);

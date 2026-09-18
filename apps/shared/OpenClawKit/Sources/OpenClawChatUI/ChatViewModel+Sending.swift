@@ -16,6 +16,7 @@ extension OpenClawChatViewModel {
             !isSending &&
             self.attachmentStagingCount == 0 &&
             !self.hasBlockingRunActivity &&
+            self.composerModelAvailabilityMessage == nil &&
             self.hasDraftToSend
     }
 
@@ -328,6 +329,7 @@ extension OpenClawChatViewModel {
         let trimmed: String
         let session: SessionSnapshot
         let replyTarget: OpenClawChatReplyTarget?
+        let composerSessionKey: String
         let composerRevision: UInt64
 
         var messageText: String {
@@ -380,6 +382,10 @@ extension OpenClawChatViewModel {
         }
 
         guard await self.prepareLiveRoute(for: draft) else { return }
+        guard self.composerModelAvailabilityMessage == nil else {
+            logDiagnostic("chat.ui send ignored reason=model-auth sessionKey=\(sessionKey)")
+            return
+        }
         let attempt = self.beginLiveSend(draft)
         await self.deliverLiveSend(attempt)
     }
@@ -415,6 +421,7 @@ extension OpenClawChatViewModel {
             trimmed: trimmed,
             session: currentSessionSnapshot(),
             replyTarget: Self.isSlashCommandDraft(trimmed) ? nil : replyTarget,
+            composerSessionKey: self.composerSessionKey(for: sessionKey),
             composerRevision: composerRevision(for: sessionKey))
     }
 
@@ -428,7 +435,7 @@ extension OpenClawChatViewModel {
             self.recordSuccessfulInput(
                 draft.trimmed,
                 submittedRevision: draft.composerRevision,
-                sessionKey: draft.session.key)
+                sessionKey: draft.composerSessionKey)
             return false
         }
         return await self.validateSlashCommandDraftForSend(
@@ -657,7 +664,12 @@ extension OpenClawChatViewModel {
                 thinking: thinkingLevel,
                 idempotencyKey: attempt.runId,
                 attachments: attempt.encodedAttachments)
-            guard isCurrentSession(attempt.draft.session) else { return }
+            guard isCurrentSession(attempt.draft.session) else {
+                if response.status != "error", response.status != "timeout" {
+                    self.finishAcceptedComposerSend(attempt.draft)
+                }
+                return
+            }
             await self.handleLiveSendResponse(response, attempt: attempt)
         } catch {
             await self.handleLiveSendFailure(
@@ -699,10 +711,7 @@ extension OpenClawChatViewModel {
         let historyContext = beginHistoryRequest(for: attempt.draft.session)
         let refresh = await refreshHistoryAfterRun(historyRequest: historyContext)
         guard isCurrentSession(attempt.draft.session) else { return }
-        let hasInFlightRunSnapshot = refresh.applied &&
-            refresh.runSnapshotApplied &&
-            refresh.hasInFlightRun
-        if hasInFlightRunSnapshot ||
+        if refresh.hasInFlightRun || (refresh.applied && !refresh.runSnapshotApplied) ||
             !clearPendingRunIfAssistantMessagePresent(
                 runId: response.runId,
                 after: attempt.userMessageTimestamp)
@@ -817,7 +826,7 @@ extension OpenClawChatViewModel {
             draft.trimmed,
             transcriptEcho: draft.outgoingMessageText,
             submittedRevision: draft.composerRevision,
-            sessionKey: draft.session.key)
+            sessionKey: draft.composerSessionKey)
         self.consumeReplyTarget(draft.replyTarget)
     }
 }

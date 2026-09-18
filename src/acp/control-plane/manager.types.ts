@@ -50,6 +50,8 @@ export type AcpSessionResolution =
 
 /** Input required to create or resume an ACP runtime session. */
 export type AcpInitializeSessionInput = {
+  /** Ephemeral source authority; rechecked after queued work and before publication. */
+  assertActive?: () => void;
   cfg: OpenClawConfig;
   sessionKey: string;
   agentId?: string;
@@ -58,6 +60,7 @@ export type AcpInitializeSessionInput = {
   resumeSessionId?: string;
   runtimeOptions?: Partial<AcpSessionRuntimeOptions>;
   modelExplicit?: boolean;
+  thinkingExplicit?: boolean;
   cwd?: string;
   backendId?: string;
 };
@@ -173,6 +176,7 @@ export type AcpSessionManagerDeps = {
 };
 
 export type WriteManagerSessionMeta = (params: {
+  assertCommitAllowed?: () => void;
   cfg: OpenClawConfig;
   sessionKey: string;
   agentId: string;
@@ -180,6 +184,7 @@ export type WriteManagerSessionMeta = (params: {
     current: SessionAcpMeta | undefined,
     entry: SessionEntry | undefined,
   ) => SessionAcpMeta | null | undefined;
+  isCurrentActor?: () => boolean;
   failOnError?: boolean;
   skipMaintenance?: boolean;
   takeCacheOwnership?: boolean;
@@ -197,6 +202,7 @@ export type EnsureManagerRuntimeHandle = (params: {
   agentId: string;
   meta: SessionAcpMeta;
   selectedBackend?: string;
+  isCurrentActor?: () => boolean;
 }) => Promise<{ runtime: AcpRuntime; handle: AcpRuntimeHandle; meta: SessionAcpMeta }>;
 
 export type ReconcileManagerRuntimeSessionIdentifiers = (params: {
@@ -208,6 +214,7 @@ export type ReconcileManagerRuntimeSessionIdentifiers = (params: {
   meta: SessionAcpMeta;
   runtimeStatus?: AcpRuntimeStatus;
   failOnStatusError: boolean;
+  isCurrentActor?: () => boolean;
 }) => Promise<{
   handle: AcpRuntimeHandle;
   meta: SessionAcpMeta;
@@ -221,11 +228,13 @@ export type SetManagerSessionState = (params: {
   state: SessionAcpMeta["state"];
   lastError?: string;
   clearLastError?: boolean;
+  isCurrentActor?: () => boolean;
 }) => Promise<void>;
 
 export type WithManagerSessionActor = <T>(
   target: AcpSessionTarget,
-  op: () => Promise<T>,
+  op: (isCurrentActor: () => boolean) => Promise<T>,
+  signal?: AbortSignal,
 ) => Promise<T>;
 
 export const DEFAULT_DEPS: AcpSessionManagerDeps = {

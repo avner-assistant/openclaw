@@ -122,7 +122,7 @@ if (mode === "admission-rearm") {
   }
 } else if (mode === "wait") {
   return;
-} else if (mode === "tree") {
+} else if (mode === "tree" || mode === "tree-cancel-reject") {
   grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   fs.writeFileSync(path.join(descriptor.assignment.workspaceDir, "grandchild.pid"), String(grandchild.pid));
 } else if (mode === "background-start" || mode.startsWith("background-start:")) {
@@ -179,7 +179,8 @@ if (mode === "admission-rearm") {
   const credential = descriptor.admission.credential;
   finish(descriptor, {
     ...completedResult,
-    transcriptLeafId: "raw " + credential + " encoded " + encodeURIComponent(credential),
+    transcriptLeafId: "raw " + credential + " encoded " + encodeURIComponent(credential) +
+      (descriptor.assignment.github ? " github " + descriptor.assignment.github.token : ""),
   });
 } else if (mode === "overflow") {
   fs.writeSync(1, "x".repeat(70 * 1024));
@@ -208,9 +209,16 @@ lines.on("line", (line) => {
   if (request.type === "cancel") {
     const descriptor = currentTurn;
     if (!descriptor || descriptor.assignment.turnId !== request.turnId) return;
-    const settle = () => finish(descriptor, {
-      status: "failed", reason: "turn-failed", transcriptLeafId: null, transcriptNextSeq: 1,
-    }, Boolean(background));
+    const settle = () => {
+      if (descriptor.assignment.prompt === "tree-cancel-reject") {
+        fs.writeSync(2, "worker live event rejected: invalid-event\n");
+        exitWorker(1);
+        return;
+      }
+      finish(descriptor, {
+        status: "failed", reason: "turn-failed", transcriptLeafId: null, transcriptNextSeq: 1,
+      }, Boolean(background));
+    };
     if (grandchild && !background) {
       grandchild.once("exit", settle);
       grandchild.kill("SIGKILL");

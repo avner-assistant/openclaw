@@ -1,4 +1,3 @@
-/** Shared attempt, error, and harness helpers for model fallback execution. */
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { TRANSCRIPT_NOT_CONTINUABLE_ERROR_CODE } from "../../packages/agent-core/src/errors.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
@@ -8,13 +7,12 @@ import { isCommandLaneTaskTimeoutError } from "../process/command-queue.js";
 import { findAgentRunTerminalOutcome } from "./agent-run-terminal-error.js";
 import { isDefaultAgentRuntimeId, normalizeOptionalAgentRuntimeId } from "./agent-runtime-id.js";
 import { externalCliDiscoveryForProviders } from "./auth-profiles/external-cli-discovery.js";
-import type { AuthProfileStore } from "./auth-profiles/types.js";
 import { isOpenClawAbortableWrapper } from "./embedded-agent-runner/run/abortable.js";
 import {
   FailoverError,
   buildFailoverRemediationHint,
   describeFailoverError,
-  findCliMaxTurnsError,
+  hasModelFallbackStop,
   isFailoverError,
   resolveModelFallbackError,
   type FallbackAttemptRecord,
@@ -26,7 +24,9 @@ import { resolveAgentHarnessPolicy } from "./harness/policy.js";
 import { getRegisteredAgentHarness } from "./harness/registry.js";
 import { LiveSessionModelSwitchError } from "./live-model-switch-error.js";
 import {
+  logModelFallbackChainStopped,
   logModelFallbackDecision,
+  type ModelFallbackChainStopReason,
   type ModelFallbackStepFields,
 } from "./model-fallback-observation.js";
 import type {
@@ -37,7 +37,12 @@ import type {
 import { modelKey } from "./model-ref-shared.js";
 import { isCliRuntimeAlias } from "./model-runtime-aliases.js";
 import { isCliProvider } from "./model-selection-cli.js";
-import { isAgentRunDirectAbortReason, isAgentRunRestartAbortReason } from "./run-termination.js";
+import {
+  isAgentRunDirectAbortReason,
+  isAgentRunRestartAbortReason,
+  isAgentRunSupersededAbortReason,
+  isSessionPlacementSettlementClosedError,
+} from "./run-termination.js";
 import { isSandboxProvisioningError } from "./sandbox/provisioning-error.js";
 import {
   runWithDeferredSessionSuspension,
@@ -72,11 +77,8 @@ export function resolveFallbackAuthScope(params: {
   userLockedAuthProfileId?: string;
   profileIds?: readonly string[];
 }): string | undefined {
-  if (params.userLockedAuthProfileId) {
-    return params.userLockedAuthProfileId;
-  }
   // resolveAuthProfileOrder places the profile selected for this model first.
-  return params.profileIds?.find((id) => id.trim())?.trim();
+  return params.userLockedAuthProfileId || params.profileIds?.find((id) => id.trim())?.trim();
 }
 
 type ModelFallbackRuntimeContext = {
@@ -121,13 +123,18 @@ export type ModelFallbackResultClassification =
   | null
   | undefined;
 
+/** Internal fallback execution also accepts producer-owned terminal causes. */
+type ModelFallbackAttemptClassification =
+  | ModelFallbackResultClassification
+  | { stopReason: ModelFallbackChainStopReason };
+
 export type ModelFallbackResultClassifier<T> = (attempt: {
   result: T;
   provider: string;
   model: string;
   attempt: number;
   total: number;
-}) => ModelFallbackResultClassification | Promise<ModelFallbackResultClassification>;
+}) => ModelFallbackAttemptClassification | Promise<ModelFallbackAttemptClassification>;
 
 export type ModelFallbackRunResult<T> = {
   outcome: "completed" | "exhausted";
@@ -193,6 +200,44 @@ function isAgentRunTerminalTimeout(err: unknown): boolean {
   return findAgentRunTerminalOutcome(err)?.status === "timeout";
 }
 
+/** Preserve stop precedence while naming the first matching condition. */
+function resolveChainStopReason(params: {
+  err: unknown;
+  harnessPreflight: boolean;
+  captureHarnessPreflight?: boolean;
+  callerSignalAborted: boolean;
+}): ModelFallbackChainStopReason | undefined {
+  const { err } = params;
+  if (isAgentRunTerminalTimeout(err)) {
+    return "agent_run_terminal_timeout";
+  }
+  if (isCommandLaneTaskTimeoutError(err)) {
+    return "command_lane_task_timeout";
+  }
+  if (params.harnessPreflight && !params.captureHarnessPreflight) {
+    return "agent_harness_preflight";
+  }
+  if (isSandboxProvisioningError(err)) {
+    return "sandbox_provisioning";
+  }
+  if (params.callerSignalAborted) {
+    return "caller_signal_aborted";
+  }
+  if (isAgentRunDirectAbortReason(err)) {
+    return "agent_run_direct_abort";
+  }
+  if (isAgentRunRestartAbortReason(err)) {
+    return "agent_run_restart_abort";
+  }
+  return isAgentRunSupersededAbortReason(err)
+    ? "agent_run_superseded_abort"
+    : isSessionPlacementSettlementClosedError(err)
+      ? "session_placement_settlement_closed"
+      : isTerminalAbortFromError(err)
+        ? "terminal_abort_wrapper"
+        : undefined;
+}
+
 async function runFallbackCandidate<T>(params: {
   run: ModelFallbackRunFn<T>;
   provider: string;
@@ -215,16 +260,21 @@ async function runFallbackCandidate<T>(params: {
     return { ok: true, result };
   } catch (err) {
     const harnessPreflight = isAgentHarnessPreflightError(err);
-    if (
-      isAgentRunTerminalTimeout(err) ||
-      isCommandLaneTaskTimeoutError(err) ||
-      (harnessPreflight && !params.captureHarnessPreflight) ||
-      isSandboxProvisioningError(err) ||
-      params.abortSignal?.aborted ||
-      isAgentRunDirectAbortReason(err) ||
-      isAgentRunRestartAbortReason(err) ||
-      isTerminalAbortFromError(err)
-    ) {
+    const chainStopReason = resolveChainStopReason({
+      err,
+      harnessPreflight,
+      captureHarnessPreflight: params.captureHarnessPreflight,
+      callerSignalAborted: params.abortSignal?.aborted === true,
+    });
+    if (chainStopReason) {
+      logModelFallbackChainStopped({
+        reason: chainStopReason,
+        provider: params.provider,
+        model: params.model,
+        sessionId: params.attribution?.sessionId,
+        lane: params.attribution?.lane,
+        error: err,
+      });
       throw err;
     }
     // A harness-local failure can select another candidate only while the turn is live.
@@ -259,7 +309,7 @@ export async function runFallbackAttempt<T>(params: {
   attribution?: FailoverAttribution;
   abortSignal?: AbortSignal;
 }): Promise<
-  | { success: ModelFallbackRunResult<T> }
+  | { success: ModelFallbackRunResult<T>; stopped?: true }
   | {
       error: unknown;
       classifiedResult?: ModelFallbackClassifiedResult<T>;
@@ -289,14 +339,25 @@ export async function runFallbackAttempt<T>(params: {
   }
   // Thrown, captured-preflight and callback-returned stops share this exit.
   // Do not replay tool effects or replace the original wrapper with its cause.
-  if (findCliMaxTurnsError(attemptError)) {
+  if (hasModelFallbackStop(attemptError)) {
     throw attemptError;
   }
   if (!runResult.ok) {
     return { error: runResult.error };
   }
   if (!attemptError) {
+    const stopReason =
+      classification && "stopReason" in classification ? classification.stopReason : undefined;
+    if (stopReason && params.total > 1) {
+      logModelFallbackChainStopped({
+        reason: stopReason,
+        provider: params.provider,
+        model: params.model,
+        ...params.attribution,
+      });
+    }
     return {
+      ...(stopReason ? { stopped: true as const } : {}),
       success: {
         outcome: "completed",
         result: runResult.result,
@@ -335,10 +396,10 @@ export async function runFallbackAttempt<T>(params: {
 }
 
 function resolveResultClassificationError(
-  classification: ModelFallbackResultClassification,
+  classification: ModelFallbackAttemptClassification,
   params: { provider: string; model: string; attribution?: FailoverAttribution },
 ) {
-  if (!classification) {
+  if (!classification || "stopReason" in classification) {
     return null;
   }
   if ("error" in classification) {
@@ -482,6 +543,21 @@ function resolveCandidateAttemptError(
   return described.message;
 }
 
+function buildFailedCandidateAttempt(
+  candidate: ModelCandidate,
+  described: ReturnType<typeof describeFailoverError>,
+): FallbackAttempt {
+  return {
+    provider: candidate.provider,
+    model: candidate.model,
+    error: resolveCandidateAttemptError(described, candidate),
+    reason: described.reason ?? "unknown",
+    authMode: described.authMode,
+    status: described.status,
+    code: described.code,
+  };
+}
+
 export function recordFailedCandidateAttempt(params: {
   attempts: FallbackAttempt[];
   candidate: ModelCandidate;
@@ -499,16 +575,8 @@ export function recordFailedCandidateAttempt(params: {
   fallbackConfigured: boolean;
 }): ModelFallbackStepFields | undefined {
   const described = describeFailoverError(params.error);
-  const error = resolveCandidateAttemptError(described, params.candidate);
-  params.attempts.push({
-    provider: params.candidate.provider,
-    model: params.candidate.model,
-    error,
-    reason: described.reason ?? "unknown",
-    authMode: described.authMode,
-    status: described.status,
-    code: described.code,
-  });
+  const attempt = buildFailedCandidateAttempt(params.candidate, described);
+  params.attempts.push(attempt);
   return logModelFallbackDecision({
     decision: "candidate_failed",
     runId: params.runId,
@@ -522,7 +590,7 @@ export function recordFailedCandidateAttempt(params: {
     reason: described.reason,
     status: described.status,
     code: described.code,
-    error,
+    error: attempt.error,
     nextCandidate: params.nextCandidate,
     isPrimary: params.isPrimary,
     requestedModelMatched: params.requestedModelMatched,
@@ -536,15 +604,7 @@ export function appendFailedCandidateAttempt(params: {
   error: unknown;
 }): void {
   const described = describeFailoverError(params.error);
-  params.attempts.push({
-    provider: params.candidate.provider,
-    model: params.candidate.model,
-    error: resolveCandidateAttemptError(described, params.candidate),
-    reason: described.reason ?? "unknown",
-    authMode: described.authMode,
-    status: described.status,
-    code: described.code,
-  });
+  params.attempts.push(buildFailedCandidateAttempt(params.candidate, described));
 }
 
 export function resolveLiveSessionModelSwitchRedirectIndex(params: {
@@ -631,30 +691,27 @@ export function throwFallbackFailureSummary(params: {
 
 export function resolveFallbackSoonestCooldownExpiry(params: {
   authRuntime: ModelFallbackAuthRuntime | null;
-  authStore: AuthProfileStore | null;
+  userLockedAuthProfileId?: string;
   agentDir?: string;
   cfg: OpenClawConfig | undefined;
-  candidates: ModelCandidate[];
+  profileIdsByCandidate: ReadonlyMap<ModelCandidate, string[]>;
 }): number | null {
-  if (!params.authRuntime || !params.authStore) {
+  if (!params.authRuntime || params.profileIdsByCandidate.size === 0) {
     return null;
   }
   // Refresh from persisted state because embedded attempts can update auth
   // cooldowns through a separate store instance while the fallback loop runs.
+  // Keep admission's profile scope: shared ordering must not hide a selected personal account.
   const refreshedStore = params.authRuntime.loadAuthProfileStoreForRuntime(params.agentDir, {
     readOnly: true,
+    profileId: params.userLockedAuthProfileId,
     externalCli: externalCliDiscoveryForProviders({
       cfg: params.cfg,
-      providers: params.candidates.map((candidate) => candidate.provider),
+      providers: [...params.profileIdsByCandidate.keys()].map((candidate) => candidate.provider),
     }),
   });
   let soonest: number | null = null;
-  for (const candidate of params.candidates) {
-    const ids = params.authRuntime.resolveAuthProfileOrder({
-      cfg: params.cfg,
-      store: refreshedStore,
-      provider: candidate.provider,
-    });
+  for (const [candidate, ids] of params.profileIdsByCandidate) {
     const candidateSoonest = params.authRuntime.getSoonestCooldownExpiry(refreshedStore, ids, {
       forModel: candidate.model,
     });
@@ -678,6 +735,8 @@ export function shouldDiscardDeferredSessionSuspension(params: {
     isAgentRunTerminalTimeout(params.error) ||
     isAgentRunDirectAbortReason(params.error) ||
     isAgentRunRestartAbortReason(params.error) ||
+    isAgentRunSupersededAbortReason(params.error) ||
+    isSessionPlacementSettlementClosedError(params.error) ||
     isTerminalAbortFromError(params.error) ||
     isCommandLaneTaskTimeoutError(params.error)
   ) {

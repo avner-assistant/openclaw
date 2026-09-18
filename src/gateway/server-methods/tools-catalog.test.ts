@@ -157,10 +157,21 @@ describe("tools.catalog handler", () => {
     expect(groups.some((group) => group.source === "plugin")).toBe(false);
     const media = groups.find((group) => group.id === "media");
     expect(media?.tools.map((tool) => `${tool.source}:${tool.id}`) ?? []).toContain("core:tts");
+    expect(groups.flatMap((group) => group.tools).filter((tool) => tool.id === "openclaw")).toEqual(
+      [
+        {
+          id: "openclaw",
+          label: "openclaw",
+          description: "Delegate OpenClaw setup and repair",
+          source: "core",
+          defaultProfiles: [],
+        },
+      ],
+    );
   });
 
-  it("omits agents_wait until Swarm is enabled for the catalog agent", async () => {
-    const disabled = createInvokeParams({ includePlugins: false });
+  it("includes agents_wait by default and honors an explicit Swarm opt-out", async () => {
+    const disabled = createInvokeParams({ includePlugins: false }, { tools: { swarm: false } });
     await disabled.invoke();
     expect(
       expectCatalogPayload(disabled.respond).groups.flatMap((group) =>
@@ -168,7 +179,7 @@ describe("tools.catalog handler", () => {
       ),
     ).not.toContain("agents_wait");
 
-    const enabled = createInvokeParams({ includePlugins: false }, { tools: { swarm: true } });
+    const enabled = createInvokeParams({ includePlugins: false });
     await enabled.invoke();
     expect(
       expectCatalogPayload(enabled.respond).groups.flatMap((group) =>
@@ -190,6 +201,7 @@ describe("tools.catalog handler", () => {
       id: "voice_call",
       label: "voice_call",
       description: "Plugin calling tool",
+      fullDescription: "Plugin calling tool",
       source: "plugin",
       pluginId: "voice-call",
       optional: true,

@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { closeQaRuntimeStores } from "openclaw/plugin-sdk/qa-runtime";
 import { uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { resolvePreferredOpenClawTmpDir } from "openclaw/plugin-sdk/temp-path";
 import {
@@ -76,6 +77,7 @@ export type QaGatewayChildParams = {
   fastMode?: boolean;
   thinkingDefault?: QaThinkingLevel;
   forcedRuntime?: RuntimeId;
+  codexMockAutoCompactTokenLimit?: number;
   claudeCliAuthMode?: QaCliBackendAuthMode;
   controlUiEnabled?: boolean;
   enabledPluginIds?: string[];
@@ -108,12 +110,12 @@ function createQaPackagedMockApiKey(): string {
   return `${prefix}-${["qa", "mock", randomUUID().replaceAll("-", "")].join("-")}`;
 }
 
-async function runQaPackagedBootstrap(
+async function runQaPackagedBootstrap<T>(
   failureMessage: string,
-  operation: () => Promise<unknown>,
-): Promise<void> {
+  operation: () => Promise<T>,
+): Promise<T> {
   try {
-    await operation();
+    return await operation();
   } catch (error) {
     const details = createQaGatewayCliError(error).message;
     // oxlint-disable-next-line preserve-caught-error -- Candidate CLI output can contain credentials; only the bounded redacted message crosses this boundary, never its raw cause.
@@ -168,7 +170,7 @@ export async function prepareQaGatewayChild(
   const gatewayCommand =
     params.command ??
     (params.useRepoCli ? resolveQaGatewayChildCommand(params.repoRoot) : undefined);
-  const usesPackagedCandidate = params.command?.usePackagedPlugins === true;
+  const usesPackagedCandidate = gatewayCommand?.usePackagedPlugins === true;
   const gatewayExecutablePath = gatewayCommand?.executablePath;
   const gatewayArgsPrefix = gatewayCommand?.argsPrefix ?? [];
   const gatewayArgsSuffix = gatewayCommand?.argsSuffix ?? [];
@@ -201,6 +203,7 @@ export async function prepareQaGatewayChild(
     providerMode,
     primaryModel: params.primaryModel,
     alternateModel: params.alternateModel,
+    autoCompactTokenLimit: params.codexMockAutoCompactTokenLimit,
   });
   const resolvedProvider = getQaProvider(providerMode);
   const liveProviderIds = resolvedProvider.usesModelProviderPlugins
@@ -229,6 +232,10 @@ export async function prepareQaGatewayChild(
       bind: "loopback",
       gatewayPort,
       gatewayToken,
+      // This is a fresh fixture, not config previously written by the tooling
+      // runtime. Let the packaged candidate's required repair stamp its version
+      // instead of making older release candidates appear to be downgrades.
+      stampCurrentVersion: !usesPackagedCandidate,
       providerBaseUrl: params.providerBaseUrl,
       workspaceDir,
       controlUiRoot: resolveQaControlUiRoot({
@@ -342,7 +349,7 @@ export async function prepareQaGatewayChild(
               (pluginId): pluginId is string => typeof pluginId === "string" && pluginId.length > 0,
             ),
           );
-          if (!gatewayCommand?.usePackagedPlugins) {
+          if (!usesPackagedCandidate) {
             // Register the external root before staging so one lifecycle owner
             // also cleans partial copies and host-version resolution failures.
             lifetime.stagedBundledPluginsRoot = resolveQaStagedBundledPluginsRoot({
@@ -350,7 +357,7 @@ export async function prepareQaGatewayChild(
               tempRoot,
             });
           }
-          const stagedPluginRuntime = gatewayCommand?.usePackagedPlugins
+          const stagedPluginRuntime = usesPackagedCandidate
             ? { bundledPluginsDir: undefined, runtimeHostVersion: undefined }
             : {
                 ...(await createQaBundledPluginsDir({
@@ -376,6 +383,7 @@ export async function prepareQaGatewayChild(
             bundledPluginsDir: stagedPluginRuntime.bundledPluginsDir,
             stagedBundledPluginsRoot: lifetime.stagedBundledPluginsRoot,
             compatibilityHostVersion: stagedPluginRuntime.runtimeHostVersion,
+            developmentSourceRoot: usesPackagedCandidate ? null : params.repoRoot,
             providerMode,
             runtimeEnvPatch: {
               ...params.runtimeEnvPatch,
@@ -431,39 +439,47 @@ export async function prepareQaGatewayChild(
           }
           packagedMockAuthStaged = true;
         }
-        if (usesPackagedCandidate && gatewayCommand) {
-          const command = {
-            lifetime,
-            executablePath: gatewayCommand.executablePath,
-            argsPrefix: gatewayCommand.argsPrefix ?? [],
-            cwd: gatewayCwd,
-            env,
-          };
-          await runQaPackagedBootstrap("installed package plugin setup failed", async () => {
-            // The separate onboarding smoke cannot prepare this child's state.
-            // Converge every freshly written config; a new-port retry can otherwise
-            // restore plugin entries the candidate removed before verify-only startup.
-            // Published candidates such as 2026.7.1-2 predate capability consent.
-            const help = await runQaGatewayCliCommand({
-              ...command,
-              args: ["update", "repair", "--help"],
-            });
-            const consentArgs = help.includes("--accept-capabilities")
-              ? ["--accept-capabilities"]
-              : [];
-            await runQaGatewayCliCommand({
-              ...command,
-              args: ["update", "repair", ...consentArgs, "--yes", "--no-restart", "--json"],
-            });
-          });
-        }
       }
       if (!env) {
         throw new Error("qa gateway runtime env not initialized");
       }
+      // Child-owned CLI commands must resolve the same ephemeral Gateway as the
+      // fixture process. Otherwise commands without their own connection flags
+      // can silently fall back to the operator's ambient local Gateway.
+      env.OPENCLAW_GATEWAY_PORT = String(gatewayPort);
 
+      // Packaged repair must inspect the configured port without our placeholder listener.
       await lifetime.portReservation?.release();
       lifetime.portReservation = null;
+      lifetime.assertOpen();
+
+      if (!reuseStartupLaunchState && usesPackagedCandidate && gatewayCommand) {
+        // Live auth staging opens parent-owned agent stores. Release this
+        // fixture's leases before the child Doctor takes maintenance ownership.
+        await closeQaRuntimeStores(tempRoot);
+        const command = {
+          lifetime,
+          executablePath: gatewayCommand.executablePath,
+          argsPrefix: gatewayCommand.argsPrefix ?? [],
+          cwd: gatewayCwd,
+          env,
+        };
+        // The separate onboarding smoke cannot prepare this child's state.
+        // Converge every freshly written config; a new-port retry can otherwise
+        // restore plugin entries the candidate removed before verify-only startup.
+        // Published candidates such as 2026.7.1-2 predate capability consent.
+        const help = await runQaPackagedBootstrap(
+          "installed package plugin setup failed (update repair --help)",
+          () => runQaGatewayCliCommand({ ...command, args: ["update", "repair", "--help"] }),
+        );
+        const consentArgs = help.includes("--accept-capabilities") ? ["--accept-capabilities"] : [];
+        await runQaPackagedBootstrap("installed package plugin setup failed (update repair)", () =>
+          runQaGatewayCliCommand({
+            ...command,
+            args: ["update", "repair", ...consentArgs, "--yes", "--no-restart", "--json"],
+          }),
+        );
+      }
       lifetime.assertOpen();
       return { cfg, env, gatewayPort, baseUrl, wsUrl };
     },

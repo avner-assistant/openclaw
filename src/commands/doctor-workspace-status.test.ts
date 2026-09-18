@@ -83,12 +83,50 @@ async function runNoteWorkspaceStatusForTest(
 
   const noteSpy = vi.spyOn(noteModule, "note").mockImplementation(() => {});
   noteWorkspaceStatus(cfg, {
-    pluginVersionDrift: opts?.pluginVersionDrift,
+    pluginVersionReadiness: opts?.pluginVersionDrift
+      ? { status: "resolved", report: opts.pluginVersionDrift }
+      : undefined,
   });
   return noteSpy;
 }
 
 describe("noteWorkspaceStatus", () => {
+  it("reports identical registrar failures once across agent workspace loads", () => {
+    const diagnostic = {
+      level: "error" as const,
+      pluginId: "broken-fixture",
+      source: "/plugins/broken-fixture/index.js",
+      message: "board widget registration has invalid kind",
+    };
+    mocks.resolveDefaultAgentId.mockReturnValue("alpha");
+    mocks.listAgentIds.mockReturnValue(["alpha", "beta"]);
+    mocks.resolveAgentWorkspaceDir.mockImplementation((_cfg, agentId) => `/workspace/${agentId}`);
+    mocks.buildPluginRegistrySnapshotReport.mockImplementation(({ workspaceDir }) => ({
+      workspaceDir,
+      ...createPluginLoadResult({ plugins: [], diagnostics: [diagnostic] }),
+    }));
+    mocks.buildPluginCompatibilityWarnings.mockReturnValue([]);
+    mocks.listTaskFlowRecords.mockReturnValue([]);
+
+    const noteSpy = vi.spyOn(noteModule, "note").mockImplementation(() => {});
+    try {
+      noteWorkspaceStatus({});
+      const diagnosticCalls = noteSpy.mock.calls.filter(
+        ([, title]) => title === "Plugin diagnostics",
+      );
+      expect(diagnosticCalls).toHaveLength(1);
+      expect(diagnosticCalls[0]?.[0]).toContain("broken-fixture");
+
+      expect(
+        collectWorkspaceStatusHealthFindings({}).filter(
+          (finding) => finding.target === "broken-fixture",
+        ),
+      ).toHaveLength(1);
+    } finally {
+      noteSpy.mockRestore();
+    }
+  });
+
   it("warns when plugins use legacy compatibility paths", async () => {
     const noteSpy = await runNoteWorkspaceStatusForTest(
       createPluginLoadResult({
@@ -200,16 +238,19 @@ describe("noteWorkspaceStatus", () => {
         plugins: { entries: { codex: { enabled: true } } },
       },
       {
-        pluginVersionDrift: {
-          gatewayVersion: "2026.6.1",
-          drifts: [
-            {
-              pluginId: "codex",
-              installedVersion: "2026.5.30-beta.1",
-              gatewayVersion: "2026.6.1",
-              source: "npm",
-            },
-          ],
+        pluginVersionReadiness: {
+          status: "resolved",
+          report: {
+            gatewayVersion: "2026.6.1",
+            drifts: [
+              {
+                pluginId: "codex",
+                installedVersion: "2026.5.30-beta.1",
+                gatewayVersion: "2026.6.1",
+                source: "npm",
+              },
+            ],
+          },
         },
       },
     );
@@ -240,24 +281,27 @@ describe("noteWorkspaceStatus", () => {
     const findings = collectWorkspaceStatusHealthFindings(
       { plugins: { entries: { brave: { enabled: true } } } },
       {
-        pluginVersionDrift: {
-          gatewayVersion: "2026.7.1-2",
-          drifts: [
-            {
-              pluginId: "brave",
-              installedVersion: "2026.7.1-beta.2",
-              gatewayVersion: "2026.7.1-2",
-              source: "npm",
-              packageName: "@openclaw/brave-plugin",
-              spec: "@openclaw/brave-plugin@2026.7.1-beta.2",
-              targetResolution: {
-                status: "unresolved",
+        pluginVersionReadiness: {
+          status: "resolved",
+          report: {
+            gatewayVersion: "2026.7.1-2",
+            drifts: [
+              {
+                pluginId: "brave",
+                installedVersion: "2026.7.1-beta.2",
+                gatewayVersion: "2026.7.1-2",
+                source: "npm",
                 packageName: "@openclaw/brave-plugin",
-                requestedTarget: "2026.7.1",
-                error: "npm registry did not resolve @openclaw/brave-plugin@2026.7.1: HTTP 404",
+                spec: "@openclaw/brave-plugin@2026.7.1-beta.2",
+                targetResolution: {
+                  status: "unresolved",
+                  packageName: "@openclaw/brave-plugin",
+                  requestedTarget: "2026.7.1",
+                  error: "npm registry did not resolve @openclaw/brave-plugin@2026.7.1: HTTP 404",
+                },
               },
-            },
-          ],
+            ],
+          },
         },
       },
     );
@@ -375,10 +419,12 @@ describe("noteWorkspaceStatus", () => {
       },
     );
     try {
-      const driftCalls = noteSpy.mock.calls.filter(([, title]) => title === "Plugin version drift");
+      const driftCalls = noteSpy.mock.calls.filter(
+        ([, title]) => title === "Plugin restart readiness",
+      );
       expect(driftCalls).toHaveLength(1);
       const [body] = expectDefined(driftCalls[0], "(driftCalls)[0] test invariant");
-      expect(body).toContain("1 active official plugin not on OpenClaw 2026.6.1");
+      expect(body).toContain("1 active official plugin not on post-restart OpenClaw 2026.6.1");
       expect(body).toContain("codex: 2026.5.30-beta.1 (npm) -> expected 2026.6.1");
       expect(body).toContain("openclaw plugins update codex");
       expect(body).toContain("openclaw gateway restart");
@@ -430,7 +476,9 @@ describe("noteWorkspaceStatus", () => {
       },
     );
     try {
-      const driftCalls = noteSpy.mock.calls.filter(([, title]) => title === "Plugin version drift");
+      const driftCalls = noteSpy.mock.calls.filter(
+        ([, title]) => title === "Plugin restart readiness",
+      );
       expect(driftCalls).toHaveLength(1);
       const [body] = expectDefined(driftCalls[0], "(driftCalls)[0] test invariant");
       expect(body).toContain("openclaw plugins update @openclaw/brave-plugin@2026.6.10-beta.1");
@@ -468,7 +516,9 @@ describe("noteWorkspaceStatus", () => {
       },
     );
     try {
-      expect(noteSpy.mock.calls.map(([, title]) => title)).not.toContain("Plugin version drift");
+      expect(noteSpy.mock.calls.map(([, title]) => title)).not.toContain(
+        "Plugin restart readiness",
+      );
     } finally {
       noteSpy.mockRestore();
     }

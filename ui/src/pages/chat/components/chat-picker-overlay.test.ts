@@ -113,13 +113,59 @@ describe("chat picker overlay", () => {
     releaseSecond();
     picker.open = true;
     pointerOutside();
+    const escape = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    });
+    composer.dispatchEvent(escape);
     expect(picker.open).toBe(true);
+    expect(escape.defaultPrevented).toBe(false);
     expect(dismissInvocations).toHaveBeenCalledTimes(2);
 
     onTestFinished(installChatComposerPickerDismissal(document));
     pointerOutside();
     expect(picker.open).toBe(false);
     expect(dismissInvocations).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    { isComposing: true, keyCode: 0 },
+    { isComposing: false, keyCode: 229 },
+  ])("leaves empty-search Escape to composition ($isComposing, $keyCode)", (composition) => {
+    const composer = document.createElement("div");
+    composer.className = "agent-chat__input";
+    const picker = document.createElement("details");
+    const trigger = document.createElement("summary");
+    const search = document.createElement("input");
+    search.setAttribute("data-chat-model-search", "true");
+    picker.append(trigger, search);
+    composer.append(picker);
+    document.body.append(composer);
+    picker.open = true;
+    onTestFinished(installChatComposerPickerDismissal(document));
+    search.focus();
+
+    const escape = new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+      ...composition,
+    });
+    search.dispatchEvent(escape);
+    expect(escape.defaultPrevented).toBe(false);
+    expect(picker.open).toBe(true);
+    expect(document.activeElement).toBe(search);
+
+    search.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(picker.open).toBe(false);
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("does not restore pointer focus after keyboard input takes over", () => {
@@ -166,11 +212,45 @@ describe("chat picker overlay", () => {
 
     effortPicker.open = true;
     effortPicker.addEventListener("toggle", handleChatComposerDetailsToggle);
+    onTestFinished(() =>
+      effortPicker.removeEventListener("toggle", handleChatComposerDetailsToggle),
+    );
     effortPicker.dispatchEvent(new Event("toggle"));
     effortControl.focus();
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 
     expect(effortPicker.open).toBe(false);
     expect(document.activeElement).toBe(effortTrigger);
+  });
+
+  it("keeps ancestor pickers open and dismisses nested menus from the inside out", () => {
+    onTestFinished(installChatComposerPickerDismissal(document));
+    const composer = document.createElement("div");
+    composer.className = "agent-chat__input";
+    const model = document.createElement("details");
+    const modelTrigger = document.createElement("summary");
+    const dropdown = document.createElement("wa-dropdown");
+    const accountTrigger = document.createElement("button");
+    accountTrigger.slot = "trigger";
+    dropdown.append(accountTrigger);
+    model.append(modelTrigger, dropdown);
+    const peer = document.createElement("details");
+    composer.append(model, peer);
+    document.body.append(composer);
+    model.open = peer.open = true;
+    dropdown.setAttribute("open", "");
+    dropdown.addEventListener("wa-show", handleChatComposerDropdownShow);
+    dropdown.dispatchEvent(new Event("wa-show"));
+
+    expect(model.open).toBe(true);
+    expect(peer.open).toBe(false);
+    accountTrigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(dropdown.hasAttribute("open")).toBe(false);
+    expect(model.open).toBe(true);
+    expect(document.activeElement).toBe(accountTrigger);
+
+    accountTrigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(model.open).toBe(false);
+    expect(document.activeElement).toBe(modelTrigger);
   });
 });

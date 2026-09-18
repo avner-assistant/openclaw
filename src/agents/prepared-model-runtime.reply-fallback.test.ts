@@ -17,12 +17,17 @@ import { listRuntimePluginIdsFromRegistry } from "../plugins/active-runtime-regi
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { createPluginRecord } from "../plugins/status.test-helpers.js";
+import { recordAgentDatabaseAdmissions } from "../state/agent-database-admission.js";
 import {
   createOpenClawTestState,
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
 import * as agentScope from "./agent-scope.js";
-import { resolveAgentRuntimePluginLoadPlan } from "./harness/runtime-plugin-load-plan.js";
+import {
+  resolveAgentRuntimePluginLoadPlan,
+  resolveAgentRuntimePluginSelections,
+} from "./harness/runtime-plugin-load-plan.js";
+import { ensureSelectedAgentHarnessPlugin } from "./harness/runtime-plugin.js";
 import { resolveModelCandidateChain } from "./model-fallback-candidates.js";
 import { getPreparedModelRuntimePluginGeneration } from "./prepared-model-runtime-generation-scope.js";
 import {
@@ -48,7 +53,7 @@ let state: OpenClawTestState;
 describe("prepared reply fallback ownership", () => {
   beforeEach(async () => {
     state = await createOpenClawTestState({ label: "prepared-model-runtime" });
-    resetPreparedModelRuntimeHarness(state);
+    await resetPreparedModelRuntimeHarness(state);
     vi.clearAllMocks();
     const actual = await vi.importActual<typeof import("./agent-scope.js")>("./agent-scope.js");
     vi.spyOn(agentScope, "resolveAgentConfig").mockImplementation(actual.resolveAgentConfig);
@@ -67,6 +72,25 @@ describe("prepared reply fallback ownership", () => {
   });
   afterEach(() => vi.restoreAllMocks());
 
+  it("publishes healthy configured runtimes while a divergent agent is refused", async () => {
+    mocks.configuredAgentIds = ["main", "cleaner"];
+    recordAgentDatabaseAdmissions([
+      {
+        agentId: "cleaner",
+        paths: ["/synthetic/agents/cleaner/openclaw-agent.cleaner.sqlite"],
+        embeddedOwnerId: "main",
+        code: "agent-database-ownership-mismatch",
+        reason: "Refused agent cleaner: its database belongs to main.",
+        repairHint: "Quarantine the cleaner copy and restart.",
+      },
+    ]);
+    await refreshPreparedModelRuntimeSnapshots({}, { gatewayLifecycle: true });
+    await expect(
+      loadPublishedGatewayReplyDispatchRuntime({ agentId: "main" }),
+    ).resolves.toMatchObject({ agentId: "main" });
+    expect(mocks.ensureOpenClawModelsJson).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     { scope: "agent", source: "auto", locked: false },
     { scope: "subagent", source: "auto", locked: false },
@@ -74,9 +98,13 @@ describe("prepared reply fallback ownership", () => {
     { scope: "fallback-only subagent", source: "auto", locked: false },
     { scope: "subagent", source: "user", locked: false },
     { scope: "subagent", source: "auto", locked: true },
+    { scope: "agent", source: "auto", locked: false, failedHarness: "unrelated/model" },
+    { scope: "agent", source: "auto", locked: false, failedHarness: "selected/model" },
   ] as const)(
-    "admits $scope routes with source=$source, locked=$locked without widening execution policy",
-    async ({ scope, source, locked }) => {
+    "admits $scope routes with source=$source, locked=$locked, failedHarness=$failedHarness without widening execution policy",
+    async (scenario) => {
+      const { scope, source, locked } = scenario;
+      const failedHarness = "failedHarness" in scenario ? scenario.failedHarness : undefined;
       const config: OpenClawConfig = {
         agents: {
           entries: {
@@ -93,6 +121,9 @@ describe("prepared reply fallback ownership", () => {
                 : {},
           },
           defaults: {
+            ...(failedHarness
+              ? { models: { [failedHarness]: { agentRuntime: { id: "broken-harness" } } } }
+              : {}),
             model: {
               primary: "initial/model",
               fallbacks: scope === "agent" ? ["fallback/model"] : [],
@@ -105,7 +136,10 @@ describe("prepared reply fallback ownership", () => {
             },
           },
         },
-        plugins: { allow: ["initial", "selected", "fallback"], slots: { memory: "none" } },
+        plugins: {
+          allow: ["initial", "selected", "fallback", "broken-harness"],
+          slots: { memory: "none" },
+        },
       };
       const manifests: PluginManifestRecord[] = ["initial", "selected", "fallback"].map((id) => ({
         id,
@@ -123,7 +157,18 @@ describe("prepared reply fallback ownership", () => {
       }));
       const metadata = createPluginMetadataSnapshot({
         config,
-        manifestRegistry: { plugins: manifests, diagnostics: [] },
+        manifestRegistry: {
+          plugins: [
+            ...manifests,
+            {
+              ...manifests[0]!,
+              id: "broken-harness",
+              providers: [],
+              activation: { onStartup: false, onAgentHarnesses: ["broken-harness"] },
+            },
+          ],
+          diagnostics: [],
+        },
       });
       mocks.configuredAgentIds = ["default"];
       mocks.loadAgentRuntimePluginRegistryHandle.mockImplementation((params) => {
@@ -135,10 +180,22 @@ describe("prepared reply fallback ownership", () => {
           basePluginIds: params.reusableRegistry
             ? listRuntimePluginIdsFromRegistry(params.reusableRegistry)
             : [],
-          selections: params.selections ?? [],
+          selections: resolveAgentRuntimePluginSelections(config, params.selections ?? []),
         });
         registry.plugins.push(
-          ...(plan.pluginIds ?? []).map((id) => createPluginRecord({ id, origin: "bundled" })),
+          ...(plan.pluginIds ?? []).map((id) =>
+            createPluginRecord({
+              id,
+              origin: "bundled",
+              ...(id === "broken-harness"
+                ? {
+                    status: "error",
+                    error: "Synthetic missing runtime export",
+                    failurePhase: "load",
+                  }
+                : {}),
+            }),
+          ),
         );
         return registry;
       });
@@ -186,7 +243,18 @@ describe("prepared reply fallback ownership", () => {
           },
           { pluginGeneration },
         );
-        nested.release();
+        if (failedHarness === "selected/model") {
+          await expect(
+            ensureSelectedAgentHarnessPlugin({
+              config,
+              provider: run.provider,
+              modelId: run.model,
+              workspaceDir: dispatch.workspaceDir,
+              pluginRegistry: nested.snapshot.pluginRegistry,
+            }),
+          ).rejects.toThrow("reason=owner-plugin-degraded, ownerPluginId=broken-harness");
+        }
+        await nested[Symbol.asyncDispose]();
         return { text: "fallback admitted" };
       });
       const execute = bindPreparedReplyDispatchRuntime(dispatch, () =>

@@ -5,7 +5,8 @@ import type {
   Tool as OpenAIResponsesTool,
 } from "openai/resources/responses/responses.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { configureAiTransportHost } from "../host.js";
+import { makeTextToolResult } from "../../../../test/helpers/text-tool-result.js";
+import { configureAiTransportHost, getAiTransportHost } from "../host.js";
 import {
   buildOpenAIResponsesReasoningReplayMetadata,
   captureOpenAIResponsesCompaction,
@@ -13,13 +14,14 @@ import {
 import { isInvalidEncryptedContentError } from "../transports/openai-responses-replay-internal.js";
 import { processResponsesStream } from "../transports/openai-responses-stream-internal.js";
 import type { AssistantMessage, AssistantMessageEvent, Context, Model, Tool } from "../types.js";
+import { createZeroUsage } from "../usage.test-support.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { SYSTEM_PROMPT_CACHE_BOUNDARY } from "../utils/system-prompt-cache-boundary.js";
+import { resolveOpenAISimpleReasoningEffort } from "./openai-request-reasoning.js";
 import {
   applyCommonResponsesParams,
   createResponsesAssistantOutput,
   convertResponsesMessages,
-  resolveResponsesReasoningEffort,
   runResponsesStreamLifecycle,
 } from "./openai-responses-shared.js";
 import { convertResponsesToolPayload } from "./openai-responses-tools.js";
@@ -100,23 +102,7 @@ const testAllowedToolCallProviders = new Set(["openai", "openai-codex", "opencod
 const reasoningReplayIdentity = { sessionId: "session-a", authProfileId: "profile-a" };
 
 function createAssistantOutput(): AssistantMessage {
-  return {
-    role: "assistant",
-    api: nativeOpenAIModel.api,
-    provider: nativeOpenAIModel.provider,
-    model: nativeOpenAIModel.id,
-    usage: {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-    },
-    stopReason: "stop",
-    timestamp: 0,
-    content: [],
-  };
+  return { ...createResponsesAssistantOutput(nativeOpenAIModel), timestamp: 0 };
 }
 
 async function* responseEvents(events: Array<Record<string, unknown>>) {
@@ -128,8 +114,13 @@ async function* responseEvents(events: Array<Record<string, unknown>>) {
 describe("convertResponsesToolPayload", () => {
   beforeEach(() => {
     // Mimic the OpenClaw host strict-tool policy: native OpenAI routes force
-    // strict=true, proxy-like routes leave the flag unset.
+    // strict=true; compatible routes opt in to sending strict=false.
+    const capabilities = getAiTransportHost().resolveProviderRequestCapabilities({});
     configureAiTransportHost({
+      resolveProviderRequestCapabilities: ({ baseUrl }) => ({
+        ...capabilities,
+        endpointClass: baseUrl === nativeOpenAIModel.baseUrl ? "openai-public" : "custom",
+      }),
       resolveOpenAIStrictToolSetting: (model, options) => {
         if (model.provider === "openai" && model.baseUrl === "https://api.openai.com/v1") {
           return true;
@@ -152,7 +143,7 @@ describe("convertResponsesToolPayload", () => {
       },
     ] satisfies Tool[];
 
-    const converted = convertResponsesToolPayload(tools, { model: nativeOpenAIModel }).tools;
+    const converted = convertResponsesToolPayload(tools, { model: nativeOpenAIModel });
 
     expect(converted).toEqual([
       {
@@ -185,7 +176,7 @@ describe("convertResponsesToolPayload", () => {
         },
       ],
       { model: nativeOpenAIModel },
-    ).tools;
+    );
 
     const tool = expectResponsesFunctionTool(converted[0]);
     expect(tool.strict).toBe(false);
@@ -207,7 +198,7 @@ describe("convertResponsesToolPayload", () => {
         },
       ],
       { model: proxyOpenAIModel },
-    ).tools;
+    );
 
     const tool = expectResponsesFunctionTool(converted[0]);
     expect(tool).not.toHaveProperty("strict");
@@ -230,7 +221,7 @@ describe("convertResponsesToolPayload", () => {
     } satisfies Tool;
 
     expect(
-      convertResponsesToolPayload([zeta, alpha]).tools.map(
+      convertResponsesToolPayload([zeta, alpha]).map(
         (tool) => expectResponsesFunctionTool(tool).name,
       ),
     ).toEqual(["alpha", "zeta"]);
@@ -256,7 +247,7 @@ describe("convertResponsesToolPayload", () => {
         },
       ],
       { model: nativeOpenAIModel },
-    ).tools;
+    );
 
     expect(converted).toEqual([
       {
@@ -333,7 +324,7 @@ describe("Responses reasoning effort", () => {
   });
 
   it("passes max through for GPT-5.6 Sol", () => {
-    expect(resolveResponsesReasoningEffort(gpt56SolModel, "max")).toBe("max");
+    expect(resolveOpenAISimpleReasoningEffort(gpt56SolModel, "max")).toBe("max");
 
     const params = {} as never;
     applyCommonResponsesParams(
@@ -347,9 +338,32 @@ describe("Responses reasoning effort", () => {
     expect(params).toMatchObject({ reasoning: { effort: "max", summary: "auto" } });
   });
 
-  it("raises unsupported minimal reasoning to low for GPT-5.6 Sol", () => {
-    expect(resolveResponsesReasoningEffort(gpt56SolModel, "minimal")).toBe("low");
-  });
+  it.each<{
+    model: Model<"openai-responses">;
+    reasoning: "minimal" | "high";
+    expected: string;
+  }>([
+    { model: gpt56SolModel, reasoning: "minimal", expected: "low" },
+    {
+      model: { ...proxyOpenAIModel, compat: { supportedReasoningEfforts: ["ProviderHigh"] } },
+      reasoning: "high",
+      expected: "ProviderHigh",
+    },
+  ])(
+    "normalizes $reasoning to $expected at the request boundary",
+    ({ model, reasoning, expected }) => {
+      const params = {} as ResponseCreateParamsStreaming;
+      applyCommonResponsesParams(
+        params,
+        model,
+        { messages: [] },
+        {
+          reasoningEffort: resolveOpenAISimpleReasoningEffort(model, reasoning),
+        },
+      );
+      expect(params.reasoning).toEqual({ effort: expected, summary: "auto" });
+    },
+  );
 
   it("keeps max clamped to xhigh for earlier models", () => {
     const gpt55WithXHigh = {
@@ -357,7 +371,7 @@ describe("Responses reasoning effort", () => {
       thinkingLevelMap: { xhigh: "xhigh" },
     } satisfies Model<"openai-responses">;
 
-    expect(resolveResponsesReasoningEffort(gpt55WithXHigh, "max")).toBe("xhigh");
+    expect(resolveOpenAISimpleReasoningEffort(gpt55WithXHigh, "max")).toBe("xhigh");
   });
 });
 
@@ -430,14 +444,7 @@ describe("convertResponsesMessages", () => {
             api: nativeOpenAIModel.api,
             provider: nativeOpenAIModel.provider,
             model: nativeOpenAIModel.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "stop",
             timestamp: 1,
             content: [
@@ -495,14 +502,7 @@ describe("convertResponsesMessages", () => {
             api: nativeOpenAIModel.api,
             provider: nativeOpenAIModel.provider,
             model: nativeOpenAIModel.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "stop",
             timestamp: 1,
             content: [
@@ -542,14 +542,7 @@ describe("convertResponsesMessages", () => {
             api: nativeOpenAIModel.api,
             provider: nativeOpenAIModel.provider,
             model: nativeOpenAIModel.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "toolUse",
             timestamp: 1,
             content: [
@@ -579,14 +572,7 @@ describe("convertResponsesMessages", () => {
               },
             ],
           },
-          {
-            role: "toolResult",
-            toolCallId: "call_abc|fc_prior",
-            toolName: "price_lookup",
-            content: [{ type: "text", text: "$83.95" }],
-            isError: false,
-            timestamp: 2,
-          },
+          makeTextToolResult("call_abc|fc_prior", "price_lookup", "$83.95", false, 2),
         ],
       } satisfies Context,
       allowedToolCallProviders,
@@ -630,14 +616,7 @@ describe("convertResponsesMessages", () => {
             api: nativeOpenAIModel.api,
             provider: nativeOpenAIModel.provider,
             model: nativeOpenAIModel.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "toolUse",
             timestamp: 1,
             content: [{ type: "toolCall", id: "call_plan", name: "update_plan", arguments: {} }],
@@ -675,14 +654,7 @@ describe("convertResponsesMessages", () => {
             api: nativeOpenAIModel.api,
             provider: nativeOpenAIModel.provider,
             model: nativeOpenAIModel.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "toolUse",
             timestamp: 1,
             content: [
@@ -724,14 +696,7 @@ describe("convertResponsesMessages", () => {
             api: nativeOpenAIModel.api,
             provider: nativeOpenAIModel.provider,
             model: nativeOpenAIModel.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "toolUse",
             timestamp: 1,
             content: [{ type: "toolCall", id: "call_audio", name: "audio", arguments: {} }],
@@ -797,14 +762,7 @@ describe("convertResponsesMessages", () => {
             api: nativeOpenAIModel.api,
             provider: nativeOpenAIModel.provider,
             model: nativeOpenAIModel.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "stop",
             timestamp: 1,
             content: [
@@ -899,6 +857,10 @@ describe("convertResponsesMessages", () => {
       ) as unknown as Array<Record<string, unknown>>;
 
       const reasoningItem = input.find((item) => item.type === "reasoning");
+      if (!preservesCiphertext) {
+        expect(reasoningItem).toBeUndefined();
+        return;
+      }
       expect(reasoningItem).toMatchObject({
         type: "reasoning",
         id: "rs_route_fenced",
@@ -906,11 +868,7 @@ describe("convertResponsesMessages", () => {
         content: [{ type: "reasoning_text", text: "safe content" }],
       });
       expect(reasoningItem).not.toHaveProperty("__openclaw_replay");
-      if (preservesCiphertext) {
-        expect(reasoningItem).toHaveProperty("encrypted_content", "route-bound-ciphertext");
-      } else {
-        expect(reasoningItem).not.toHaveProperty("encrypted_content");
-      }
+      expect(reasoningItem).toHaveProperty("encrypted_content", "route-bound-ciphertext");
     },
   );
 
@@ -1055,10 +1013,7 @@ describe("processResponsesStream", () => {
     }
   });
 
-  it.each([
-    [undefined, 0],
-    [2, 2],
-  ])("passes SDK maxRetries %s as %i", async (maxRetries, expected) => {
+  it("pins SDK maxRetries to zero", async () => {
     let requestMaxRetries: number | undefined;
     const output = createAssistantOutput();
     const stream = new AssistantMessageEventStream();
@@ -1067,7 +1022,6 @@ describe("processResponsesStream", () => {
       stream,
       model: nativeOpenAIModel,
       output,
-      options: maxRetries === undefined ? undefined : { maxRetries },
       createClient: () => ({
         responses: {
           create: (_params, requestOptions) => {
@@ -1090,7 +1044,7 @@ describe("processResponsesStream", () => {
       buildParams: () => ({ model: nativeOpenAIModel.id, input: [], stream: true }),
     });
 
-    expect(requestMaxRetries).toBe(expected);
+    expect(requestMaxRetries).toBe(0);
     expect(output.stopReason).toBe("stop");
   });
 
@@ -2220,14 +2174,7 @@ describe("processResponsesStream", () => {
         systemPrompt: "",
         messages: [
           output,
-          {
-            role: "toolResult",
-            toolCallId: "call_weather|fc_weather",
-            toolName: "weather",
-            content: [{ type: "text", text: "Rain" }],
-            isError: false,
-            timestamp: 1,
-          },
+          makeTextToolResult("call_weather|fc_weather", "weather", "Rain", false, 1),
         ],
       } satisfies Context,
       testAllowedToolCallProviders,
@@ -3554,14 +3501,7 @@ describe("Azure OpenAI Responses content type support", () => {
             api: azureModel.api,
             provider: azureModel.provider,
             model: azureModel.id,
-            usage: {
-              input: 0,
-              output: 0,
-              cacheRead: 0,
-              cacheWrite: 0,
-              totalTokens: 0,
-              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-            },
+            usage: createZeroUsage(),
             stopReason: "stop",
             timestamp: 1,
             content: [

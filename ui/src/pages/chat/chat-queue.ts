@@ -9,7 +9,8 @@ import { generateUUID } from "../../lib/uuid.ts";
 import { releaseChatAttachmentPayloads } from "./attachment-payload-store.ts";
 import { chatOutboxOwner } from "./chat-outbox-owner.ts";
 import {
-  admitStoredChatComposerQueueItem,
+  admitStoredChatComposerQueueItemResult,
+  type ChatQueueAdmissionResult,
   listStoredChatOutboxes,
   removeStoredChatComposerQueueItem,
   storedChatOutboxScopeKey,
@@ -287,15 +288,25 @@ export function admitQueuedMessageForSession(
   item: ChatQueueItem,
   replaces?: StoredChatQueueReplacement,
 ): boolean {
+  return admitQueuedMessageForSessionResult(host, captured, item, replaces) === "admitted";
+}
+
+export function admitQueuedMessageForSessionResult(
+  host: ChatQueueScopedSessionHost,
+  captured: ReturnType<typeof captureChatOutboxAdmission>,
+  item: ChatQueueItem,
+  replaces?: StoredChatQueueReplacement,
+): ChatQueueAdmissionResult {
   const owner = chatOutboxOwner(host);
   owner.keep(host, captured.scope, item);
-  if (!admitStoredChatComposerQueueItem(host, captured, item, replaces)) {
-    return false;
+  const result = admitStoredChatComposerQueueItemResult(host, captured, item, replaces);
+  if (result !== "admitted") {
+    return result;
   }
   if (item.sendState !== "waiting-model") {
     owner.change(host, item.id);
   }
-  return true;
+  return "admitted";
 }
 
 export function removeQueuedMessageWithoutReleasing(
@@ -327,17 +338,6 @@ export function removeQueuedMessageWithoutReleasing(
   }
   owner.publish(undefined, true);
   return located?.item ?? null;
-}
-
-export function removeVisibleOrScopedQueuedMessageWithoutReleasing(
-  host: ChatQueueScopedSessionHost,
-  id: string,
-  sessionKey: string | undefined,
-): ChatQueueItem | null {
-  return (
-    removeQueuedMessageWithoutReleasing(host, id) ??
-    (sessionKey ? removeQueuedMessageWithoutReleasing(host, id) : null)
-  );
 }
 
 export function excludeComposerAttachments(
@@ -408,25 +408,5 @@ export function clearPendingQueueItemsForRun(
   );
   for (const item of removed) {
     releaseChatAttachmentPayloads(excludeComposerAttachments(host, item.attachments));
-  }
-}
-
-export function markQueuedChatSendsWaitingForReconnect(host: ChatQueueScopedSessionHost) {
-  const items = chatOutboxOwner(host).allItems(host);
-  for (const item of items) {
-    if (!item.sendRunId || (item.sendState !== "sending" && item.sendState !== "waiting-idle")) {
-      continue;
-    }
-    if (isVolatileQueuedMessage(host, item.id)) {
-      updateVolatileQueuedMessage(host, item.id, (current) => ({
-        ...current,
-        sendState: "unconfirmed",
-      }));
-      continue;
-    }
-    updateQueuedMessage(host, item.id, (current) => ({
-      ...current,
-      sendState: "waiting-reconnect",
-    }));
   }
 }

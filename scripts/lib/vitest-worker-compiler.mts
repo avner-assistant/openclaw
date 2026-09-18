@@ -2,17 +2,26 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { runWithFailedTrailer } from "./failed-trailer.mts";
-import { fsSafeNativeCopy } from "./fs-safe-native-assets.mts";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { resolveBuildInfo } from "../write-build-info.ts";
+import { createManagedHandoffBuildConfig } from "./managed-handoff-build-config.mts";
+import { collectRuntimeImportClosure } from "./runtime-import-closure.mts";
+import {
+  sharedRuntimeProcessBuildEntries,
+  shouldBundleRuntimeSqliteDependency,
+  standaloneRuntimeProcessBuildEntries,
+} from "./runtime-process-core-build-entries.mts";
 import { createStateSchemaInlinePlugin } from "./state-schema-inline-plugin.mts";
 import {
   hashVitestWorkerArtifact,
   verifyVitestWorkerArtifacts,
-  vitestWorkerDeclarationEntries,
   type VitestWorkerManifest,
 } from "./vitest-worker-artifacts.mts";
-import { vitestWorkerBuildEntries } from "./vitest-worker-build-entries.mts";
+import {
+  legacyFinalizerBuildSources,
+  vitestWorkerBuildEntries,
+} from "./vitest-worker-build-entries.mts";
+import { vitestWorkerDeclarationEntries } from "./vitest-worker-declarations.mts";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(import.meta.url);
@@ -23,6 +32,7 @@ async function compileVitestWorkerArtifacts(directory: string): Promise<void> {
   const { build }: typeof import("tsdown") = require("tsdown");
   const inputs: Record<string, string> = {};
   const outputs: Record<string, string> = {};
+  let outputPrefix = "";
   const recordInput = (id: string) => {
     const normalized = id.replaceAll("\\", "/");
     if (!path.isAbsolute(normalized) || normalized.split("/").includes("node_modules")) {
@@ -40,18 +50,16 @@ async function compileVitestWorkerArtifacts(directory: string): Promise<void> {
     "tsconfig.json",
     "package.json",
     "pnpm-lock.yaml",
-    "scripts/lib/vitest-worker-artifacts.mts",
-    "scripts/lib/vitest-worker-run.mts",
-    "scripts/lib/vitest-worker-compiler.mts",
-    "scripts/lib/managed-child-process.mts",
-    "scripts/lib/windows-taskkill.mjs",
-    "scripts/windows-cmd-helpers.mjs",
-    "scripts/lib/failed-trailer.mts",
-    "scripts/lib/runtime-process-build-entries.mts",
-    "scripts/lib/vitest-worker-build-entries.mts",
-    "scripts/lib/fs-safe-native-assets.mts",
-    "scripts/lib/state-schema-inline-plugin.mts",
-    "scripts/lib/vitest-cli-mode.mts",
+    // Pin compiler, lifetime, and source-versus-compiled selection code, including lazy platforms.
+    ...collectRuntimeImportClosure(
+      root,
+      [
+        "scripts/lib/vitest-worker-compiler.mts",
+        "scripts/lib/vitest-worker-run.mts",
+        "scripts/lib/vitest-cli-mode.mts",
+      ],
+      { includeDynamicImports: true },
+    ),
   ]) {
     recordInput(path.join(root, name));
   }
@@ -61,22 +69,56 @@ async function compileVitestWorkerArtifacts(directory: string): Promise<void> {
   };
   const schemaPlugin = createStateSchemaInlinePlugin(root);
   const outDir = path.join(directory, "dist");
-  const nativeCopy = fsSafeNativeCopy({ outDir });
-  // tsdown copies resources after generateBundle. Pin source bytes first so
-  // verification cannot bless missing or altered copies with a post-build scan.
-  for (const name of fs.readdirSync(nativeCopy.from, { recursive: true, encoding: "utf8" })) {
-    const source = path.join(nativeCopy.from, name);
-    if (fs.statSync(source).isFile()) {
-      const target = path.join(nativeCopy.to, path.basename(nativeCopy.from), name);
-      outputs[path.relative(outDir, target)] = hashVitestWorkerArtifact(fs.readFileSync(source));
-    }
-  }
-  await build({
+  const shouldBundleWorkspaceDependency = (id: string) =>
+    (id.startsWith("@openclaw/") || id.startsWith("openclaw/")) &&
+    id !== "@openclaw/fs-safe" &&
+    !id.startsWith("@openclaw/fs-safe/");
+  const commonPlugins = [
+    {
+      name: "openclaw:worker-build-inputs",
+      load(id) {
+        recordInput(id);
+        return null;
+      },
+      generateBundle(_options, bundle) {
+        const packageDirectories = new Set(Object.keys(inputs).map((id) => path.dirname(id)));
+        for (let packageDirectory of packageDirectories) {
+          while (packageDirectory.startsWith(root)) {
+            const manifest = path.join(packageDirectory, "package.json");
+            if (fs.existsSync(manifest)) {
+              recordInput(manifest);
+              break;
+            }
+            packageDirectory = path.dirname(packageDirectory);
+          }
+        }
+        for (const [name, output] of Object.entries(bundle)) {
+          outputs[outputPrefix + name] = hashVitestWorkerArtifact(
+            output.type === "chunk" ? output.code : Buffer.from(output.source),
+          );
+        }
+      },
+    },
+    {
+      ...schemaPlugin,
+      load(id) {
+        return schemaPlugin.load.call(
+          {
+            addWatchFile: (file) => {
+              recordInput(file);
+              this.addWatchFile(file);
+            },
+          },
+          id,
+        );
+      },
+    },
+  ] satisfies NonNullable<Parameters<typeof build>[0]>["plugins"];
+  const config: NonNullable<Parameters<typeof build>[0]> = {
     config: false,
     cwd: root,
-    entry,
+    entry: sharedRuntimeProcessBuildEntries(entry),
     outDir,
-    copy: nativeCopy,
     format: "esm",
     platform: "node",
     tsconfig: path.join(root, "tsconfig.json"),
@@ -85,55 +127,75 @@ async function compileVitestWorkerArtifacts(directory: string): Promise<void> {
     clean: false,
     outExtensions: () => ({ js: ".js" }),
     deps: {
-      neverBundle: true,
-      alwaysBundle: (id) => id.startsWith("@openclaw/") || id.startsWith("openclaw/"),
+      // Runtime entries share bundled query builders; other root dependencies stay external.
+      alwaysBundle: (id) =>
+        shouldBundleWorkspaceDependency(id) || shouldBundleRuntimeSqliteDependency(id),
     },
     logLevel: "warn",
     plugins: [
       {
-        name: "openclaw:worker-build-inputs",
-        load(id) {
-          recordInput(id);
+        name: "openclaw:maintenance-service-boundary",
+        resolveId(id, importer) {
+          if (
+            importer &&
+            id.startsWith(".") &&
+            path.resolve(path.dirname(importer), id).replace(/\.js$/u, ".ts") ===
+              path.join(root, "src/daemon/service.ts")
+          ) {
+            return {
+              id: pathToFileURL(path.join(outDir, "triage-maintenance/service.js")).href,
+              external: "absolute",
+            };
+          }
           return null;
         },
-        generateBundle(_options, bundle) {
-          for (const id of Object.keys(inputs)) {
-            let packageDirectory = path.dirname(id);
-            while (packageDirectory.startsWith(root)) {
-              const manifest = path.join(packageDirectory, "package.json");
-              if (fs.existsSync(manifest)) {
-                recordInput(manifest);
-                break;
-              }
-              packageDirectory = path.dirname(packageDirectory);
-            }
-          }
-          for (const [name, output] of Object.entries(bundle)) {
-            outputs[name] = hashVitestWorkerArtifact(
-              output.type === "chunk" ? output.code : Buffer.from(output.source),
-            );
-          }
-        },
       },
-      {
-        ...schemaPlugin,
-        load(id) {
-          return schemaPlugin.load.call(
-            {
-              addWatchFile: (file) => {
-                recordInput(file);
-                this.addWatchFile(file);
-              },
-            },
-            id,
-          );
-        },
-      },
+      ...commonPlugins,
     ],
+  };
+  await build(config);
+  for (const [name, source] of Object.entries(standaloneRuntimeProcessBuildEntries)) {
+    await build({
+      ...config,
+      entry: { [name]: source },
+      outputOptions: { codeSplitting: false },
+    });
+  }
+  await build({
+    ...createManagedHandoffBuildConfig(),
+    config: false,
+    cwd: root,
+    outDir,
+    clean: false,
+    logLevel: config.logLevel,
+    plugins: config.plugins,
   });
+  outputPrefix = "legacy-finalizer/";
+  await build({
+    ...config,
+    // Array entries honor root; object entries infer src/ and break import.meta paths.
+    entry: legacyFinalizerBuildSources,
+    outDir: path.join(outDir, "legacy-finalizer"),
+    root,
+    // Load hooks forward the complete original namespaces through query imports.
+    unbundle: true,
+    treeshake: false,
+    inputOptions: { preserveEntrySignatures: "strict" },
+    outputOptions: { entryFileNames: "[name].js", chunkFileNames: "[name].js" },
+    // Hooked service and authority owners must stay in this single preserved graph.
+    plugins: commonPlugins,
+  });
+  for (const source of legacyFinalizerBuildSources) {
+    fs.accessSync(path.join(outDir, outputPrefix, source.replace(/\.ts$/u, ".js")));
+  }
   for (const name of Object.keys(entry)) {
     fs.accessSync(path.join(directory, "dist", `${name}.js`));
   }
+  // Version consumers need the built source identity without making this
+  // disposable generation a competing OpenClaw installation root.
+  const buildInfo = `${JSON.stringify(resolveBuildInfo({ rootDir: root }), null, 2)}\n`;
+  fs.writeFileSync(path.join(outDir, "build-info.json"), buildInfo, { flag: "wx" });
+  outputs["build-info.json"] = hashVitestWorkerArtifact(buildInfo);
   const sortedInputs = Object.fromEntries(
     Object.entries(inputs).toSorted(([a], [b]) => a.localeCompare(b)),
   );
@@ -146,14 +208,15 @@ async function compileVitestWorkerArtifacts(directory: string): Promise<void> {
     outputs: sortedOutputs,
     durationMs: performance.now() - started,
   };
-  verifyVitestWorkerArtifacts(directory, manifest);
+  await verifyVitestWorkerArtifacts(directory, manifest);
+  manifest.durationMs = performance.now() - started;
   fs.writeFileSync(path.join(directory, "manifest.json"), `${JSON.stringify(manifest)}\n`, {
     flag: "wx",
   });
 }
 
 if (import.meta.main) {
-  await runWithFailedTrailer("vitest-workers", async () => {
+  try {
     const directory = fs.realpathSync(process.argv[2]!);
     const parent = fs.realpathSync(path.join(root, ".artifacts/vitest-workers"));
     if (
@@ -165,5 +228,8 @@ if (import.meta.main) {
       throw new Error("Compiled subprocess compiler requires a fresh invocation directory");
     }
     await compileVitestWorkerArtifacts(directory);
-  });
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
+  }
 }

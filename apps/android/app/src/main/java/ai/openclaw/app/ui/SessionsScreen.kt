@@ -2,6 +2,7 @@ package ai.openclaw.app.ui
 
 import ai.openclaw.app.MainViewModel
 import ai.openclaw.app.chat.ChatSessionEntry
+import ai.openclaw.app.chat.isSessionRunActive
 import ai.openclaw.app.i18n.nativeString
 import ai.openclaw.app.ui.design.ClawEmptyState
 import ai.openclaw.app.ui.design.ClawLoadingState
@@ -63,6 +64,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -80,7 +82,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -102,7 +103,7 @@ internal fun SessionsScreen(
   var filter by rememberSaveable { mutableStateOf(SessionFilter.Recent) }
   var compactLayout by rememberSaveable { mutableStateOf(false) }
   var recentFirst by rememberSaveable { mutableStateOf(true) }
-  var sessionStatusNowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+  var sessionStatusNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
   var collapsedSessionKeys by
     rememberSaveable(activeGatewayStableId, stateSaver = CollapsedSessionKeysSaver) {
       mutableStateOf<Set<String>>(emptySet())
@@ -167,19 +168,25 @@ internal fun SessionsScreen(
   }
 
   ClawScaffold(
-    contentPadding = PaddingValues(start = 16.dp, top = 10.dp, end = 16.dp, bottom = 4.dp),
+    contentPadding =
+      PaddingValues(
+        start = ClawTheme.spacing.sm,
+        top = ClawTheme.spacing.xxs,
+        end = ClawTheme.spacing.sm,
+        bottom = ClawTheme.spacing.xxxs,
+      ),
     contentWindowInsets = WindowInsets.safeDrawing,
   ) {
     LazyColumn(
       modifier = Modifier.fillMaxSize(),
-      verticalArrangement = Arrangement.spacedBy(9.dp),
-      contentPadding = PaddingValues(bottom = 4.dp),
+      verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
+      contentPadding = PaddingValues(bottom = ClawTheme.spacing.xxxs),
     ) {
       item {
         Row(
           modifier = Modifier.fillMaxWidth(),
           verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
+          horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
         ) {
           if (showSidebarButton) {
             ClawPlainIconButton(
@@ -189,7 +196,7 @@ internal fun SessionsScreen(
               modifier = Modifier.testTag("sidebar-open-sessions"),
             )
           }
-          Text(text = nativeString("Threads"), style = ClawTheme.type.display.copy(fontSize = 24.sp, lineHeight = 28.sp), color = ClawTheme.colors.text, modifier = Modifier.weight(1f))
+          Text(text = nativeString("Threads"), style = ClawTheme.type.display, color = ClawTheme.colors.text, modifier = Modifier.weight(1f))
           ClawPlainIconButton(
             icon = Icons.Default.Search,
             contentDescription = nativeString("Focus thread search"),
@@ -202,7 +209,7 @@ internal fun SessionsScreen(
       }
 
       item {
-        Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxxs)) {
           FilterPill(text = nativeString("Recent"), icon = Icons.Outlined.AccessTime, active = filter == SessionFilter.Recent, onClick = { filter = SessionFilter.Recent })
           FilterPill(text = nativeString("Current"), icon = Icons.Outlined.MicNone, active = filter == SessionFilter.Current, showDot = sessions.any { it.key == chatSessionKey }, onClick = { filter = SessionFilter.Current })
           FilterPill(text = nativeString("Archived"), icon = Icons.Outlined.Archive, active = filter == SessionFilter.Archived, onClick = { filter = SessionFilter.Archived })
@@ -244,7 +251,7 @@ internal fun SessionsScreen(
                 Row(
                   modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp),
                   verticalAlignment = Alignment.CenterVertically,
-                  horizontalArrangement = Arrangement.spacedBy(5.dp),
+                  horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxxs),
                 ) {
                   val sortOrder =
                     if (recentFirst) {
@@ -303,19 +310,25 @@ internal fun SessionsScreen(
             contentAlignment = Alignment.Center,
           ) {
             when (sessionEmptyMode(searchState.query, searchState.loading)) {
-              SessionEmptyMode.SearchLoading -> ClawLoadingState(title = nativeString("Searching threads"))
-              SessionEmptyMode.SearchNoMatches ->
+              SessionEmptyMode.SearchLoading -> {
+                ClawLoadingState(title = nativeString("Searching threads"))
+              }
+
+              SessionEmptyMode.SearchNoMatches -> {
                 ClawEmptyState(
                   title = nativeString("No matching threads"),
                   body = nativeString("Try a different search or clear the current query."),
                   action = { ClawPrimaryButton(text = nativeString("Clear Search"), onClick = { searchText = "" }) },
                 )
-              SessionEmptyMode.Filter ->
+              }
+
+              SessionEmptyMode.Filter -> {
                 ClawEmptyState(
                   title = emptySessionTitle(filter),
                   body = emptySessionBody(filter),
                   action = { ClawPrimaryButton(text = nativeString("Start Chat"), onClick = onOpenChat) },
                 )
+              }
             }
           }
         }
@@ -653,7 +666,7 @@ private fun SessionRow(
               .sessionColorStripe(ClawTheme.colors.sessionColor(session.color))
               .padding(vertical = 5.dp),
           verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(7.dp),
+          horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
         ) {
           Box(modifier = Modifier.size(ClawTheme.spacing.touchTarget), contentAlignment = Alignment.Center) {
             if (hasChildren) {
@@ -694,7 +707,7 @@ private fun SessionRow(
             }
           }
 
-          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.5.dp)) {
+          Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxxs)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
               Text(
                 text = title,
@@ -724,7 +737,7 @@ private fun SessionRow(
               SessionDescendantSignals(collapsedDescendantState, visible = compact)
             }
             if (!compact) {
-              Text(text = subtitle, style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp), color = ClawTheme.colors.textMuted, maxLines = 1)
+              Text(text = subtitle, style = ClawTheme.type.caption, color = ClawTheme.colors.textMuted, maxLines = 1)
               Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 SessionMiniTag(text = nativeString("Workspace"))
                 SessionMiniTag(text = if (active) nativeString("Current") else nativeString("OpenClaw"))
@@ -732,9 +745,9 @@ private fun SessionRow(
             }
           }
 
-          Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(5.dp)) {
+          Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxxs)) {
             Icon(imageVector = Icons.Outlined.ChatBubbleOutline, contentDescription = null, modifier = Modifier.size(13.dp), tint = ClawTheme.colors.textMuted)
-            Text(text = metadata, style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp), color = ClawTheme.colors.textMuted, maxLines = 1)
+            Text(text = metadata, style = ClawTheme.type.caption, color = ClawTheme.colors.textMuted, maxLines = 1)
           }
         }
         HorizontalDivider(color = ClawTheme.colors.border, thickness = 1.dp)
@@ -814,13 +827,15 @@ private fun SessionRow(
             menuExpanded = false
             onRename()
           }
-          SessionMenuItem(
-            nativeString(
-              if (session.hasActiveRun == true) "Fork from last completed message" else "Fork",
-            ),
-          ) {
-            menuExpanded = false
-            onFork()
+          if (session.modelSelectionLocked != true) {
+            SessionMenuItem(
+              nativeString(
+                if (session.hasActiveRun == true) "Fork from last completed message" else "Fork",
+              ),
+            ) {
+              menuExpanded = false
+              onFork()
+            }
           }
           SessionMenuItem(nativeString("Move to group")) { submenu = SessionRowSubmenu.Group }
           if (canChangeArchived) {
@@ -966,7 +981,7 @@ private fun SessionMiniTag(text: String) {
     border = BorderStroke(1.dp, ClawTheme.colors.border),
     contentColor = ClawTheme.colors.textMuted,
   ) {
-    Text(text = text, modifier = Modifier.padding(horizontal = 4.dp, vertical = 0.5.dp), style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp), maxLines = 1)
+    Text(text = text, modifier = Modifier.padding(horizontal = 4.dp, vertical = 0.5.dp), style = ClawTheme.type.caption, maxLines = 1)
   }
 }
 
@@ -1034,7 +1049,9 @@ internal fun resolveSessionBrowserEntries(
   val filtered =
     when (filter) {
       SessionFilter.Recent -> entries.filter { it.archived != true }
+
       SessionFilter.Current -> entries.filter { it.key == currentSessionKey && it.archived != true }
+
       // Gate on the entry's own archived flag so a pre-toggle active list can
       // never render with archived-only actions while a refetch is in flight.
       SessionFilter.Archived -> entries.filter { it.archived == true }
@@ -1050,6 +1067,7 @@ internal fun sessionListSubtitle(
   session: ChatSessionEntry,
   fallback: String,
   nowMs: Long = System.currentTimeMillis(),
+  activeRunLabel: String? = null,
 ): String {
   val agentStatus =
     session.agentStatus?.takeIf { status ->
@@ -1063,7 +1081,7 @@ internal fun sessionListSubtitle(
       ?.trim()
       ?.takeIf { it.isNotEmpty() && (runStatus == "failed" || runStatus == "timeout") && (session.lastReadAt ?: 0L) < failureAt }
   val digest = session.observerDigest
-  val running = session.hasActiveRun == true || runStatus == "running"
+  val running = isSessionRunActive(session.hasActiveRun, runStatus)
   val digestMatchesActiveRun =
     digest
       ?.runId
@@ -1075,8 +1093,9 @@ internal fun sessionListSubtitle(
       (digest.health == "done" || digest.health == "failed") &&
       (session.lastReadAt ?: 0L) < digest.updatedAt
   val observer = digest?.headline?.takeIf { (running && digestMatchesActiveRun) || (!running && finalDigestUnread) }
-  val queued = nativeString("Waiting for a concurrency slot").takeIf { runStatus == "queued" }
-  return declaredAttention ?: failedAttention ?: agentStatus?.note ?: queued ?: observer ?: fallback
+  // Stored queued status can outlive its reservation; this copy describes current waiting.
+  val queued = nativeString("Waiting for a concurrency slot").takeIf { running && runStatus == "queued" }
+  return declaredAttention ?: failedAttention ?: agentStatus?.note ?: queued ?: observer ?: activeRunLabel?.takeIf { running } ?: fallback
 }
 
 internal data class SessionSection(
@@ -1245,7 +1264,7 @@ internal fun buildSessionTreeSections(
     val attention = session.agentStatus?.let { it.expiresAt > nowMs && it.attention != null } == true
     return SessionDescendantState(
       containsCurrent = session.key == currentSessionKey,
-      hasRunning = session.hasActiveRun == true || status == "running",
+      hasRunning = isSessionRunActive(session.hasActiveRun, status),
       hasUnread = session.unread == true,
       hasFailure = status == "failed" || status == "timeout" || status == "timed_out",
       hasAttention = attention,

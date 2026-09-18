@@ -68,9 +68,31 @@ function readCodexArgs(args: readonly string[]): CodexArg[] {
   return tokens;
 }
 
+/** Uses the native CLI configuration for status without starting its transport. */
+export function buildCodexLoginStatusArgs(args: readonly string[]): string[] {
+  const options = new Set(["-c", "--config", "-p", "--profile", "--enable", "--disable"]);
+  const tokens = readCodexArgs(args);
+  const subcommandIndex = tokens.findLast(({ name }) => name === "app-server")?.index ?? -1;
+  const prefix = subcommandIndex < 0 ? [] : args.slice(0, subcommandIndex);
+  const configArgs = tokens
+    .filter(({ index, name }) => index > subcommandIndex && options.has(name))
+    .flatMap(({ index, end }) => args.slice(index, end));
+  return [...prefix, ...configArgs, "login", "status"];
+}
+
 export function readCodexAppServerConfigOptions(args: readonly string[]) {
   return readCodexArgs(args).filter(
     ({ name }) => name === "-c" || name === "--config" || name === "-p" || name === "--profile",
+  );
+}
+
+/** The stdio proxy forwards to an external server; it does not own that runtime. */
+export function isCodexAppServerProxyLaunch(args: readonly string[]): boolean {
+  const tokens = readCodexArgs(args);
+  const server = tokens.findLastIndex(({ name }) => name === "app-server");
+  return (
+    server >= 0 &&
+    tokens.slice(server + 1).find(({ name }) => !name.startsWith("-"))?.name === "proxy"
   );
 }
 

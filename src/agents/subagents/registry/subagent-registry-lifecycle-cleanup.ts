@@ -171,6 +171,7 @@ export function suspendPendingFinalDelivery(
     taskId: params.resolveSubagentTask(args.entry).task?.taskId ?? "",
     reason: args.error ?? getDeliveryLastError(args.entry) ?? args.reason,
     suspendedReason: args.reason,
+    lastDropReason: args.entry.delivery?.lastDropReason,
   });
   if (!committed) {
     throw new Error(`subagent completion owner changed before suspension: ${args.runId}`);
@@ -395,10 +396,7 @@ export async function completeTerminalEffects(
     !suppressSessionEffects &&
     params.shouldEmitEndedHookForRun({ entry, reason: completionReason });
   const shouldDeferEndedHook =
-    shouldEmitEndedHook &&
-    completeParams.triggerCleanup &&
-    entry.expectsCompletionMessage === true &&
-    !suppressedForSteerRestart;
+    shouldEmitEndedHook && completeParams.triggerCleanup && entry.expectsCompletionMessage === true;
   if (!shouldDeferEndedHook && shouldEmitEndedHook) {
     await params.emitSubagentEndedHookForRun({
       entry,
@@ -479,6 +477,12 @@ async function completeTerminalCleanup(
     return true;
   };
   if (!completeParams.triggerCleanup || suppressedForSteerRestart) {
+    return;
+  }
+  if (entry.resumptionNotice) {
+    // The recovered run may finish before its resumption notice is delivered.
+    // Restart recovery retries that debt for a bounded terminal window, then
+    // clears it and re-enters cleanup so completion cannot remain wedged.
     return;
   }
   refreshSessionEffectsSuppression();

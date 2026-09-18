@@ -1,5 +1,6 @@
 import { messageToolOwnsVisibleReply } from "../../auto-reply/source-reply-delivery-mode.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { finalizeAgentToolAvailability } from "../agent-tool-availability.js";
 import type { HookContext } from "../agent-tools.before-tool-call.js";
 import {
   CODE_MODE_EXEC_TOOL_NAME,
@@ -7,6 +8,7 @@ import {
   createCodeModeTools,
 } from "../code-mode.js";
 import { resolveConversationCapabilityProfile } from "../conversation-capability-profile.js";
+import { mergeForcedEmbeddedAttemptToolsAllow } from "../embedded-agent-runner/run/attempt-tool-construction-plan.js";
 import {
   filterLocalModelLeanTools,
   resolveLocalModelLeanPreserveToolNames,
@@ -62,11 +64,12 @@ export function createAgentHarnessToolSurfaceRuntimeCore(params: {
   forceMessageTool?: boolean;
   isRawModelRun?: boolean;
   /** Prepared model row carrying catalog compat; required for `"auto"` code-mode resolution. */
-  model?: { compat?: unknown; contextWindow?: number };
+  model?: { compat?: unknown; contextWindow?: number; toolSearchMode?: "tools" | false };
   contextTokenBudget?: number;
   modelId?: string;
   modelProvider?: string;
   codeModeOverride?: boolean | "auto";
+  disableToolSearch?: true;
   modelToolsEnabled: boolean;
   prompt?: string;
   runId?: string;
@@ -92,6 +95,7 @@ export function createAgentHarnessToolSurfaceRuntimeCore(params: {
     modelProvider: params.modelProvider,
     modelId: params.modelId,
     codeModeOverride: params.codeModeOverride,
+    disableToolSearch: params.disableToolSearch,
     toolsEnabled: params.modelToolsEnabled,
     disableTools: params.disableTools,
     isRawModelRun: params.isRawModelRun === true,
@@ -99,18 +103,12 @@ export function createAgentHarnessToolSurfaceRuntimeCore(params: {
   });
   const toolSearchCatalogRef =
     toolSearchControlsEnabled || codeModeControlsEnabled ? createToolSearchCatalogRef() : undefined;
-  const runtimeToolAllowlist =
-    (toolSearchControlsEnabled || codeModeControlsEnabled) && params.runtimeToolAllowlist
-      ? [
-          ...new Set([
-            ...params.runtimeToolAllowlist,
-            ...(toolSearchControlsEnabled ? TOOL_SEARCH_CONTROL_ALLOWLIST_NAMES : []),
-            ...(codeModeControlsEnabled ? CODE_MODE_CONTROL_ALLOWLIST_NAMES : []),
-          ]),
-        ]
-      : params.runtimeToolAllowlist
-        ? [...params.runtimeToolAllowlist]
-        : undefined;
+  const runtimeToolAllowlist = mergeForcedEmbeddedAttemptToolsAllow(params.runtimeToolAllowlist, {
+    forceToolNames: [
+      ...(toolSearchControlsEnabled ? TOOL_SEARCH_CONTROL_ALLOWLIST_NAMES : []),
+      ...(codeModeControlsEnabled ? CODE_MODE_CONTROL_ALLOWLIST_NAMES : []),
+    ],
+  });
   const toolSearchCatalogExecutor =
     toolSearchControlsEnabled || codeModeControlsEnabled ? params.executeTool : undefined;
   const capabilityProfile = resolveConversationCapabilityProfile({
@@ -142,8 +140,7 @@ export function createAgentHarnessToolSurfaceRuntimeCore(params: {
           sessionKey: params.sessionKey,
           preserveToolNames,
         });
-    const uncompactedProjection = filterRuntimeCompatibleTools(projectedUncompactedTools);
-    let effectiveTools = [...uncompactedProjection.tools];
+    let effectiveTools = filterRuntimeCompatibleTools(projectedUncompactedTools).tools;
     const codeModeTools = codeModeControlsEnabled
       ? createCodeModeTools({
           config: params.config,
@@ -183,7 +180,10 @@ export function createAgentHarnessToolSurfaceRuntimeCore(params: {
           sessionKey: params.sessionKey,
           preserveToolNames,
         });
-    effectiveTools = [...filterRuntimeCompatibleTools(projectedCompactedTools).tools];
+    effectiveTools = filterRuntimeCompatibleTools(projectedCompactedTools).tools;
+    if (!compacted.catalogRegistered) {
+      finalizeAgentToolAvailability(effectiveTools);
+    }
     return {
       tools: effectiveTools,
       promptToolPolicy: createAgentHarnessPromptToolPolicy({

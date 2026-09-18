@@ -17,6 +17,8 @@ let envSnapshot: ReturnType<typeof captureEnv> | undefined;
 let logging: typeof import("../logging.js");
 
 beforeAll(async () => {
+  // A sibling may retain an older logger; this suite observes its own config mock.
+  vi.resetModules();
   logging = await import("../logging.js");
 });
 
@@ -46,7 +48,6 @@ describe("resolved logging settings cache", () => {
   it("loads file settings once per logger generation", () => {
     process.env.OPENCLAW_TEST_FILE_LOG = "1";
     readLoggingConfigMock.mockReturnValue({ level: "silent" });
-    logging.setLoggerConfigLoaderForTests(readLoggingConfigMock);
 
     logging.getLogger();
     logging.getLogger();
@@ -65,7 +66,6 @@ describe("resolved logging settings cache", () => {
   it("reuses settings resolved by the file-level admission check when building the logger", () => {
     process.env.OPENCLAW_TEST_FILE_LOG = "1";
     readLoggingConfigMock.mockReturnValue({ level: "silent" });
-    logging.setLoggerConfigLoaderForTests(readLoggingConfigMock);
 
     expect(logging.isFileLogLevelEnabled("info")).toBe(false);
     logging.getLogger();
@@ -76,7 +76,6 @@ describe("resolved logging settings cache", () => {
   it("loads console settings once per logger generation", () => {
     process.env.OPENCLAW_TEST_CONSOLE = "1";
     readLoggingConfigMock.mockReturnValue({ consoleLevel: "silent" });
-    logging.setLoggerConfigLoaderForTests(readLoggingConfigMock);
     logging.setLoggerOverride(null);
     readLoggingConfigMock.mockClear();
 
@@ -94,18 +93,6 @@ describe("resolved logging settings cache", () => {
     expect(readLoggingConfigMock).toHaveBeenCalledTimes(2);
   });
 });
-
-function firstMockArg(mock: { mock: { calls: readonly unknown[][] } }): Record<string, unknown> {
-  const [call] = mock.mock.calls;
-  if (!call) {
-    throw new Error("expected mock call");
-  }
-  const [arg] = call;
-  if (typeof arg !== "object" || arg === null || Array.isArray(arg)) {
-    throw new Error("expected mock call argument to be an object");
-  }
-  return arg as Record<string, unknown>;
-}
 
 describe("isFileLogLevelEnabled", () => {
   for (const { name, level, expected } of [
@@ -182,26 +169,21 @@ describe("getChildLogger minLevel inheritance", () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it("pino child logger propagates the parent minLevel", () => {
-    logging.setLoggerOverride({ level: "error" });
+  it.each(["error", "silent"] as const)("pino child preserves its parent's %s policy", (level) => {
+    logging.setLoggerOverride({ level });
     const base = logging.getLogger();
-    const getSubLoggerSpy = vi.spyOn(base, "getSubLogger");
-
-    logging.toPinoLikeLogger(base, "info").child({ component: "test" });
-
-    expect(getSubLoggerSpy).toHaveBeenCalledOnce();
-    expect(firstMockArg(getSubLoggerSpy).minLevel).toBe(logging.levelToMinLevel("error"));
-  });
-
-  it("pino child logger preserves a silent parent without triggering tslog validation", () => {
-    logging.setLoggerOverride({ level: "silent" });
-    const base = logging.getLogger();
-    const getSubLoggerSpy = vi.spyOn(base, "getSubLogger");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const records: unknown[] = [];
+    base.attachTransport((record) => {
+      records.push(record);
+    });
 
-    logging.toPinoLikeLogger(base, "info").child({ component: "test" });
+    const child = logging.toPinoLikeLogger(base, "info").child({ component: "test" });
+    child.warn("filtered warning");
+    child.error("parent error policy");
 
-    expect(firstMockArg(getSubLoggerSpy).minLevel).toBe(logging.levelToMinLevel("fatal"));
+    expect(records).toHaveLength(level === "silent" ? 0 : 1);
+    expect(JSON.stringify(records)).not.toContain("filtered warning");
     expect(warnSpy).not.toHaveBeenCalled();
   });
 });

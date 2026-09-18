@@ -17,7 +17,10 @@ import {
   createReplyOperation as createRegisteredReplyOperation,
   type ReplyOperation,
 } from "./reply-run-registry.js";
-import { resolveFollowupRunToolAuthorityFingerprint } from "./reply-tool-authority.js";
+import {
+  prepareReplyToolAuthority,
+  resolveFollowupRunToolAuthorityFingerprint,
+} from "./reply-tool-authority.js";
 import {
   createMockFollowupRun,
   createMockReplyOperation,
@@ -263,10 +266,8 @@ function makeRunReplyAgentParams(
       replyOperation.setPhase("running");
     }
   }
-  if (overrides.isActive === true && !replyOperation.toolAuthorityFingerprint) {
-    replyOperation.bindToolAuthorityFingerprint(
-      resolveFollowupRunToolAuthorityFingerprint(followupRun),
-    );
+  if (overrides.isActive === true && !overrides.replyOperation) {
+    replyOperation.bindToolAuthoritySnapshot(prepareReplyToolAuthority(followupRun));
   }
   if (overrides.isActive === true) {
     replyOperation.attachBackend({
@@ -441,44 +442,97 @@ describe("runReplyAgent media path normalization", () => {
     },
   );
 
-  it("steers active non-streaming prompts in steer queue mode", async () => {
-    queueEmbeddedAgentMessageWithOutcomeAsyncMock.mockImplementation(async (sessionId: string) => ({
-      queued: true,
-      sessionId,
-      target: "embedded_run",
-      gatewayHealth: "live",
-    }));
-    const followupRun = createMediaFollowupRun({ prompt: "generate chart" });
-    followupRun.run.taskSuggestionDeliveryMode = "gateway";
+  it.each(["device-a", "device-b"])(
+    "steers active non-streaming prompts from reviewer %s in steer queue mode",
+    async (approvalReviewerDeviceId) => {
+      queueEmbeddedAgentMessageWithOutcomeAsyncMock.mockImplementation(
+        async (sessionId: string) => ({
+          queued: true,
+          sessionId,
+          target: "embedded_run",
+          gatewayHealth: "live",
+        }),
+      );
+      const followupRun = createMediaFollowupRun({ prompt: "generate chart" });
+      followupRun.run.taskSuggestionDeliveryMode = "gateway";
+      followupRun.run.approvalReviewerDeviceId = "device-a";
 
-    await runReplyAgent(
-      makeRunReplyAgentParams({
+      const params = makeRunReplyAgentParams({
         resolvedQueue: { mode: "steer" } as QueueSettings,
         shouldSteer: true,
         shouldFollowup: true,
         isActive: true,
         followupRun,
-      }),
-    );
+      });
+      followupRun.run.approvalReviewerDeviceId = approvalReviewerDeviceId;
 
-    expect(queueEmbeddedAgentMessageWithOutcomeAsyncMock).toHaveBeenLastCalledWith(
-      "session",
-      "generate chart",
-      {
-        abortSignal: undefined,
-        steeringMode: "all",
-        isInboundUserMessage: true,
-        waitForTranscriptCommit: true,
-        queueIdentity: EXPECTED_STEER_QUEUE_IDENTITY,
-        onQueueAccepted: expect.any(Function),
-        taskSuggestionDeliveryMode: "gateway",
-        toolAuthorityFingerprint: resolveFollowupRunToolAuthorityFingerprint(followupRun),
-      },
-    );
-    expect(enqueueFollowupRunMock).not.toHaveBeenCalled();
-    expect(parkedSteerConsumeMock).toHaveBeenCalledOnce();
-    expect(parkedSteerFallbackMock).not.toHaveBeenCalled();
-  });
+      await runReplyAgent(params);
+
+      expect(queueEmbeddedAgentMessageWithOutcomeAsyncMock).toHaveBeenCalledOnce();
+      expect(queueEmbeddedAgentMessageWithOutcomeAsyncMock).toHaveBeenLastCalledWith(
+        "session",
+        "generate chart",
+        {
+          abortSignal: undefined,
+          steeringMode: "all",
+          isInboundUserMessage: true,
+          waitForTranscriptCommit: true,
+          queueIdentity: EXPECTED_STEER_QUEUE_IDENTITY,
+          onQueueAccepted: expect.any(Function),
+          taskSuggestionDeliveryMode: "gateway",
+          toolAuthorityFingerprint: resolveFollowupRunToolAuthorityFingerprint(followupRun),
+        },
+      );
+      expect(enqueueFollowupRunMock).not.toHaveBeenCalled();
+      expect(parkedSteerConsumeMock).toHaveBeenCalledOnce();
+      expect(parkedSteerFallbackMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { label: "permission mode", run: { permissionMode: "guarded" } },
+    { label: "tool overrides", run: { toolOverrides: { webSearch: false } } },
+    { label: "execution policy", run: { execOverrides: { security: "deny" } } },
+    { label: "elevation", run: { elevatedLevel: "full" } },
+    {
+      label: "shell elevation",
+      run: { bashElevated: { enabled: true, allowed: true, defaultLevel: "full" } },
+    },
+    { label: "workspace", run: { workspaceDir: "/tmp/different-steering-workspace" } },
+    { label: "client capabilities", run: { clientCaps: ["changed-capability"] } },
+    {
+      label: "tool bindings",
+      run: { toolBindings: { browser: { clientId: "different-browser" } } },
+    },
+  ] satisfies { label: string; run: Partial<FollowupRun["run"]> }[])(
+    "queues a different browser's prompt when its $label differs",
+    async ({ run }) => {
+      const followupRun = createMediaFollowupRun({
+        prompt: "generate chart",
+        run: { permissionMode: "full", approvalReviewerDeviceId: "device-a" },
+      });
+      const params = makeRunReplyAgentParams({
+        resolvedQueue: { mode: "steer" } as QueueSettings,
+        shouldSteer: true,
+        shouldFollowup: true,
+        isActive: true,
+        isRunActive: () => true,
+        followupRun,
+      });
+      followupRun.run = {
+        ...followupRun.run,
+        ...run,
+        approvalReviewerDeviceId: "device-b",
+      };
+
+      await runReplyAgent(params);
+
+      expect(queueEmbeddedAgentMessageWithOutcomeAsyncMock).not.toHaveBeenCalled();
+      expect(parkSteerCandidateMock).not.toHaveBeenCalled();
+      expect(enqueueFollowupRunMock).toHaveBeenCalledOnce();
+      expect(enqueueFollowupRunMock.mock.calls[0]?.[1]).toBe(followupRun);
+    },
+  );
 
   it("steers ordered current-turn images with the active prompt", async () => {
     queueEmbeddedAgentMessageWithOutcomeAsyncMock.mockImplementation(async (sessionId: string) => ({
@@ -572,7 +626,7 @@ describe("runReplyAgent media path normalization", () => {
       resetTriggered: false,
     });
     operation.setPhase("running");
-    operation.bindToolAuthorityFingerprint(resolveFollowupRunToolAuthorityFingerprint(followupRun));
+    operation.bindToolAuthoritySnapshot(prepareReplyToolAuthority(followupRun));
     expect(operation.acceptedSteeredInboundAudio).toBe(false);
     queueEmbeddedAgentMessageWithOutcomeAsyncMock.mockImplementation(async (sessionId: string) => ({
       queued: true,

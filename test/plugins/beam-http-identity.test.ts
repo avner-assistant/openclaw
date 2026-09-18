@@ -11,7 +11,7 @@ import {
 } from "../../src/gateway/server/plugins-http.js";
 import { withTempConfig } from "../../src/gateway/test-temp-config.js";
 import { createSubsystemLogger } from "../../src/logging/subsystem.js";
-import { closePluginStateDatabase } from "../../src/plugin-state/plugin-state-store.js";
+import { closePluginStateDatabase } from "../../src/plugin-state/plugin-state-store.sqlite.js";
 import { createPluginRecord } from "../../src/plugins/loader-records.js";
 import { createPluginRegistry } from "../../src/plugins/registry.js";
 import {
@@ -134,7 +134,7 @@ async function upload(
 }
 
 describe("Beam authenticated uploader identity", () => {
-  it("persists real HTTP principals through registry scope and clears them on shared-token replacement", async () => {
+  it("persists real HTTP principals through registry scope and uses owner attribution for shared-token replacement", async () => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
       const firstBeamId = "a".repeat(32);
       const secondBeamId = "b".repeat(32);
@@ -181,11 +181,17 @@ describe("Beam authenticated uploader identity", () => {
         expect(replaced.items.find((item) => item.type === "userMessage")).toMatchObject({
           text: "Shared-token replacement",
         });
-        expect(replaced.items.every((item) => item.sender === undefined)).toBe(true);
+        const ownerProfile = listProfiles().find((profile) => profile.emails.length === 0);
+        expect(ownerProfile).toBeDefined();
+        expect(profileIds).not.toContain(ownerProfile!.id);
+        expect(replaced.items.find((item) => item.type === "userMessage")?.sender).toEqual({
+          identity: { type: "profile", id: ownerProfile!.id },
+        });
+        expect(replaced.items.find((item) => item.type === "agentMessage")?.sender).toBeUndefined();
         expect(
           (await read(secondBeamId)).items.find((item) => item.type === "userMessage")?.sender,
         ).toEqual({ identity: { type: "profile", id: profileIds[1] } });
-        expect(listProfiles()).toHaveLength(2);
+        expect(listProfiles()).toHaveLength(3);
       });
     });
   });

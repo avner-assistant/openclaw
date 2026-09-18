@@ -27,7 +27,7 @@ export function refreshClientPresence(
     return false;
   }
   const identity = presenceIdentity(client);
-  if (!identity || !client.authenticatedUserId) {
+  if (!identity) {
     return false;
   }
   const peers = [...clients].filter(
@@ -54,6 +54,8 @@ export function refreshClientPresence(
       peer.personPresence = { ...timing };
     }
     upsertPresence(peer.presenceKey!, {
+      clientId: peer.connect.client.id,
+      mode: peer.connect.client.mode,
       user: buildAuthenticatedPresenceUser(peer),
       ...peer.personPresence,
     });

@@ -4,6 +4,7 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { expect, it, vi } from "vitest";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
 import { getRuntimeConfig } from "../../config/config.js";
+import { encodeSessionArchiveContent } from "../../config/sessions/archive-compression.js";
 import { loadCombinedSessionStoreForGatewayCore } from "../../config/sessions/combined-store-gateway.js";
 import {
   listSessionTranscriptInstances,
@@ -13,12 +14,18 @@ import {
 import { discoverAllSessions, loadSessionCostSummary } from "../../infra/session-cost-usage.js";
 import type { AssistantMessage } from "../../llm/types.js";
 import type { SessionsUsageResult } from "../../shared/usage-types.js";
+import { SYSTEM_AGENT_ID } from "../../system-agent/agent-id.js";
 import { createOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { usageHandlers } from "./usage.js";
 
-it.each([undefined, "agent:opus:slack:dm", "global"])(
-  "keeps independent same-id transcripts with opus store key %s through the real usage handler",
-  async (opusKey) => {
+it.each([
+  { owner: "opus", key: undefined },
+  { owner: "opus", key: "agent:opus:slack:dm" },
+  { owner: "opus", key: "global" },
+  { owner: SYSTEM_AGENT_ID, key: `agent:${SYSTEM_AGENT_ID}:usage` },
+])(
+  "keeps independent same-id transcripts with $owner store key $key through the real usage handler",
+  async ({ owner, key: opusKey }) => {
     const state = await createOpenClawTestState({ label: "usage-owner-integration" });
     try {
       await state.writeConfig({
@@ -28,7 +35,7 @@ it.each([undefined, "agent:opus:slack:dm", "global"])(
       const config = getRuntimeConfig();
       const sessionId = "shared-usage-session";
       const mainKey = "agent:main:telegram:dm";
-      for (const agentId of ["main", "opus"]) {
+      for (const agentId of ["main", owner]) {
         const key = agentId === "main" ? mainKey : opusKey;
         const scope = {
           agentId,
@@ -56,19 +63,17 @@ it.each([undefined, "agent:opus:slack:dm", "global"])(
       }
 
       const projected = loadCombinedSessionStoreForGatewayCore(config);
-      expect(projected.agentIdBySessionKey.get(mainKey)).toBe("main");
+      expect(projected.targetsBySessionKey.get(mainKey)?.agentId).toBe("main");
       if (opusKey) {
-        expect(projected.agentIdBySessionKey.get(opusKey)).toBe("opus");
+        expect(projected.targetsBySessionKey.get(opusKey)?.agentId).toBe(owner);
       }
       const respond = vi.fn();
-      await expectDefined(
-        usageHandlers["sessions.usage"],
-        "usage handler",
-      )({
+      const request = {
         params: { agentScope: "all", range: "all", limit: 50 },
         context: { getRuntimeConfig: () => config },
         respond,
-      } as unknown as Parameters<(typeof usageHandlers)["sessions.usage"]>[0]);
+      } as unknown as Parameters<(typeof usageHandlers)["sessions.usage"]>[0];
+      await expectDefined(usageHandlers["sessions.usage"], "usage handler")(request);
       expect(respond).toHaveBeenCalledOnce();
       const [ok, payload] = expectDefined(respond.mock.calls[0], "usage response");
       expect(ok).toBe(true);
@@ -77,9 +82,48 @@ it.each([undefined, "agent:opus:slack:dm", "global"])(
       expect(result.sessions.map(({ key, agentId }) => ({ key, agentId }))).toEqual(
         expect.arrayContaining([
           { key: mainKey, agentId: "main" },
-          { key: opusKey ?? `agent:opus:${sessionId}`, agentId: "opus" },
+          { key: opusKey ?? `agent:${owner}:${sessionId}`, agentId: owner },
         ]),
       );
+      if (opusKey) {
+        const selected = expectDefined(
+          result.sessions.find((session) => session.agentId === owner),
+          "selected usage owner",
+        );
+        for (const method of ["sessions.usage.timeseries", "sessions.usage.logs"] as const) {
+          for (const explicitOwner of owner === SYSTEM_AGENT_ID ? [false, true] : [true]) {
+            const detail = vi.fn();
+            await expectDefined(
+              usageHandlers[method],
+              "usage detail handler",
+            )({
+              ...request,
+              params: {
+                key: selected.key,
+                ...(explicitOwner ? { agentId: selected.agentId } : {}),
+              },
+              respond: detail,
+            });
+            const [detailOk, detailPayload, detailError] = expectDefined(
+              detail.mock.calls[0],
+              "usage detail response",
+            );
+            if (owner === SYSTEM_AGENT_ID && explicitOwner) {
+              expect(detailOk).toBe(false);
+              expect(detailError).toMatchObject({ message: `Unknown agent id "${owner}"` });
+            } else {
+              expect.soft(detailOk, method).toBe(true);
+              if (detailOk) {
+                expect(detailPayload, method).toMatchObject(
+                  method === "sessions.usage.logs"
+                    ? { logs: [expect.objectContaining({ content: `${owner} turn` })] }
+                    : { sessionId },
+                );
+              }
+            }
+          }
+        }
+      }
     } finally {
       await state.cleanup();
     }
@@ -87,22 +131,28 @@ it.each([undefined, "agent:opus:slack:dm", "global"])(
 );
 
 it.each([
-  { name: "SQLite history", artifact: false, directOwner: false, currentArtifact: false },
+  { name: "SQLite history", artifact: undefined, directOwner: false, currentArtifact: false },
   {
     name: "a direct owner for a historical instance",
-    artifact: false,
+    artifact: undefined,
     directOwner: true,
     currentArtifact: false,
   },
   {
     name: "mixed JSONL and SQLite history",
-    artifact: true,
+    artifact: "plain",
+    directOwner: false,
+    currentArtifact: false,
+  },
+  {
+    name: "mixed compressed JSONL and SQLite history",
+    artifact: "zstd",
     directOwner: false,
     currentArtifact: false,
   },
   {
     name: "current JSONL discovered after SQLite history",
-    artifact: false,
+    artifact: undefined,
     directOwner: false,
     currentArtifact: true,
   },
@@ -150,17 +200,21 @@ it.each([
       });
       const writeArtifact = async (tokens: number) => {
         archiveManager.appendMessage(usageMessage(tokens));
-        return await state.writeText(
-          path.join(
-            "agents",
-            "main",
-            "sessions",
-            `${archiveManager.getSessionId()}.jsonl.reset.2026-08-01T00-00-00.000Z`,
-          ),
-          [archiveManager.getHeader(), ...archiveManager.getEntries()]
-            .map((entry) => JSON.stringify(entry))
-            .join("\n"),
+        const content = [archiveManager.getHeader(), ...archiveManager.getEntries()]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n");
+        const encoded =
+          artifact === "zstd"
+            ? encodeSessionArchiveContent(content)
+            : { bytes: Buffer.from(content), suffix: "" };
+        expect(encoded.suffix).toBe(artifact === "zstd" ? ".zst" : "");
+        const filePath = path.join(
+          state.sessionsDir(),
+          `${archiveManager.getSessionId()}.jsonl.reset.2026-08-01T00-00-00.000Z${encoded.suffix}`,
         );
+        await fs.mkdir(state.sessionsDir(), { recursive: true });
+        await fs.writeFile(filePath, encoded.bytes);
+        return filePath;
       };
       for (const [scope, sessionId, tokens] of [
         [mainScope, firstId, 10],
@@ -211,10 +265,7 @@ it.each([
 
       // Warm the real rollups so the handler assertion tests selection, not refresh timing.
       for (const agentId of ["main", "opus"]) {
-        const discovered = await discoverAllSessions({
-          agentId,
-          includeFirstUserMessage: false,
-        });
+        const discovered = await discoverAllSessions({ agentId });
         if (currentArtifact && agentId === "main") {
           expect(discovered[0]?.sessionId).not.toBe(currentId);
         }

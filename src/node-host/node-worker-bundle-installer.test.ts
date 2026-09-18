@@ -4,8 +4,9 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import * as tar from "tar";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as openclawRoot from "../infra/openclaw-root.js";
+import { createDeferredCore } from "../shared/deferred.js";
 import {
   DEFAULT_WORKER_BUNDLE_ARCHIVE_LIMITS,
   readWorkerBundleDirectoryManifest,
@@ -14,15 +15,45 @@ import { hashWorkerBundleManifest } from "../shared/worker-bundle-hash.js";
 import type { NodeWorkerBundleInstallInput } from "../worker/node-bundle-install-protocol.js";
 import { NodeWorkerBundleInstaller } from "./node-worker-bundle-installer.js";
 
+type BundleFixtureOptions = {
+  packageShell?: boolean;
+  prewarmMarker?: string;
+  workerSource?: string;
+  fixtureName?: string;
+  bundlePrewarm?: 1;
+  compileCacheDisabled?: boolean;
+};
+
+type BundleFixture = {
+  archive: Buffer;
+  input: NodeWorkerBundleInstallInput;
+};
+
 describe("node worker bundle installer", () => {
   let root: string;
   let server: http.Server | undefined;
+  let cleanupPrewarming: (() => Promise<void>) | undefined;
+  let defaultFixture: BundleFixture;
+
+  beforeAll(async () => {
+    const fixtureRoot = await fs.mkdtemp(
+      path.join(await fs.realpath(os.tmpdir()), "openclaw-node-bundle-fixture-"),
+    );
+    try {
+      defaultFixture = await buildBundleFixture(fixtureRoot);
+    } finally {
+      await fs.rm(fixtureRoot, { recursive: true, force: true });
+    }
+  });
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "openclaw-node-bundle-"));
   });
 
   afterEach(async () => {
+    const cleanup = cleanupPrewarming;
+    cleanupPrewarming = undefined;
+    await cleanup?.();
     vi.restoreAllMocks();
     await new Promise<void>((resolve) => {
       if (!server) {
@@ -34,22 +65,24 @@ describe("node worker bundle installer", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  async function bundleFixture(
-    options: {
-      packageShell?: boolean;
-      prewarmMarker?: string;
-      workerSource?: string;
-      fixtureName?: string;
-      bundlePrewarm?: 1;
-      compileCacheDisabled?: boolean;
-    } = {},
-  ): Promise<{
-    archive: Buffer;
-    input: NodeWorkerBundleInstallInput;
-  }> {
+  async function bundleFixture(options?: BundleFixtureOptions): Promise<BundleFixture> {
+    if (options) {
+      return await buildBundleFixture(root, options);
+    }
+    // Integrity cases deliberately corrupt their inputs; share preparation, not mutable data.
+    return {
+      archive: Buffer.from(defaultFixture.archive),
+      input: structuredClone(defaultFixture.input),
+    };
+  }
+
+  async function buildBundleFixture(
+    fixtureRoot: string,
+    options: BundleFixtureOptions = {},
+  ): Promise<BundleFixture> {
     const fixtureName = options.fixtureName ?? "default";
-    const source = path.join(root, `source-${fixtureName}`);
-    const archivePath = path.join(root, `bundle-${fixtureName}.tgz`);
+    const source = path.join(fixtureRoot, `source-${fixtureName}`);
+    const archivePath = path.join(fixtureRoot, `bundle-${fixtureName}.tgz`);
     await fs.mkdir(source, { recursive: true });
     const compileCacheDisabled =
       options.compileCacheDisabled ?? process.env.NODE_DISABLE_COMPILE_CACHE !== undefined;
@@ -59,7 +92,14 @@ describe("node worker bundle installer", () => {
         ? `import fs from "node:fs";\nconst cacheDisabled = process.env.NODE_DISABLE_COMPILE_CACHE === "1";\nif (process.argv[2] !== "--internal-worker-prewarm" || cacheDisabled !== ${compileCacheDisabled} || (cacheDisabled ? process.env.NODE_COMPILE_CACHE : !process.env.NODE_COMPILE_CACHE)) throw new Error("worker bundle was not prewarmed with the requested compile-cache mode");\nfs.writeFileSync(${JSON.stringify(options.prewarmMarker)}, "ready");\n`
         : "export {};\n");
     await fs.writeFile(path.join(source, "worker.mjs"), workerSource, { mode: 0o700 });
-    const archiveEntries = ["worker.mjs"];
+    for (const artifact of ["github-exec-launcher.mjs", "workspace-rsync-receiver.mjs"]) {
+      await fs.writeFile(path.join(source, artifact), "export {};\n", { mode: 0o700 });
+    }
+    const archiveEntries = [
+      "github-exec-launcher.mjs",
+      "worker.mjs",
+      "workspace-rsync-receiver.mjs",
+    ];
     if (options.packageShell) {
       await fs.mkdir(path.join(source, "dist"));
       await fs.writeFile(path.join(source, "openclaw.mjs"), "#!/usr/bin/env node\n", {
@@ -118,7 +158,7 @@ describe("node worker bundle installer", () => {
     return { gatewayUrl: `ws://127.0.0.1:${address.port}`, requests };
   }
 
-  async function prepareLocalArchive(fixture: Awaited<ReturnType<typeof bundleFixture>>) {
+  async function prepareLocalArchive(fixture: BundleFixture) {
     const packageRoot = path.join(root, "runtime-package");
     const archivePath = path.join(
       packageRoot,
@@ -549,7 +589,7 @@ describe("node worker bundle installer", () => {
       "bundles",
       fixture.input.build.bundleHash,
     );
-    await fs.writeFile(path.join(bundleDir, "worker.mjs"), "tampered\n");
+    await fs.writeFile(path.join(bundleDir, "github-exec-launcher.mjs"), "tampered\n");
     await expect(
       installer.inspect({
         gatewayNamespace: fixture.input.gatewayNamespace,
@@ -703,12 +743,16 @@ describe("node worker bundle installer", () => {
     ).rejects.toThrow("gateway returned an unexpected worker bundle length");
   });
 
-  it("cancels prewarming and releases the namespace queue for the next install", async () => {
-    const slowStarted = path.join(root, "slow-prewarm-started");
+  it("cancels prewarming and releases the namespace queue for the next install", async ({
+    signal,
+  }) => {
+    const slowMarker = path.join(root, "slow-prewarm-started");
     const slow = await bundleFixture({
       fixtureName: "slow",
       bundlePrewarm: 1,
-      workerSource: `import fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(slowStarted)}, "started");\nawait new Promise((resolve) => setTimeout(resolve, 2_000));\n`,
+      workerSource: `import fs from "node:fs";\nfs.writeFileSync(${JSON.stringify(
+        slowMarker,
+      )}, String(process.pid));\nprocess.stdin.resume();\n`,
     });
     const fastMarker = path.join(root, "fast-prewarm-finished");
     const fast = await bundleFixture({
@@ -716,7 +760,11 @@ describe("node worker bundle installer", () => {
       bundlePrewarm: 1,
       prewarmMarker: fastMarker,
     });
+    const fastRequested = createDeferredCore();
     server = http.createServer((req, res) => {
+      if (req.url?.endsWith(fast.input.build.bundleHash)) {
+        fastRequested.resolve();
+      }
       const archive = req.url?.endsWith(slow.input.build.bundleHash) ? slow.archive : fast.archive;
       res.writeHead(200, {
         "content-type": "application/octet-stream",
@@ -734,25 +782,60 @@ describe("node worker bundle installer", () => {
     const gatewayUrl = `ws://127.0.0.1:${address.port}`;
     const installer = new NodeWorkerBundleInstaller({ root });
     const controller = new AbortController();
+    const cleanupController = new AbortController();
+    const testSignal = AbortSignal.any([signal, cleanupController.signal]);
     const first = installer.ensure({
       input: slow.input,
       gatewayUrl,
-      signal: controller.signal,
+      signal: AbortSignal.any([controller.signal, testSignal]),
     });
-    await vi.waitFor(async () => await expect(fs.access(slowStarted)).resolves.toBeUndefined());
-    const second = installer.ensure({ input: fast.input, gatewayUrl });
+    const installs = [first];
+    let slowPid: number | undefined;
+    cleanupPrewarming = async () => {
+      cleanupController.abort();
+      if (!slowPid) {
+        const rawPid = await fs.readFile(slowMarker, "utf8").catch(() => undefined);
+        slowPid = rawPid ? Number(rawPid) : undefined;
+      }
+      if (slowPid) {
+        try {
+          process.kill(slowPid, "SIGKILL");
+        } catch {
+          // The cancellation path already reaped the process.
+        }
+      }
+      await Promise.allSettled(installs);
+    };
+    // Startup time is not the cancellation contract: hold the real child until
+    // abort, and retain its PID so cleanup can terminate it after assertion failure.
+    await Promise.race([
+      vi.waitFor(
+        async () => {
+          const value = await fs.readFile(slowMarker, "utf8");
+          expect(value).toMatch(/^\d+$/u);
+          slowPid = Number(value);
+        },
+        { timeout: 10_000 },
+      ),
+      first.then(() => {
+        throw new Error("prewarm finished before cancellation");
+      }),
+    ]);
+    testSignal.throwIfAborted();
+    const second = installer.ensure({ input: fast.input, gatewayUrl, signal: testSignal });
+    installs.push(second);
 
     controller.abort(new Error("launch fenced"));
 
-    await expect(first).rejects.toThrow("launch fenced");
-    await expect(
-      Promise.race([
-        second,
-        new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error("namespace queue stayed occupied")), 750);
-        }),
-      ]),
-    ).resolves.toEqual(fast.input.build);
+    // Bound handoff from cancellation; acquisition precedes cold extraction and prewarm.
+    await Promise.all([
+      vi.waitFor(() => expect(fastRequested.promise).resolves.toBeUndefined(), { timeout: 750 }),
+      expect(first).rejects.toThrow("launch fenced"),
+    ]);
+    await expect(second).resolves.toEqual(fast.input.build);
+    await vi.waitFor(() => {
+      expect(() => process.kill(slowPid!, 0)).toThrow();
+    });
     await expect(fs.readFile(fastMarker, "utf8")).resolves.toBe("ready");
   });
 });

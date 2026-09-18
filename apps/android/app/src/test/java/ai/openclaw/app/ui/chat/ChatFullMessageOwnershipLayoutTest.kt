@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -42,6 +43,7 @@ import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performSemanticsAction
@@ -165,7 +167,6 @@ class ChatFullMessageOwnershipLayoutTest {
             showSidebarButton = true,
             onOpenSidebar = {},
             onToggleTalk = {},
-            onOpenSessions = {},
             onOpenDashboard = {},
             onOpenGatewaySettings = {},
           )
@@ -219,6 +220,21 @@ class ChatFullMessageOwnershipLayoutTest {
     viewAll().assertIsDisplayed().performClick()
     awaitInlineExpanded()
     assertEquals("Re-expansion reuses the loaded entry", 1, gateway.fullReads.size)
+  }
+
+  @Test
+  fun mixedToolMessageCanLoadFullTextWithoutDuplicatingTools() {
+    gateway.includeToolCall = true
+    refreshSelectedChat()
+    viewAll().assertIsDisplayed().assertIsEnabled().performClick()
+    awaitInlineExpanded()
+    assertEquals(listOf(expectedRequest()), gateway.fullReads.toList())
+    val timeline = prepareChatHistory(runtime.chatMessages.value, "agent:main:main", mainSessionKey = "agent:main:main").buildTimeline(0, emptyList(), null)
+    assertEquals(1, timeline.items.filterIsInstance<ChatTimelineItem.CompletedTools>().size)
+    composeRule.onNodeWithText("Show less").performScrollTo().performClick()
+    viewAll().performClick()
+    awaitInlineExpanded()
+    assertEquals(1, gateway.fullReads.size)
   }
 
   @Test
@@ -689,6 +705,32 @@ class ChatFullMessageOwnershipLayoutTest {
 
   @Test
   fun readingInsideExpandedCodePausesFollowingUntilJumpToLatest() {
+    assertInnerCodeInputPausesFollowing { viewport ->
+      viewport.performTouchInput { swipeUp(durationMillis = 500) }
+    }
+  }
+
+  @Test
+  fun mouseWheelInsideExpandedCodePausesFollowingUntilJumpToLatest() {
+    assertInnerCodeInputPausesFollowing { viewport ->
+      viewport.performMouseInput {
+        moveTo(center)
+        scroll(1f)
+      }
+    }
+  }
+
+  @Test
+  fun accessibilityScrollInsideExpandedCodePausesFollowingUntilJumpToLatest() {
+    assertInnerCodeInputPausesFollowing { viewport ->
+      val distance = viewport.fetchSemanticsNode().boundsInRoot.height / 2f
+      viewport.performSemanticsAction(SemanticsActions.ScrollBy) { scroll ->
+        assertTrue(scroll(0f, distance))
+      }
+    }
+  }
+
+  private fun assertInnerCodeInputPausesFollowing(scrollInsideCode: (SemanticsNodeInteraction) -> Unit) {
     val code = (0 until 700).joinToString("\n") { "Code line $it: keep this reading position." }
     val full = "```\n$code\n```"
     val response = gateway.fullResponse(FULL_MESSAGE_FIRST_CHAT)
@@ -710,7 +752,7 @@ class ChatFullMessageOwnershipLayoutTest {
     composeRule.onNodeWithText("Copy").performClick()
     val clipboard = app.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     assertEquals(
-      "The gesture must read the full answer, not its capped history",
+      "The input must read the full answer, not its capped history",
       full,
       clipboard.primaryClip
         ?.getItemAt(0)
@@ -737,6 +779,14 @@ class ChatFullMessageOwnershipLayoutTest {
       assertNull(model.chatError.value)
     }
 
+    // View all pauses following. Return to latest through the outer list before testing the inner input.
+    val latestViewport = transcript.fetchSemanticsNode().boundsInRoot
+    transcript.performSemanticsAction(SemanticsActions.ScrollBy) { scroll ->
+      assertTrue(scroll(0f, -latestViewport.height))
+    }
+    composeRule.waitForIdle()
+    assertEquals("Explicit outer scrolling must settle at latest", 0f, transcript.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(), 0f)
+
     // Prove live-follow through consecutive updates, not an assumed Jump affordance after layout settles.
     appendAssistant(1)
     composeRule.onNodeWithText(gateway.backgroundText(0)).assertIsDisplayed()
@@ -746,16 +796,16 @@ class ChatFullMessageOwnershipLayoutTest {
     assertEquals("Following must bring the next update to latest without interaction", 0f, transcript.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(), 0f)
     codeViewport.assertIsDisplayed()
     val initialCode = codeViewport.fetchSemanticsNode()
-    assertEquals("The touch must stay inside the fully visible code viewport", initialCode.size.height.toFloat(), initialCode.boundsInRoot.height, 0.01f)
+    assertEquals("The input target must stay inside the fully visible code viewport", initialCode.size.height.toFloat(), initialCode.boundsInRoot.height, 0.01f)
     val outerBefore = transcript.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value()
     assertEquals("Start in live-follow at the latest message", 0f, outerBefore, 0f)
     jump.assertDoesNotExist()
     val innerBefore = initialCode.config[SemanticsProperties.VerticalScrollAxisRange].value()
-    codeViewport.performTouchInput { swipeUp(durationMillis = 500) }
+    scrollInsideCode(codeViewport)
     composeRule.waitForIdle()
     val reading = codeViewport.fetchSemanticsNode()
     val readingOffset = reading.config[SemanticsProperties.VerticalScrollAxisRange].value()
-    assertTrue("The real touch must move within the code, not its outer transcript", readingOffset > innerBefore)
+    assertTrue("The selected input must move within the code, not its outer transcript", readingOffset > innerBefore)
     assertEquals("The child must consume this gesture without moving the transcript", outerBefore, transcript.fetchSemanticsNode().config[SemanticsProperties.VerticalScrollAxisRange].value(), 0f)
 
     appendAssistant(3)
@@ -1777,6 +1827,8 @@ internal class FullMessageGateway : AutoCloseable {
 
   @Volatile var fullResponseOverride: JsonObject? = null
 
+  @Volatile var includeToolCall = false
+
   @Volatile var previewPrefix = ""
 
   @Volatile var historyRole = "assistant"
@@ -1908,12 +1960,13 @@ internal class FullMessageGateway : AutoCloseable {
                 if (omitMethodCatalog) {
                   ""
                 } else {
-                  "\"methods\":[\"chat.history\",${if (advertiseFullRead) "\"chat.message.get\"," else ""}\"chat.metadata\",\"health\",\"sessions.list\"],"
+                  "\"methods\":[\"chat.history\",${if (advertiseFullRead) "\"chat.message.get\"," else ""}\"chat.metadata\",\"models.list\",\"health\",\"sessions.list\"],"
                 }
               json.parseToJsonElement(
-                """{"type":"hello-ok","protocol":3,"server":{"host":"full-message-$connection","version":"proof"},"features":{$methods"events":[]},"auth":{"role":"$role","scopes":${if (role == "operator") "[\"operator.read\",\"operator.write\"]" else "[]"}},"snapshot":{"sessionDefaults":{"mainSessionKey":"agent:main:main"}}}""",
+                """{"type":"hello-ok","protocol":3,"server":{"host":"full-message-$connection","version":"proof"},"features":{$methods"events":[],"capabilities":["session-scoped-model-catalog"]},"auth":{"role":"$role","scopes":${if (role == "operator") "[\"operator.read\",\"operator.write\"]" else "[]"}},"snapshot":{"sessionDefaults":{"mainSessionKey":"agent:main:main"}}}""",
               )
             }
+
             "chat.history" -> {
               historyReads.update { it + (connection to session) }
               buildJsonObject {
@@ -1937,6 +1990,7 @@ internal class FullMessageGateway : AutoCloseable {
                 )
               }
             }
+
             "chat.message.get" -> {
               fullReads += FullMessageRead(connection, session, params["agentId"]?.jsonPrimitive?.content.orEmpty(), params["messageId"]?.jsonPrimitive?.content.orEmpty(), params["maxChars"]?.jsonPrimitive?.content?.toIntOrNull())
               if (fullReadRpcError) {
@@ -1945,14 +1999,29 @@ internal class FullMessageGateway : AutoCloseable {
               }
               fullResponseOverride ?: fullResponse(session)
             }
+
             "tts.speak" -> {
               // Observe the production Listen request without starting unrelated platform audio.
               speechReads.update { it + params.getValue("text").jsonPrimitive.content }
               return
             }
-            "chat.metadata" -> json.parseToJsonElement("""{"commands":[],"models":[]}""")
-            "sessions.list" -> json.parseToJsonElement("""{"sessions":[]}""")
-            "health", "sessions.subscribe", "sessions.messages.subscribe" -> JsonObject(emptyMap())
+
+            "chat.metadata" -> {
+              json.parseToJsonElement("""{"commands":[]}""")
+            }
+
+            "models.list" -> {
+              json.parseToJsonElement("""{"models":[]}""")
+            }
+
+            "sessions.list" -> {
+              json.parseToJsonElement("""{"sessions":[]}""")
+            }
+
+            "health", "sessions.subscribe", "sessions.messages.subscribe" -> {
+              JsonObject(emptyMap())
+            }
+
             else -> {
               reject("INVALID_REQUEST", "Proof Gateway does not implement $method")
               return
@@ -2050,6 +2119,21 @@ internal class FullMessageGateway : AutoCloseable {
               )
             }
           },
+        )
+      } else if (includeToolCall) {
+        JsonArray(
+          listOf(
+            buildJsonObject {
+              put("type", JsonPrimitive("text"))
+              put("text", JsonPrimitive(text))
+            },
+            buildJsonObject {
+              put("type", JsonPrimitive("toolCall"))
+              put("id", JsonPrimitive("mixed-tool"))
+              put("name", JsonPrimitive("exec"))
+              put("arguments", buildJsonObject { put("command", JsonPrimitive("pwd")) })
+            },
+          ),
         )
       } else if (contentAsBlocks) {
         JsonArray(

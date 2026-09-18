@@ -225,27 +225,22 @@ async function configureSpawnRuntime(
       persistSubagentRunsToDisk: () => {},
       persistSubagentRunsToDiskOrThrow: () => {},
     });
+    const { createInMemoryTaskRegistryStore, createInMemoryTaskFlowRegistryStore } =
+      await import("../src/test-utils/task-registry-store.js");
+    const inMemoryFlowStore = createInMemoryTaskFlowRegistryStore();
     taskStore.configureTaskRegistryRuntime({
       store: {
+        ...createInMemoryTaskRegistryStore(undefined, inMemoryFlowStore),
+        // Memory mode measures runtime projection with empty, no-op task persistence.
         loadSnapshot: () => ({ tasks: new Map(), deliveryStates: new Map() }),
-        saveSnapshot: () => {},
         upsertTaskWithDeliveryState: () => {},
-        upsertTask: () => {},
         deleteTaskWithDeliveryState: () => {},
-        deleteTask: () => {},
         upsertDeliveryState: () => {},
-        deleteDeliveryState: () => {},
         close: () => {},
       },
     });
     flowStore.configureTaskFlowRegistryRuntime({
-      store: {
-        loadSnapshot: () => ({ flows: new Map() }),
-        saveSnapshot: () => {},
-        upsertFlow: () => {},
-        deleteFlow: () => {},
-        close: () => {},
-      },
+      store: inMemoryFlowStore,
     });
     return;
   }
@@ -624,6 +619,7 @@ async function runSweepSample(childCount: number): Promise<Sample> {
     persist: () => {},
     clearPendingLifecycleError: () => {},
     clearPendingLifecycleTimeout: () => {},
+    clearPendingSubagentRecoveryNotice: () => true,
     sweepPendingLifecycle: () => {},
     completeSubagentRunWithRecovery: async () => {
       lostContextCompletions += 1;

@@ -10,6 +10,11 @@ import {
 } from "../agents/harness/tool-surface-bridge.js";
 
 export { getCoreTtsToolResultMediaUrls } from "../agents/tools/tts-tool-result-provenance.js";
+export { consumeTrustedToolNoStartError } from "../agents/tool-result-error.js";
+export {
+  acknowledgeInternalToolResult,
+  copyInternalToolResultState,
+} from "../agents/runtime/internal-hooks.js";
 
 type OpenClawCodingToolsOptions = NonNullable<
   Parameters<typeof import("./agent-harness.js").createOpenClawCodingTools>[0]
@@ -25,7 +30,7 @@ export type AgentHarnessToolSurfaceRuntime = Omit<
 
 export type AgentHarnessToolSurfaceRuntimeParams = Omit<
   Parameters<typeof createAgentHarnessToolSurfaceRuntimeCore>[0],
-  "executeTool"
+  "executeTool" | "disableToolSearch"
 > & {
   executeTool: NonNullable<OpenClawCodingToolsOptions["toolSearchCatalogExecutor"]>;
 };

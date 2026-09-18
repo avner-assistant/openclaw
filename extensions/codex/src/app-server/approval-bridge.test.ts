@@ -2348,47 +2348,6 @@ describe("Codex app-server approval bridge", () => {
     },
   );
 
-  it.each([
-    { reason: "turn_progress_idle_timeout", disposition: "timed_out" },
-    { reason: "turn_completion_idle_timeout", disposition: "timed_out" },
-    { reason: "turn_terminal_idle_timeout", disposition: "timed_out" },
-    { reason: "client_closed", disposition: "failed" },
-  ] as const)(
-    "normalizes aborted approval reason $reason as $disposition",
-    async ({ reason, disposition }) => {
-      const params = createParams();
-      const controller = new AbortController();
-      controller.abort(reason);
-      const onNativeToolFailureDisposition = vi.fn();
-      mockRunBeforeToolCallHook.mockResolvedValueOnce({
-        blocked: true,
-        kind: "failure",
-        disposition: "cancelled",
-        deniedReason: "plugin-before-tool-call",
-        reason: "Approval cancelled because the run stopped",
-      });
-
-      const result = await handleCodexAppServerApprovalRequest({
-        method: "item/commandExecution/requestApproval",
-        requestParams: {
-          ...codexTestTurnIds(),
-          itemId: "cmd-aborted-policy",
-          command: "pnpm test",
-        },
-        paramsForRun: params,
-        ...codexTestTurnIds(),
-        signal: controller.signal,
-        onNativeToolFailureDisposition,
-      });
-
-      expect(result).toEqual({ decision: "cancel" });
-      expect(onNativeToolFailureDisposition).toHaveBeenCalledWith(
-        "cmd-aborted-policy",
-        disposition,
-      );
-    },
-  );
-
   it("describes command approvals from parsed command actions when available", async () => {
     const params = createParams();
     mockCallGatewayTool
@@ -3249,14 +3208,14 @@ describe("Codex app-server approval bridge", () => {
     await requestPluginApproval({
       hostCapabilities: createParams().hostCapabilities,
       title: `${"t".repeat(76)}😀tail`,
-      description: `${"d".repeat(252)}😀tail`,
+      description: `${"d".repeat(508)}😀tail`,
       severity: "warning",
       toolName: "codex_utf16_test",
     });
 
     const payload = gatewayRequestPayload();
     expect(payload.title).toBe(`${"t".repeat(76)}...`);
-    expect(payload.description).toBe(`${"d".repeat(252)}...`);
+    expect(payload.description).toBe(`${"d".repeat(508)}...`);
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */

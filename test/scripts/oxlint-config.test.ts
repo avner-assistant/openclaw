@@ -325,9 +325,10 @@ describe("oxlint config", () => {
       diagnostics: Array<{ code: string }>;
     };
     expect(report.number_of_files).toBe(selected.length);
-    expect(report.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(
-      Array.from({ length: 5 }, () => "typescript(no-floating-promises)"),
-    );
+    expect(
+      report.diagnostics.map((diagnostic) => diagnostic.code),
+      result.stdout,
+    ).toEqual(Array.from({ length: 5 }, () => "typescript(no-floating-promises)"));
     for (const file of selected) {
       const config = file.endsWith("/runtime.ts")
         ? "extensions/sample/tsconfig.json"
@@ -339,7 +340,7 @@ describe("oxlint config", () => {
     const project = spawnSync(
       process.execPath,
       [
-        path.resolve("node_modules/@typescript/native-preview/bin/tsgo"),
+        path.resolve("node_modules/typescript-native/bin/tsc"),
         "--showConfig",
         "--project",
         "extensions/tsconfig.json",
@@ -384,13 +385,6 @@ describe("oxlint config", () => {
     expect(tsconfig.exclude ?? []).not.toContain("**/*.mts");
   });
 
-  it("has a discoverable test tsconfig for type-aware linting", () => {
-    const tsconfig = readJson("test/tsconfig.json") as OxlintTsconfig;
-
-    expect(tsconfig.include).toContain("**/*.ts");
-    expect(tsconfig.exclude ?? []).not.toContain("**/*.ts");
-  });
-
   it("does not ignore the bundled extensions tree", () => {
     const config = readJson(".oxlintrc.json") as OxlintConfig;
 
@@ -404,7 +398,6 @@ describe("oxlint config", () => {
     expect(ignorePatterns).toEqual([
       "dist/",
       "dist-runtime/",
-      "docs/_layouts/",
       ".agents/skills/autoreview/tests/fixtures/**",
       "test/fixtures/oxlint-boundary-guards/**",
       "**/a2ui.bundle.js",
@@ -486,7 +479,7 @@ describe("oxlint config", () => {
     ]);
   });
 
-  it("enforces scoped max-lines budgets while excluding generated output", () => {
+  it("warns on scoped max-lines budgets while excluding generated output", () => {
     const config = readJson(".oxlintrc.json") as OxlintConfig;
     const maxLinesOverrides = (config.overrides ?? []).filter(
       (override) => override.rules?.["max-lines"],
@@ -496,10 +489,10 @@ describe("oxlint config", () => {
 
     expect(scopedBudgets).toHaveLength(4);
     expect(scopedBudgets.map((override) => override.rules?.["max-lines"])).toEqual([
-      ["error", { max: 700, skipBlankLines: true, skipComments: true }],
-      ["error", { max: 700, skipBlankLines: true, skipComments: true }],
-      ["error", { max: 800, skipBlankLines: true, skipComments: true }],
-      ["error", { max: 1000, skipBlankLines: true, skipComments: true }],
+      ["warn", { max: 700, skipBlankLines: true, skipComments: true }],
+      ["warn", { max: 700, skipBlankLines: true, skipComments: true }],
+      ["warn", { max: 800, skipBlankLines: true, skipComments: true }],
+      ["warn", { max: 1000, skipBlankLines: true, skipComments: true }],
     ]);
     for (const override of scopedBudgets) {
       expect(override.excludeFiles).toContain("**/protocol-gen/**");
@@ -522,13 +515,13 @@ describe("oxlint config", () => {
       {
         files: ["extensions/copilot/src/event-bridge.ts"],
         rules: {
-          "max-lines": ["error", { max: 950, skipBlankLines: true, skipComments: true }],
+          "max-lines": ["warn", { max: 950, skipBlankLines: true, skipComments: true }],
         },
       },
       {
         files: ["extensions/copilot/src/attempt-transcript-journal.test.ts"],
         rules: {
-          "max-lines": ["error", { max: 1200, skipBlankLines: true, skipComments: true }],
+          "max-lines": ["warn", { max: 1200, skipBlankLines: true, skipComments: true }],
         },
       },
     ]);

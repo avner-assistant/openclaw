@@ -11,6 +11,7 @@ import {
   listSessionPlacementRecoveries,
   readSessionPlacementRecovery,
   type SessionPlacementRecovery,
+  type SessionPlacementStartMode,
   type SessionPlacementPendingRecovery,
   type SessionPlacementPausedRecovery,
   pauseSessionPlacementRecovery,
@@ -71,6 +72,7 @@ function initialTurn(entry: PlacementStartupEntry): ChatQueueItem {
   return {
     id: recovery.messageId,
     text: recovery.message,
+    ...(recovery.mentions?.length ? { mentions: recovery.mentions } : {}),
     attachments: entry.attachments,
     createdAt: entry.createdAt,
     sessionKey: recovery.sessionKey,
@@ -157,6 +159,7 @@ export default function createApplicationPlacementStartupRuntime(
         entry.owner.sessionKey,
         {
           text: recovery.message,
+          mentions: recovery.mentions,
           attachments: entry.attachments,
           createdAt: entry.createdAt,
         },
@@ -170,7 +173,7 @@ export default function createApplicationPlacementStartupRuntime(
     if (!isCurrent(entry)) {
       return;
     }
-    void params.sessions.refresh({ force: true, backgroundHydrate: true }).catch(() => undefined);
+    params.sessions.invalidate();
   };
 
   const pauseEntry = (
@@ -178,7 +181,11 @@ export default function createApplicationPlacementStartupRuntime(
     recovery: SessionPlacementRecovery,
     error: string,
   ) => {
-    const paused = pauseSessionPlacementRecovery(recovery, error, entry.persistRecovery);
+    const { recovery: paused } = pauseSessionPlacementRecovery(
+      recovery,
+      error,
+      entry.persistRecovery,
+    );
     entry.work = { kind: "paused", recovery: paused };
     publish();
   };
@@ -186,7 +193,7 @@ export default function createApplicationPlacementStartupRuntime(
   const run = (
     entry: PlacementStartupEntry,
     recovery: SessionPlacementRecovery,
-    recovering: boolean,
+    mode: SessionPlacementStartMode,
   ) => {
     let currentRecovery = recovery;
     void advanceSessionPlacementDraft({
@@ -194,7 +201,7 @@ export default function createApplicationPlacementStartupRuntime(
       recovery: currentRecovery,
       persistRecovery: entry.persistRecovery,
       cleanupOnCancellation: () => !entry.persistRecovery && entry.work.kind !== "paused",
-      recovering,
+      mode,
       isLifecycleCurrent: () => lifecycleCurrent(entry),
       ownsRecovery: () => ownsRecovery(entry),
       clearRecovery: () =>
@@ -286,14 +293,15 @@ export default function createApplicationPlacementStartupRuntime(
       // Status reads must not rescan payloads or mint new attachment identities.
       attachments: restoreChatApiAttachments(input.recovery.attachments),
       persistRecovery: input.persistRecovery,
-      createdAt: input.createdAt,
+      createdAt:
+        existing?.owner.messageId === owner.messageId ? existing.createdAt : input.createdAt,
       scope,
       retainsConnection: capturePlacementStartupConnection(params.gateway, owner),
     };
     entries.set(owner.sessionKey, entry);
     publish();
     if (input.recovery.phase !== "paused") {
-      run(entry, input.recovery, input.recovering);
+      run(entry, input.recovery, input.mode);
     }
   };
 
@@ -319,7 +327,7 @@ export default function createApplicationPlacementStartupRuntime(
         start({
           recovery: entry.work.recovery,
           persistRecovery: entry.persistRecovery,
-          recovering: true,
+          mode: "recover",
           createdAt: entry.createdAt,
         });
       }
@@ -328,7 +336,7 @@ export default function createApplicationPlacementStartupRuntime(
       params.gateway.connection.gatewayUrl,
       snapshot.client.recoveryScope,
     )) {
-      start({ recovery, persistRecovery: true, recovering: true, createdAt: Date.now() });
+      start({ recovery, persistRecovery: true, mode: "recover", createdAt: Date.now() });
     }
   };
 
@@ -360,6 +368,7 @@ export default function createApplicationPlacementStartupRuntime(
       }
       return {
         sessionKey: entry.owner.sessionKey,
+        targetKind: entry.work.recovery.target.kind,
         phase,
         startedAt: entry.createdAt,
         initialTurn: initialTurn(entry),
@@ -385,7 +394,7 @@ export default function createApplicationPlacementStartupRuntime(
       if (!entry || !isCurrent(entry)) {
         return;
       }
-      const recovery = pauseSessionPlacementRecovery(
+      const { recovery } = pauseSessionPlacementRecovery(
         entry.work.recovery,
         error,
         entry.persistRecovery,
@@ -396,7 +405,7 @@ export default function createApplicationPlacementStartupRuntime(
       start({
         recovery,
         persistRecovery: entry.persistRecovery,
-        recovering: true,
+        mode: "recover",
         createdAt: entry.createdAt,
       });
     },
@@ -408,7 +417,7 @@ export default function createApplicationPlacementStartupRuntime(
       if (entry.work.recovery.reason === "unconfirmed") {
         entry.work = { kind: "checking", recovery: entry.work.recovery };
         publish();
-        run(entry, entry.work.recovery, true);
+        run(entry, entry.work.recovery, "recover");
         return;
       }
       const { reason, error: _error, ...submission } = entry.work.recovery;
@@ -429,7 +438,7 @@ export default function createApplicationPlacementStartupRuntime(
       start({
         recovery,
         persistRecovery: entry.persistRecovery,
-        recovering: false,
+        mode: "retry",
         createdAt: entry.createdAt,
       });
     },

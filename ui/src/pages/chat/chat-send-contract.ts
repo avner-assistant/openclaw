@@ -8,6 +8,7 @@ import type {
   ChatAttachment,
   ChatGoalDraftMode,
   ChatQueueItem,
+  HumanMention,
 } from "../../lib/chat/chat-types.ts";
 import type { ControlUiFollowUpMode } from "../../lib/chat/follow-up-mode.ts";
 import type { SessionCapability, SessionRefreshTarget } from "../../lib/sessions/index.ts";
@@ -22,6 +23,11 @@ import type { ToolStreamHost } from "./tool-stream-contract.ts";
 
 type ChatAgentsListSnapshot = Partial<Omit<AgentsListResult, "agents">> & {
   agents?: AgentsListResult["agents"];
+};
+
+export type ChatComposerRecoveryOwner = {
+  resolveOwner: () => ChatHost | undefined;
+  retainedAttachmentIds: (attachments: readonly ChatAttachment[]) => ReadonlySet<string>;
 };
 
 export type ChatHost = ChatInputHistoryState &
@@ -39,6 +45,10 @@ export type ChatHost = ChatInputHistoryState &
     reconnectResumeSessionId?: string | null;
     chatLoading: boolean;
     chatMessage: string;
+    canRestoreComposer?: () => boolean;
+    /** Captures this composer's identity while its presentation may hand ownership off. */
+    captureComposerRecoveryOwner?: () => ChatComposerRecoveryOwner | undefined;
+    chatMentions?: readonly HumanMention[];
     /** Captured once at submit; queued delivery never re-reads the current page. */
     getWorkContext?: () => string | undefined;
     chatGoalDraftMode?: ChatGoalDraftMode | null;

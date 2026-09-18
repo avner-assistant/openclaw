@@ -20,7 +20,7 @@ import {
   type SessionTranscriptTreeNode,
 } from "./transcript-tree.js";
 
-type StagedTranscriptRow = { seq: number; eventJson: string; createdAt: number | null };
+type StagedTranscriptRow = { seq: number; eventJson: string };
 
 export function withSqliteSessionImportStage<T>(run: (stage: SqliteSessionImportStage) => T): T {
   const directory = createPrivateSqliteTempDirectorySync(os.tmpdir(), "openclaw-session-import-");
@@ -36,7 +36,7 @@ export function withSqliteSessionImportStage<T>(run: (stage: SqliteSessionImport
       PRAGMA temp_store = FILE;
       CREATE TABLE rows (
         source INTEGER NOT NULL, seq INTEGER NOT NULL, event_json TEXT NOT NULL,
-        created_at INTEGER, PRIMARY KEY (source, seq)
+        PRIMARY KEY (source, seq)
       ) WITHOUT ROWID;
       CREATE TABLE seen (hash BLOB NOT NULL, event_json TEXT NOT NULL);
       CREATE INDEX seen_hash ON seen(hash);
@@ -65,9 +65,9 @@ export class SqliteSessionImportStage {
   private rejected = false;
 
   constructor(private readonly database: DatabaseSync) {
-    this.insert = database.prepare("INSERT INTO rows VALUES (?, ?, ?, ?)");
+    this.insert = database.prepare("INSERT INTO rows VALUES (?, ?, ?)");
     this.read = database.prepare(
-      "SELECT seq, event_json AS eventJson, created_at AS createdAt FROM rows WHERE source = ? ORDER BY seq",
+      "SELECT seq, event_json AS eventJson FROM rows WHERE source = ? ORDER BY seq",
     );
     this.findSeen = database.prepare(
       "SELECT 1 FROM seen WHERE hash = ? AND event_json = ? LIMIT 1",
@@ -75,8 +75,8 @@ export class SqliteSessionImportStage {
     this.insertSeen = database.prepare("INSERT INTO seen VALUES (?, ?)");
   }
 
-  append(source: number, seq: number, eventJson: string, createdAt: number | null): void {
-    this.insert.run(source, seq, eventJson, createdAt);
+  append(source: number, seq: number, eventJson: string): void {
+    this.insert.run(source, seq, eventJson);
   }
 
   rows(source: number): Iterable<StagedTranscriptRow> {
@@ -148,10 +148,35 @@ export class SqliteSessionImportStage {
         setClear.run(kind);
       },
     });
+    const repeatedRows = diskSet("repeated");
     const user = this.database.prepare("INSERT OR REPLACE INTO user_keys VALUES (?, ?, ?)");
+    const readRow = this.database.prepare(
+      "SELECT event_json FROM rows WHERE source = ? AND seq = ?",
+    );
     const update = this.database.prepare(
       "UPDATE rows SET event_json = ? WHERE source = ? AND seq = ?",
     );
+    // Rewriting `rows` while its cursor is open re-delivers the row, and the replay guard
+    // would then discard the re-delivered copy as a duplicate. Rows that need normalized
+    // provider metadata are recorded here and rewritten once the scan has finished; until
+    // then their stored bytes are still legacy, so readers normalize on the way out.
+    const normalizedRows = diskSet("normalized");
+    const storedEventJson = (seq: number): string | undefined => {
+      const row = readRow.get(source, seq);
+      if (!row) {
+        return undefined;
+      }
+      const eventJson = String(row.event_json);
+      if (!normalizedRows.has(String(seq))) {
+        return eventJson;
+      }
+      const entry: unknown = JSON.parse(eventJson);
+      if (!isRecord(entry)) {
+        return eventJson;
+      }
+      normalizeLegacyOpenAICodexTranscriptMetadata([entry]);
+      return JSON.stringify(entry);
+    };
     let changed = false;
     let recognized = true;
     let headerSeq: number | undefined;
@@ -161,12 +186,14 @@ export class SqliteSessionImportStage {
     function* entries() {
       for (const row of rows) {
         const entry: unknown = JSON.parse(row.eventJson);
+        let eventJson = row.eventJson;
         if (!isRecord(entry)) {
           recognized = false;
           continue;
         }
         if (normalizeLegacyOpenAICodexTranscriptMetadata([entry]) > 0) {
-          update.run(JSON.stringify(entry), source, row.seq);
+          eventJson = JSON.stringify(entry);
+          normalizedRows.add(String(row.seq));
           changed = true;
         }
         if (entry.type === "session") {
@@ -185,9 +212,21 @@ export class SqliteSessionImportStage {
             strippedKey ?? null,
           );
         }
+        const indexed = isIndexedSessionEntry(entry);
+        const leafControl = isSessionTranscriptLeafControl(entry);
         // Unknown payload stays in the original, never silently declared complete.
-        if (!isIndexedSessionEntry(entry) && !isSessionTranscriptLeafControl(entry)) {
+        if (!indexed && !leafControl) {
           recognized = false;
+        }
+        if (typeof entry.id === "string" && (indexed || leafControl)) {
+          const previous = lookup(entry.id);
+          if (previous) {
+            if (storedEventJson(Number(previous.entry.importSeq)) === eventJson) {
+              repeatedRows.add(String(row.seq));
+              changed = true;
+              continue;
+            }
+          }
         }
         const metadata = { ...entry };
         delete metadata.message;
@@ -222,6 +261,22 @@ export class SqliteSessionImportStage {
       resetDescendantIds: diskSet("reset"),
       invalidLeafControlIds: diskSet("invalid"),
     });
+    for (const pending of this.database
+      .prepare("SELECT id FROM tree_sets WHERE kind = 'normalized'")
+      .iterate()) {
+      const seq = Number(pending.id);
+      const eventJson = storedEventJson(seq);
+      if (eventJson !== undefined) {
+        update.run(eventJson, source, seq);
+      }
+    }
+    this.database
+      .prepare(
+        `DELETE FROM rows WHERE source = ? AND CAST(seq AS TEXT) IN (
+          SELECT id FROM tree_sets WHERE kind = 'repeated'
+        )`,
+      )
+      .run(source);
     const select = this.database.prepare("INSERT OR REPLACE INTO selected VALUES (?, ?, ?, ?)");
     const selected = this.database.prepare("SELECT 1 FROM selected WHERE id = ?");
     const walk = (leaf: string | null, visible: boolean): boolean => {
@@ -289,9 +344,6 @@ export class SqliteSessionImportStage {
       }
       // Retain the exact header and selected physical rows; rewrite only normalized parent links.
       const chosen = this.database.prepare("SELECT seq, parent_id FROM selected ORDER BY seq");
-      const readRow = this.database.prepare(
-        "SELECT event_json FROM rows WHERE source = ? AND seq = ?",
-      );
       for (const selectedRow of chosen.iterate()) {
         const row = readRow.get(source, selectedRow.seq!);
         // SAFETY: selected rows came from the record-checked navigation pass in this spool.

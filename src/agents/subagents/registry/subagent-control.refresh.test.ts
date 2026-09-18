@@ -7,7 +7,9 @@ import {
   beginSessionWorkAdmission,
   getActiveSessionLifecycleMutationCount,
   getActiveSessionWorkAdmissionCount,
+  runExclusiveSessionLifecycleMutation,
 } from "../../../sessions/session-lifecycle-admission.js";
+import { onTaskRegistryChange } from "../../../tasks/task-registry-state.js";
 import { findTaskByRunId } from "../../../tasks/task-registry.js";
 import { clearActiveEmbeddedRun, setActiveEmbeddedRun } from "../../embedded-agent-runner/runs.js";
 import { createEmbeddedRunHandle } from "../../embedded-agent-runner/runs.test-support.js";
@@ -233,6 +235,12 @@ it.each([
         }
         return exactRead(scope);
       });
+    const grandchildCancelled = createDeferred();
+    const unsubscribeTasks = onTaskRegistryChange(() => {
+      if (findTaskByRunId("g")?.status === "cancelled") {
+        grandchildCancelled.resolve();
+      }
+    });
     const pending = killAllControlledSubagentRuns({
       cfg: getRuntimeConfig(),
       controller: {
@@ -280,6 +288,14 @@ it.each([
       admissionA.release();
       if (phase === "later sibling drain") {
         await healthyEntered.promise;
+        await grandchildCancelled.promise;
+        // Publication precedes G's abort-marker write. Join its mutation from
+        // outside the observer's reentrant context before arming the next fault.
+        await runExclusiveSessionLifecycleMutation({
+          scope: storePath,
+          identities: [gKey, "g-session"],
+          run: async () => {},
+        });
         expect(a.endedReason).toBe(SUBAGENT_ENDED_REASON_KILLED);
         expect(d.endedReason).toBe(SUBAGENT_ENDED_REASON_KILLED);
         expect(findTaskByRunId("g")?.status).toBe("cancelled");
@@ -323,6 +339,7 @@ it.each([
       }
     } finally {
       armed = false;
+      unsubscribeTasks();
       admissionA.release();
       admissionD.release();
       admissionHealthy.release();

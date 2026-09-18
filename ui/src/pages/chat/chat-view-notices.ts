@@ -9,6 +9,7 @@ import { formatBytes } from "../../lib/agents/display.ts";
 import { findChatSubmissionMessage } from "../../lib/chat/history-message-identity.ts";
 import { clampText } from "../../lib/format.ts";
 import { renderWorkspaceConflictNotice } from "./components/chat-workspace-conflict.ts";
+import type { ProviderPolicyNotice } from "./tool-stream-contract.ts";
 import type { WorkspaceResultConflict } from "./workspace-conflict.ts";
 
 export type ChatPlacementStartupNoticeProps = {
@@ -28,6 +29,7 @@ type ChatViewNoticesProps = ChatPlacementStartupNoticeProps & {
 
 type ChatComposerNoticesProps = ChatPlacementStartupNoticeProps & {
   messages: readonly unknown[];
+  providerPolicyNotice?: ProviderPolicyNotice | null;
   runError?: { summary: string } | null;
   onDismissWorkspaceConflict?: () => void;
   workspaceConflict?: WorkspaceResultConflict | null;
@@ -44,9 +46,9 @@ function renderDiskSpaceNotice(diskSpace: SessionPlacementDiskSpace | undefined)
   const critical = diskSpace.status === "critical";
   return html`
     <div
-      class="chat-composer-neighbor-card chat-composer-neighbor-card--${critical
-        ? "danger"
-        : "warn"} chat-cloud-disk-space-notice"
+      class="chat-composer-neighbor-card chat-composer-neighbor-card--${
+        critical ? "danger" : "warn"
+      } chat-cloud-disk-space-notice"
       role=${critical ? "alert" : "status"}
     >
       <span class="chat-composer-neighbor-card__icon" aria-hidden="true"
@@ -88,20 +90,22 @@ function renderErrorNotice(
       <span class="chat-composer-neighbor-card__icon" aria-hidden="true"
         >${icons.alertTriangle}</span
       >
-      ${hasDetails
-        ? html`<details class="chat-error__content">
-            <summary class="chat-error__summary">
-              <strong>${summary}</strong>
-              <span>${t("chat.errorDetails")}</span>
-              <span class="chat-error__chevron" aria-hidden="true">${icons.chevronDown}</span>
-            </summary>
-            <pre class="chat-error__diagnostic" tabindex="0" aria-label=${t("chat.errorDetails")}>
+      ${
+        hasDetails
+          ? html`<details class="chat-error__content">
+              <summary class="chat-error__summary">
+                <strong>${summary}</strong>
+                <span>${t("chat.details")}</span>
+                <span class="chat-error__chevron" aria-hidden="true">${icons.chevronDown}</span>
+                ${renderCopyButton(error, t("chat.copyError"))}
+              </summary>
+              <pre class="chat-error__diagnostic" tabindex="0" aria-label=${t("chat.errorDetails")}>
 ${displayError}</pre>
-            ${renderCopyButton(error, t("chat.copyError"))}
-          </details>`
-        : html`<span class="chat-error__content"
-            ><strong>${summary}</strong>${renderCopyButton(error, t("chat.copyError"))}</span
-          >`}
+            </details>`
+          : html`<span class="chat-error__content"
+              ><strong>${summary}</strong>${renderCopyButton(error, t("chat.copyError"))}</span
+            >`
+      }
       ${action}
     </div>
   `;
@@ -126,26 +130,29 @@ export function renderChatTopbarNotices(props: ChatViewNoticesProps) {
     <div class="chat-topbar-notices">
       ${renderDiskSpaceNotice(props.diskSpace)}
       ${props.error ? renderErrorNotice(props.error, dismiss) : nothing}
-      ${props.focusMode && props.onToggleFocusMode
-        ? html`
-            <openclaw-tooltip .content=${t("chat.actions.exitFocusMode")}>
-              <button
-                class="chat-focus-exit"
-                type="button"
-                @click=${props.onToggleFocusMode}
-                aria-label=${t("chat.actions.exitFocusMode")}
-              >
-                ${icons.x}
-              </button>
-            </openclaw-tooltip>
-          `
-        : nothing}
+      ${
+        props.focusMode && props.onToggleFocusMode
+          ? html`
+              <openclaw-tooltip .content=${t("chat.actions.exitFocusMode")}>
+                <button
+                  class="chat-focus-exit"
+                  type="button"
+                  @click=${props.onToggleFocusMode}
+                  aria-label=${t("chat.actions.exitFocusMode")}
+                >
+                  ${icons.x}
+                </button>
+              </openclaw-tooltip>
+            `
+          : nothing
+      }
     </div>
   `;
 }
 
 export function renderChatComposerNotices(props: ChatComposerNoticesProps) {
   return html`
+    ${renderProviderPolicyNotice(props.providerPolicyNotice)}
     ${props.runError ? renderErrorNotice(props.runError.summary) : nothing}
     ${renderWorkspaceConflictNotice({
       conflict: props.workspaceConflict ?? undefined,
@@ -156,6 +163,33 @@ export function renderChatComposerNotices(props: ChatComposerNoticesProps) {
       props.messages,
       props.onRetrySessionPlacementStartup,
     )}
+  `;
+}
+
+function renderProviderPolicyNotice(notice: ProviderPolicyNotice | null | undefined) {
+  if (!notice) {
+    return nothing;
+  }
+  const blocked = notice.state === "blocked" || notice.state === "unavailable";
+  const model = notice.fallbackModel ?? notice.model;
+  const namesModel = notice.state !== "buffering" && notice.state !== "blocked";
+  const body =
+    namesModel && !model
+      ? t("chat.providerPolicy.fallbackUnknownBody")
+      : t(`chat.providerPolicy.${notice.state}Body`, { model: model ?? "" });
+  return html`
+    <div
+      class="chat-composer-neighbor-card chat-composer-neighbor-card--${blocked ? "danger" : "warn"} chat-provider-policy-notice"
+      role=${blocked ? "alert" : "status"}
+    >
+      <span class="chat-composer-neighbor-card__icon" aria-hidden="true"
+        >${icons.alertTriangle}</span
+      >
+      <div class="chat-composer-neighbor-card__copy">
+        <strong>${t(`chat.providerPolicy.${notice.state}Title`)}</strong>
+        <span>${body}</span>
+      </div>
+    </div>
   `;
 }
 
@@ -182,11 +216,18 @@ function renderPlacementStartupError(
   // banner action reachable when transcript deduplication hides the row.
   const hasInlineTurn =
     status.initialTurn && !findChatSubmissionMessage(messages, status.initialTurn.sendRunId, true);
-  const retry =
-    status.retryable && onRetry && !hasInlineTurn
+  const action = status.discardAndReload
+    ? html`<button
+        class="btn btn--sm danger chat-error__discard"
+        type="button"
+        @click=${status.discardAndReload}
+      >
+        ${t("newSession.discardUnsavedAndReload")}
+      </button>`
+    : status.retryable && onRetry && !hasInlineTurn
       ? html`<button class="btn btn--sm" type="button" @click=${onRetry}>
           ${t(checking ? "chat.queue.checkDelivery" : "common.retry")}
         </button>`
       : nothing;
-  return renderErrorNotice(error, retry, displayError);
+  return renderErrorNotice(error, action, displayError);
 }

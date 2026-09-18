@@ -2,15 +2,14 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
 import {
   closeAuthProfileReadPool,
   resolveAuthProfileDatabasePath,
 } from "../agents/auth-profiles/sqlite.js";
-import { saveAuthProfileStore } from "../agents/auth-profiles/store.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
-import * as configRuntime from "../config/config.js";
+import * as configRuntime from "../config/runtime-snapshot.js";
 import { GATEWAY_STARTUP_MUTATED_ENV_KEYS } from "../gateway/test-helpers.env.js";
+import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { captureEnv } from "./env.js";
 import { cleanupSessionStateForTest } from "./session-state-cleanup.js";
 
@@ -36,6 +35,7 @@ type OpenClawTestStateOptions = {
   agentEnv?: "clear" | "main";
   applyEnv?: boolean;
   env?: Record<string, string | undefined>;
+  verifyCleanup?: (cleanup: () => Promise<void>) => Promise<void>;
   gateway?: {
     port?: number;
     token?: string;
@@ -59,7 +59,7 @@ export type OpenClawTestState = {
   writeText: (relativePath: string, value: string) => Promise<string>;
   writeAuthProfiles: (store: unknown, agentId?: string) => Promise<string>;
   applyEnv: () => void;
-  restoreEnv: () => void;
+  restoreEnv: () => Promise<void>;
   cleanup: () => Promise<void>;
 };
 
@@ -285,7 +285,7 @@ export async function createOpenClawTestState(
       maxRetries: 20,
       retryDelay: 25,
     });
-  let restoreEnv: (() => void) | undefined;
+  let rollbackEnv: (() => void) | undefined;
   try {
     // Keep the allocated path for rollback if canonicalization fails. macOS tmpdir
     // sits behind /var -> /private/var; successful fixtures expose canonical paths.
@@ -304,9 +304,20 @@ export async function createOpenClawTestState(
       extraEnv: options.env ?? {},
     });
     const env = createSpawnEnv(envVars);
-    const snapshot = captureEnv(uniqueStrings([...ENV_KEYS, ...Object.keys(envVars)]));
+    const capturedEnvKeys = new Set([...ENV_KEYS, ...Object.keys(envVars)]);
+    const snapshots = [captureEnv([...capturedEnvKeys])];
     let envApplied = false;
-    let cleaned = false;
+    let releasePromise: Promise<void> | undefined;
+    let cleanupPromise: Promise<void> | undefined;
+    const restoreAppliedEnv = () => {
+      if (envApplied) {
+        for (const snapshot of snapshots) {
+          snapshot.restore();
+        }
+        resetConfigRuntimeStateForTest();
+        envApplied = false;
+      }
+    };
     const agentDir = (agentId = "main") => path.join(paths.stateDir, "agents", agentId, "agent");
     const sessionsDir = (agentId = "main") =>
       path.join(paths.stateDir, "agents", agentId, "sessions");
@@ -329,16 +340,28 @@ export async function createOpenClawTestState(
         await fs.writeFile(filePath, value, "utf8");
         return filePath;
       },
-      writeAuthProfiles: (store, agentId = "main") => {
+      writeAuthProfiles: async (store, agentId = "main") => {
         const targetAgentDir = agentDir(agentId);
+        const { saveAuthProfileStore } = await import("../agents/auth-profiles/store-runtime.js");
         saveAuthProfileStore(store as AuthProfileStore, targetAgentDir, {
           filterExternalAuthProfiles: false,
           syncExternalCli: false,
         });
-        return Promise.resolve(resolveAuthProfileDatabasePath(targetAgentDir));
+        return resolveAuthProfileDatabasePath(targetAgentDir);
       },
       applyEnv: () => {
+        if (releasePromise || cleanupPromise) {
+          throw new Error("Cannot apply a released OpenClaw test state");
+        }
         resetConfigRuntimeStateForTest();
+        // envVars is mutable; capture late keys before their first application.
+        const newKeys = Object.keys(envVars).filter((key) => !capturedEnvKeys.has(key));
+        if (newKeys.length > 0) {
+          snapshots.push(captureEnv(newKeys));
+          for (const key of newKeys) {
+            capturedEnvKeys.add(key);
+          }
+        }
         // A later write can throw after earlier keys changed; restoration still owns them.
         envApplied = true;
         for (const [key, value] of Object.entries(envVars)) {
@@ -350,25 +373,21 @@ export async function createOpenClawTestState(
           }
         }
       },
-      restoreEnv: () => {
-        if (envApplied) {
-          snapshot.restore();
-          resetConfigRuntimeStateForTest();
-          envApplied = false;
-        }
-      },
-      cleanup: async () => {
-        if (cleaned) {
-          return;
-        }
-        cleaned = true;
-        await cleanupSessionStateForTest({ stateDir: paths.stateDir }).catch(() => undefined);
-        closeAuthProfileReadPool({ kind: "root", rootPath: paths.stateDir });
-        state.restoreEnv();
-        await removeRoot();
-      },
+      // The caller stops external producers first. Retain the original release,
+      // including failure, so no concurrent caller can restore selectors early.
+      restoreEnv: () =>
+        (releasePromise ??= Promise.resolve().then(async () => {
+          await cleanupSessionStateForTest({ stateDir: paths.stateDir });
+          closeAuthProfileReadPool({ kind: "root", rootPath: paths.stateDir });
+          restoreAppliedEnv();
+        })),
+      cleanup: () =>
+        (cleanupPromise ??= Promise.resolve().then(async () => {
+          await state.restoreEnv();
+          await removeRoot();
+        })),
     };
-    restoreEnv = state.restoreEnv;
+    rollbackEnv = restoreAppliedEnv;
 
     await fs.mkdir(paths.stateDir, { recursive: true });
     await fs.mkdir(paths.workspaceDir, { recursive: true });
@@ -386,8 +405,16 @@ export async function createOpenClawTestState(
     return state;
   } catch (error) {
     // Acquisition has no session/auth work to drain or close. Only undo this fixture.
-    restoreEnv?.();
-    await removeRoot();
+    // Restore selectors synchronously before the verifier can yield.
+    const rollback = (async () => {
+      rollbackEnv?.();
+      await removeRoot();
+    })();
+    if (options.verifyCleanup) {
+      await options.verifyCleanup(() => rollback);
+    } else {
+      await rollback;
+    }
     throw error;
   }
 }
@@ -397,9 +424,11 @@ export async function withOpenClawTestState<T>(
   fn: (state: OpenClawTestState) => Promise<T>,
 ): Promise<T> {
   const state = await createOpenClawTestState(options);
+  const work = new AsyncWorkScope();
   try {
-    return await fn(state);
+    return await work.track(() => fn(state));
   } finally {
+    await work.drain();
     await state.cleanup();
   }
 }

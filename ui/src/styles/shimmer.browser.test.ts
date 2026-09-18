@@ -1,6 +1,7 @@
 import { chromium, type Browser } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readStyleSheet } from "../../../test/helpers/ui-style-fixtures.js";
+import { withBrowserPage } from "../test-helpers/browser-page.ts";
 import {
   canRunPlaywrightChromium,
   resolvePlaywrightChromiumExecutablePath,
@@ -24,11 +25,11 @@ afterAll(async () => {
 
 describeShimmer("Control UI shimmer", () => {
   it("moves loading highlights on compositor-safe pseudo-elements", async () => {
-    const page = await browser.newPage();
-    try {
+    await withBrowserPage(browser.newPage(), async (page) => {
       await page.setContent(`<!doctype html><html><head><style>
         ${readStyleSheet("ui/src/styles/base.css")}
         ${readStyleSheet("ui/src/styles/chat/layout.css")}
+        ${readStyleSheet("ui/src/styles/chat/composer.css")}
         ${readStyleSheet("ui/src/styles/memory-import.css")}
         ${readStyleSheet("ui/src/styles/usage.css")}
       </style></head><body>
@@ -82,17 +83,15 @@ describeShimmer("Control UI shimmer", () => {
         });
         expect(styles.highlightBackground).toContain("linear-gradient");
       }
-    } finally {
-      await page.close().catch(() => {});
-    }
+    });
   });
 
   it("keeps the global reduced-motion gate", async () => {
-    const page = await browser.newPage({ reducedMotion: "reduce" });
-    try {
+    await withBrowserPage(browser.newPage({ reducedMotion: "reduce" }), async (page) => {
       await page.setContent(`<!doctype html><html><head><style>
         ${readStyleSheet("ui/src/styles/base.css")}
         ${readStyleSheet("ui/src/styles/chat/layout.css")}
+        ${readStyleSheet("ui/src/styles/chat/composer.css")}
         ${readStyleSheet("ui/src/styles/memory-import.css")}
         ${readStyleSheet("ui/src/styles/usage.css")}
       </style></head><body>
@@ -119,15 +118,19 @@ describeShimmer("Control UI shimmer", () => {
             running: element
               .getAnimations({ subtree: true })
               .some((item) => item.playState === "running"),
+            settledTransform: highlight.transform,
+            width: element.clientWidth,
           };
         });
 
         expect(animation.iterations).toBe("1");
         expect(Number.parseFloat(animation.duration)).toBeLessThanOrEqual(0.00001);
         expect(animation.running).toBe(false);
+        // The collapsed animation must leave the highlight parked offscreen, not
+        // settled over the block as a static band.
+        const settledX = Number.parseFloat(animation.settledTransform.split(",")[4] ?? "NaN");
+        expect(Math.abs(settledX + animation.width)).toBeLessThanOrEqual(1);
       }
-    } finally {
-      await page.close().catch(() => {});
-    }
+    });
   });
 });

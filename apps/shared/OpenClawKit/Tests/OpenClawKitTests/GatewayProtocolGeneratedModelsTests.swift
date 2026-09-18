@@ -16,11 +16,45 @@ struct GatewayProtocolGeneratedModelsTests {
         switch request {
         case let .clawhub(value): #expect(value.acknowledgeinstallpolicywarning == expected)
         case let .official(value): #expect(value.acknowledgeinstallpolicywarning == expected)
+        case let .npm(value): #expect(value.acknowledgeinstallpolicywarning == expected)
+        case let .git(value): #expect(value.acknowledgeinstallpolicywarning == expected)
+        case let .local(value): #expect(value.acknowledgeinstallpolicywarning == expected)
+        case let .npmPack(value): #expect(value.acknowledgeinstallpolicywarning == expected)
+        case let .marketplace(value): #expect(value.acknowledgeinstallpolicywarning == expected)
+        case let .bundled(value): #expect(value.acknowledgeinstallpolicywarning == expected)
         }
         let actualJSON = try #require(
             JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? NSDictionary)
         let expectedJSON = try #require(JSONSerialization.jsonObject(with: data) as? NSDictionary)
         #expect(actualJSON == expectedJSON)
+    }
+
+    @Test(arguments: [
+        #"{"source":"clawhub","packageName":"@fixture/plugin","version":"1.2.3","expectedPluginId":"fixture","expectedIntegrity":"sha512-fixture"}"#,
+        #"{"source":"official","pluginId":"fixture","version":"latest","pin":false}"#,
+        #"{"source":"npm","spec":"@fixture/plugin@1.2.3","pin":true,"expectedPluginId":"fixture","expectedIntegrity":"sha512-fixture"}"#,
+        #"{"source":"git","spec":"git:https://example.invalid/fixture.git#main"}"#,
+        #"{"source":"local","path":"/synthetic/plugins/fixture","link":false}"#,
+        #"{"source":"npm-pack","archivePath":"/synthetic/fixture.tgz"}"#,
+        #"{"source":"marketplace","marketplace":"fixture-market","plugin":"fixture"}"#,
+        #"{"source":"bundled","pluginId":"fixture","spec":"fixture-alias"}"#,
+    ])
+    func `install sources preserve optional intent and reject caller supplied trust`(json: String) throws {
+        var payload = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        payload["mode"] = "update"
+        payload["acknowledgeInstallPolicyWarning"] = true
+        payload["acknowledgeCapabilities"] = ["reviewToken": "reviewed-surface"]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let request = try JSONDecoder().decode(PluginsInstallParams.self, from: data)
+        let encoded = try #require(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(request)) as? NSDictionary)
+        #expect(encoded == payload as NSDictionary)
+
+        payload["trustedSourceLinkedOfficialInstall"] = true
+        let callerTrusted = try JSONSerialization.data(withJSONObject: payload)
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(PluginsInstallParams.self, from: callerTrusted)
+        }
     }
 
     @Test
@@ -38,8 +72,8 @@ struct GatewayProtocolGeneratedModelsTests {
 
     @Test(arguments: [true, false])
     func `optional install literal initializers preserve and validate supplied values`(literal: Bool) throws {
-        let clawhub = PluginsInstallParamsClawhub(packagename: "fixture", acknowledgeinstallpolicywarning: literal)
-        let official = PluginsInstallParamsOfficial(pluginid: "fixture", acknowledgeinstallpolicywarning: literal)
+        let clawhub = PluginsInstallParamsClawhub(acknowledgeinstallpolicywarning: literal, packagename: "fixture")
+        let official = PluginsInstallParamsOfficial(acknowledgeinstallpolicywarning: literal, pluginid: "fixture")
         #expect(clawhub.acknowledgeinstallpolicywarning == literal)
         #expect(official.acknowledgeinstallpolicywarning == literal)
         for request in [PluginsInstallParams.clawhub(clawhub), .official(official)] {
@@ -281,6 +315,9 @@ struct GatewayProtocolGeneratedModelsTests {
         (
             #"{"requestId":"request-1","status":"failed","code":"push_rejected","message":"Failed.","nextAction":"Check access."}"#,
             "failed"),
+        (
+            #"{"requestId":"request-1","status":"needs_confirmation","message":"Confirm publication.","publisher":{"source":"personal","accountId":42,"login":"octocat"},"effect":{"kind":"push","status":"observed","headCommit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}"#,
+            "needs_confirmation"),
     ])
     func `GitHub publication results round trip as a typed union`(
         json: String,
@@ -294,11 +331,13 @@ struct GatewayProtocolGeneratedModelsTests {
         case .publishing: #expect(expectedStatus == "publishing")
         case .published: #expect(expectedStatus == "published")
         case .failed: #expect(expectedStatus == "failed")
+        case .needsConfirmation: #expect(expectedStatus == "needs_confirmation")
         }
 
         let encoded = try #require(
-            JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as? [String: Any])
-        #expect(encoded["status"] as? String == expectedStatus)
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(result)) as? NSDictionary)
+        let expected = try #require(JSONSerialization.jsonObject(with: Data(json.utf8)) as? NSDictionary)
+        #expect(encoded == expected)
     }
 
     @Test(arguments: [

@@ -537,12 +537,10 @@ describe("agentLoop streaming updates", () => {
   });
 
   it("does not execute tool calls from a max-token-truncated assistant turn", async () => {
-    const execute = vi.fn(
-      async (): Promise<AgentToolResult<unknown>> => ({
-        content: [{ type: "text", text: "should not run" }],
-        details: {},
-      }),
-    );
+    const execute = vi.fn(async (): Promise<AgentToolResult<unknown>> => ({
+      content: [{ type: "text", text: "should not run" }],
+      details: {},
+    }));
     const contexts: Context[] = [];
     let streamCalls = 0;
     const streamFn: StreamFn = async (_model, context) => {
@@ -686,12 +684,10 @@ describe("runAgentLoop deferred tool hydration", () => {
   }
 
   it("hydrates an authorized deferred tool for execution and the continuation", async () => {
-    const execute = vi.fn(
-      async (): Promise<AgentToolResult<unknown>> => ({
-        content: [{ type: "text", text: "hidden ok" }],
-        details: { ok: true },
-      }),
-    );
+    const execute = vi.fn(async (): Promise<AgentToolResult<unknown>> => ({
+      content: [{ type: "text", text: "hidden ok" }],
+      details: { ok: true },
+    }));
     const hiddenTool: AgentTool = {
       name: "hidden_search",
       label: "hidden_search",
@@ -806,12 +802,10 @@ describe("runAgentLoop deferred tool hydration", () => {
   });
 
   it("rejects deferred tools whose names differ from the requested call", async () => {
-    const execute = vi.fn(
-      async (): Promise<AgentToolResult<unknown>> => ({
-        content: [{ type: "text", text: "wrong tool ran" }],
-        details: { ok: true },
-      }),
-    );
+    const execute = vi.fn(async (): Promise<AgentToolResult<unknown>> => ({
+      content: [{ type: "text", text: "wrong tool ran" }],
+      details: { ok: true },
+    }));
     const mismatchedTool: AgentTool = {
       name: "other_deferred",
       label: "other_deferred",
@@ -1077,7 +1071,7 @@ describe("agentLoop tool termination", () => {
         role: "toolResult",
         toolCallId: "call-second",
         isError: true,
-        content: [{ type: "text", text: "Skipped due to queued user message." }],
+        content: [{ type: "text", text: "Skipped to process an incoming message." }],
         details: { status: "skipped", deniedReason: "steering" },
       },
       firstSteer,
@@ -1584,6 +1578,62 @@ describe("agentLoop tool termination", () => {
     expect(getSteeringMessages).toHaveBeenCalled();
   });
 
+  it("commits drained steering and settled tools before a host-requested model-step stop", async () => {
+    const steer = { role: "user" as const, content: "verify the new version", timestamp: 2 };
+    const queued: AgentMessage[] = [];
+    const requestMessages: Message[][] = [];
+    const execute = vi.fn(async () => {
+      queued.push(steer);
+      return { content: [{ type: "text" as const, text: "reload committed" }], details: {} };
+    });
+    let refresh = false;
+    const context: AgentContext = {
+      systemPrompt: "",
+      messages: [],
+      tools: [{ ...makeTool("reload", []), execute }],
+    };
+    const events: AgentEvent[] = [];
+    const result = await runAgentLoop(
+      [{ role: "user", content: "edit and reload", timestamp: 1 }],
+      context,
+      {
+        ...config,
+        getSteeringMessages: async () => queued.splice(0),
+        afterToolCall: async () => {
+          refresh = true;
+        },
+        prepareNextTurn: async () => (refresh ? { stop: true } : undefined),
+      },
+      (event) => {
+        events.push(event);
+      },
+      undefined,
+      createTurnSequenceStream(
+        [
+          [{ type: "toolCall", id: "reload-once", name: "reload", arguments: {} }],
+          [{ type: "text", text: "must not run on the old catalog" }],
+        ],
+        requestMessages,
+      ),
+    );
+
+    expect(requestMessages).toHaveLength(1);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(result.at(-1)).toBe(steer);
+    expect(result).toContainEqual(
+      expect.objectContaining({
+        role: "toolResult",
+        toolCallId: "reload-once",
+        content: [{ type: "text", text: "reload committed" }],
+      }),
+    );
+    expect(events.at(-1)).toMatchObject({ type: "agent_end", messages: result });
+    expect(
+      events.filter((event) => event.type === "message_end" && event.message === steer),
+    ).toHaveLength(1);
+    expect(queued).toEqual([]);
+  });
+
   it("delivers steering admitted while the final follow-up drain is pending", async () => {
     const followUpDrainStarted = createDeferred();
     const releaseFollowUpDrain = createDeferred();
@@ -1803,7 +1853,7 @@ describe("agentLoop tool termination", () => {
         role: "toolResult",
         toolCallId: "prepared",
         isError: true,
-        content: [{ type: "text", text: "Skipped due to queued user message." }],
+        content: [{ type: "text", text: "Skipped to process an incoming message." }],
         details: { status: "skipped", deniedReason: "steering" },
       },
       steer,
@@ -2102,6 +2152,82 @@ describe("agentLoop tool termination", () => {
     expect(agentEnd).toBeGreaterThan(failureTurnEnd);
     expect(events.slice(agentEnd + 1)).toEqual([]);
   });
+
+  it.each(["parallel", "sequential"] as const)(
+    "delivers loop warnings after raw outcome hooks in %s batches",
+    async (toolExecution) => {
+      const executed: string[] = [];
+      const requestMessages: Message[][] = [];
+      const rawOutcomes: AgentToolResult<unknown>[] = [];
+      const streamFn = createTurnSequenceStream(
+        [
+          [
+            { type: "toolCall", id: "warned", name: "read", arguments: {} },
+            { type: "toolCall", id: "sibling", name: "list", arguments: {} },
+          ],
+          [{ type: "toolCall", id: "next", name: "read", arguments: {} }],
+          [{ type: "text", text: "done" }],
+        ],
+        requestMessages,
+      );
+      const events = await collectEvents(
+        agentLoop(
+          [{ role: "user", content: "run", timestamp: 1 }],
+          {
+            systemPrompt: "",
+            messages: [],
+            tools: [makeTool("read", executed), makeTool("list", executed)],
+          },
+          {
+            ...config,
+            toolExecution,
+            beforeToolBatch: async ({ calls }) => ({
+              warnings: calls
+                .filter(({ toolCall }) => toolCall.id === "warned")
+                .map(({ toolCall }) => ({
+                  kind: "tool-loop-warning" as const,
+                  toolCallId: toolCall.id,
+                  count: 10,
+                })),
+            }),
+            afterToolCall: async ({ result }) => {
+              rawOutcomes.push(result);
+            },
+            afterToolOutcome: async ({ result }) => {
+              rawOutcomes.push(result);
+              return { content: [...result.content, { type: "text", text: "outcome hook" }] };
+            },
+          },
+          undefined,
+          streamFn,
+        ),
+      );
+      expect(rawOutcomes.every((result) => result.content.length === 1)).toBe(true);
+      const results = requestMessages.at(-1)?.filter((message) => message.role === "toolResult");
+      expect(results?.map((message) => message.content)).toEqual([
+        [
+          { type: "text", text: "read result" },
+          { type: "text", text: "outcome hook" },
+          {
+            type: "text",
+            text: "[System note: Tool-loop warning after 10 repeated calls. Change your approach or stop if you are not making progress.]",
+          },
+        ],
+        [
+          { type: "text", text: "list result" },
+          { type: "text", text: "outcome hook" },
+        ],
+        [
+          { type: "text", text: "read result" },
+          { type: "text", text: "outcome hook" },
+        ],
+      ]);
+      expect(
+        events.filter((event) => event.type === "tool_execution_end").map((event) => event.result),
+      ).toEqual(results?.map((message) => expect.objectContaining({ content: message.content })));
+      expect(executed).toEqual(["read", "list", "read"]);
+    },
+  );
 
   it("gives the model one recovery turn with the normal tool catalog", async () => {
     const executed: string[] = [];
@@ -2596,6 +2722,73 @@ describe("agentLoop tool termination", () => {
     },
   );
 
+  it.each(["execute", "prepare", "immediate", "after-call", "after-outcome"] as const)(
+    "preserves only operation-owned error provenance at %s",
+    async (phase) => {
+      const provenance = { source: "operation-effect-proof" };
+      const failure = attachInternalToolResultProvenance(
+        new Error("operation rejected"),
+        provenance,
+      );
+      const tool: AgentTool = {
+        ...makeTool("operation", []),
+        execute: async () => {
+          if (phase === "execute") {
+            throw failure;
+          }
+          return { content: [{ type: "text", text: "completed" }], details: {} };
+        },
+      };
+      if (phase === "prepare" || phase === "immediate") {
+        attachInternalToolExecutionPreparer(tool, async () => {
+          if (phase === "prepare") {
+            throw failure;
+          }
+          return { kind: "immediate", outcome: { kind: "error", error: failure }, dispose() {} };
+        });
+      }
+      const stream = agentLoop(
+        [{ role: "user", content: "perform operation", timestamp: 1 }],
+        { systemPrompt: "", messages: [], tools: [tool] },
+        {
+          ...config,
+          ...(phase === "after-call"
+            ? {
+                afterToolCall: async () => {
+                  throw failure;
+                },
+              }
+            : {}),
+          ...(phase === "after-outcome"
+            ? {
+                afterToolOutcome: async () => {
+                  throw failure;
+                },
+              }
+            : {}),
+        },
+        undefined,
+        createTurnSequenceStream([
+          [{ type: "toolCall", id: "operation-call", name: tool.name, arguments: {} }],
+          [{ type: "text", text: "recovered" }],
+        ]),
+      );
+      const events = await collectEvents(stream);
+      const end = events.find((event) => event.type === "tool_execution_end");
+      if (
+        end?.type !== "tool_execution_end" ||
+        typeof end.result !== "object" ||
+        end.result === null
+      ) {
+        throw new Error("Expected the operation's terminal result");
+      }
+      expect(end.isError).toBe(true);
+      expect(getInternalToolResultProvenance(end.result)).toBe(
+        phase === "after-call" || phase === "after-outcome" ? undefined : provenance,
+      );
+    },
+  );
+
   it.each([
     { name: "attached", failAttachment: false, expectedAcknowledgements: 1 },
     { name: "dropped", failAttachment: true, expectedAcknowledgements: 0 },
@@ -2622,6 +2815,9 @@ describe("agentLoop tool termination", () => {
       { systemPrompt: "", messages: [], tools: [tool] },
       {
         ...config,
+        beforeToolBatch: async () => ({
+          warnings: [{ kind: "tool-loop-warning", toolCallId: "commit-probe", count: 10 }],
+        }),
         afterToolCall: async () => ({ details: { phase: "after-call" } }),
         afterToolOutcome: async () => ({ details: { phase: "after-outcome" } }),
       },
@@ -2945,7 +3141,7 @@ describe("agentLoop tool termination", () => {
     expect(events.at(-1)).toMatchObject({ type: "agent_end" });
   });
 
-  it("normalizes a tool result with missing content before the next model turn", async () => {
+  it.each([false, true])("normalizes missing tool content with loop warning=%s", async (warn) => {
     const contexts: Context[] = [];
     const streamFn = createTurnSequenceStream(
       [
@@ -2969,7 +3165,14 @@ describe("agentLoop tool termination", () => {
       agentLoop(
         [{ role: "user", content: "run", timestamp: 1 }],
         { systemPrompt: "", messages: [], tools: [tool] },
-        config,
+        {
+          ...config,
+          beforeToolBatch: async () => ({
+            warnings: warn
+              ? [{ kind: "tool-loop-warning", toolCallId: "call-empty", count: 10 }]
+              : [],
+          }),
+        },
         undefined,
         streamFn,
       ),
@@ -2980,7 +3183,9 @@ describe("agentLoop tool termination", () => {
       expect.objectContaining({
         role: "toolResult",
         toolName: "empty",
-        content: [],
+        content: warn
+          ? [{ type: "text", text: expect.stringContaining("Tool-loop warning after 10") }]
+          : [],
       }),
     );
   });

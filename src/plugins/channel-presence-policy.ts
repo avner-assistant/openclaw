@@ -203,6 +203,7 @@ function normalizeActivationBlockedReason(reason?: string): ConfiguredChannelBlo
     case "blocked by denylist":
       return "blocked-by-denylist";
     case "disabled in config":
+    case "channel disabled in config":
       return "plugin-disabled";
     case "not in allowlist":
       return "not-in-allowlist";
@@ -324,6 +325,7 @@ function evaluateEffectiveChannelPlugin(params: {
   const activationState = resolveEffectivePluginActivationState({
     id: params.plugin.id,
     origin: params.plugin.origin,
+    channelIds: params.plugin.channels,
     config: params.normalizedConfig,
     rootConfig: params.config,
     enabledByDefault: isPluginEnabledByDefaultForPlatform(params.plugin),
@@ -722,6 +724,10 @@ export function resolveConfiguredChannelPluginIds(params: {
   manifestRecords?: readonly PluginManifestRecord[];
   discovery?: PluginDiscoveryResult;
 }): string[] {
+  // This ID-only query cannot admit disabled owners; presence reports still collect blocked rows.
+  if (!normalizePluginsConfig((params.activationSourceConfig ?? params.config).plugins).enabled) {
+    return [];
+  }
   const configuredChannelIds = normalizeChannelIds([
     ...listConfiguredChannelIdsForReadOnlyScope({
       config: params.config,

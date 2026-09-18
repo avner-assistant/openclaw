@@ -12,6 +12,10 @@ import {
   runAgentHarnessBeforeCompactionHook,
   clearActiveEmbeddedRun,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
+import {
+  asOptionalRecord,
+  normalizeOptionalString,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
 import { registerCopilotActiveRun } from "./attempt-active-run.js";
 import { deferBackgroundCompactionCleanup } from "./attempt-cleanup.js";
 import {
@@ -121,6 +125,7 @@ export async function runCopilotExecution(context: {
   let resumeFailureRecovered = false;
   let yieldDetected = false;
   let yieldAcknowledgment: string | undefined;
+  const acceptedSessionSpawns: NonNullable<AgentHarnessAttemptResult["acceptedSessionSpawns"]> = [];
   let lastToolError: AgentHarnessAttemptResult["lastToolError"];
   const hostObserveToolTerminal = input.observeToolTerminal;
   const observeToolTerminal = hostObserveToolTerminal
@@ -278,8 +283,24 @@ export async function runCopilotExecution(context: {
             yieldDetected = true;
             yieldAcknowledgment = acknowledgment;
           },
-          onToolCompleted: ({ args, error, result, startedAt, toolCallId, toolName }) =>
-            runAgentHarnessAfterToolCallHook({
+          onToolCompleted: async ({ args, error, result, startedAt, toolCallId, toolName }) => {
+            const acceptedSessionSpawnDetails =
+              toolName === "sessions_spawn" && !error
+                ? asOptionalRecord(asOptionalRecord(result)?.details)
+                : undefined;
+            const runId = normalizeOptionalString(acceptedSessionSpawnDetails?.runId);
+            const childSessionKey = normalizeOptionalString(
+              acceptedSessionSpawnDetails?.childSessionKey,
+            );
+            if (acceptedSessionSpawnDetails?.status === "accepted" && runId && childSessionKey) {
+              acceptedSessionSpawns.push({
+                runId,
+                childSessionKey,
+                expectsCompletionMessage:
+                  acceptedSessionSpawnDetails.expectsCompletionMessage === true,
+              });
+            }
+            await runAgentHarnessAfterToolCallHook({
               toolName,
               toolCallId,
               runId: input.runId,
@@ -291,7 +312,8 @@ export async function runCopilotExecution(context: {
               ...(result !== undefined ? { result } : {}),
               ...(error ? { error } : {}),
               startedAt,
-            }),
+            });
+          },
         });
         cleanupToolBridge = toolBridge.cleanup;
         codeModeEngaged = toolBridge.codeModeEngaged;
@@ -396,7 +418,7 @@ export async function runCopilotExecution(context: {
     }
     if (sdkSessionId && deps.onSessionEstablished && !settledToolFinalization) {
       try {
-        deps.onSessionEstablished({
+        await deps.onSessionEstablished({
           compactionSessionConfig,
           sdkSessionId,
           pooledClient: handle,
@@ -465,6 +487,7 @@ export async function runCopilotExecution(context: {
       }
       activeRunHandleRef = registerCopilotActiveRun({
         abortActiveSession,
+        agentId: sessionAgentId,
         bridge,
         canAcceptSteering: () => initialSdkUserValidated,
         startedAtMs: input.startedAtMs,
@@ -591,7 +614,7 @@ export async function runCopilotExecution(context: {
         .catch(() => undefined);
       if (sdkSessionId && !settledToolFinalization) {
         try {
-          deps.onDeferredCompaction?.({
+          await deps.onDeferredCompaction?.({
             abort: () => cleanupAbort.abort(),
             cleanup,
             sdkSessionId,
@@ -602,7 +625,11 @@ export async function runCopilotExecution(context: {
     } else {
       await bridge?.awaitCompactionChain();
       await bridge?.awaitAgentEventChain();
-      nativeSubagentTaskMirror?.finalizeActiveRuns();
+      try {
+        nativeSubagentTaskMirror?.finalizeActiveRuns();
+      } catch (error) {
+        promptError ??= toCopilotError(error);
+      }
       cleanupToolBridge?.();
       await cleanupByokProxy?.();
       bridge?.detach();
@@ -635,6 +662,7 @@ export async function runCopilotExecution(context: {
     }
   }
   return await completeCopilotAttempt({
+    acceptedSessionSpawns,
     aborted,
     attemptStartedAt,
     bridge,

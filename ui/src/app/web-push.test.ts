@@ -6,6 +6,7 @@ import type { WebPushNotificationPreferences } from "../../../packages/gateway-p
 import { createDeferred } from "../../../test/helpers/promise.js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import { renderNotificationsSection } from "../pages/config/notifications-section.ts";
+import { createConnectionBootstrapCoordinator } from "./connection-bootstrap.ts";
 import type { ApplicationGateway, ApplicationGatewaySnapshot } from "./gateway.ts";
 import { createWebPushCapability } from "./web-push.ts";
 
@@ -98,6 +99,7 @@ function notificationPreferences(approvalRequested: boolean): WebPushNotificatio
       approvalRequested,
       agentFinished: false,
       agentQuestion: false,
+      humanMentioned: false,
       scheduledTaskFailed: false,
       backgroundTaskFailed: false,
     },
@@ -209,6 +211,32 @@ describe("web push Gateway reconciliation", () => {
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalled();
     capability.dispose();
+  });
+
+  it("schedules initial reconciliation through the connection bootstrap coordinator", async () => {
+    const coordinator = createConnectionBootstrapCoordinator();
+    const run = vi.spyOn(coordinator, "run");
+    const harness = gatewayHarness();
+    const connection = gatewayClient(Promise.resolve(encodedVapidKey([4, 1, 2, 3])));
+    const capability = createWebPushCapability(harness.gateway, {
+      connectionBootstrap: coordinator,
+    });
+
+    harness.connect(connection.client);
+    await vi.waitFor(() =>
+      expect(run).toHaveBeenCalledExactlyOnceWith("web-push-reconcile", expect.any(Function)),
+    );
+    expect(connection.request).not.toHaveBeenCalled();
+    coordinator.synchronize({ client: connection.client, connected: true });
+    await vi.waitFor(() =>
+      expect(connection.request).toHaveBeenCalledWith(
+        "push.web.subscribe",
+        expect.objectContaining({ endpoint: "https://push.example.test/subscription" }),
+      ),
+    );
+
+    capability.dispose();
+    coordinator.reset();
   });
 
   it("serializes rapid preference edits without dropping the latest full object", async () => {

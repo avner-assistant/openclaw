@@ -83,13 +83,13 @@ test("runner rejects a live SUT identity that differs from the lease", () => {
 
 test("scenario commands receive the leased test harness without broker authority", () => {
   const commandEnv = createScenarioCommandEnvironment({
-    gatewayEnv: {
-      OPENCLAW_CONFIG_PATH: "/tmp/openclaw.json",
-      OPENCLAW_STATE_DIR: "/tmp/state",
-      TELEGRAM_BOT_TOKEN: "sut-token",
-    },
+    gatewayEnv: createGatewayEnvironment({
+      baseEnv: { TELEGRAM_BOT_TOKEN: "parent-token" },
+      configPath: "/tmp/openclaw.json",
+      stateDir: "/tmp/state",
+    }),
     driverEnv: {
-      TELEGRAM_E2E_SUT_BOT_TOKEN: "sut-token",
+      TELEGRAM_E2E_STATE_DIR: "/tmp/credential",
       TELEGRAM_USER_DRIVER_STATE_DIR: "/tmp/user-driver",
     },
     telegramApiRoot: "http://127.0.0.1:19881",
@@ -97,8 +97,8 @@ test("scenario commands receive the leased test harness without broker authority
   assert.deepEqual(commandEnv, {
     OPENCLAW_CONFIG_PATH: "/tmp/openclaw.json",
     OPENCLAW_STATE_DIR: "/tmp/state",
-    TELEGRAM_BOT_TOKEN: "sut-token",
-    TELEGRAM_E2E_SUT_BOT_TOKEN: "sut-token",
+    OPENAI_API_KEY: "openclaw-e2e-mock-key",
+    TELEGRAM_E2E_STATE_DIR: "/tmp/credential",
     TELEGRAM_USER_DRIVER_STATE_DIR: "/tmp/user-driver",
     TELEGRAM_E2E_TEST_API_ROOT: "http://127.0.0.1:19881",
   });
@@ -255,7 +255,6 @@ test("lease loss during blocked readiness stops the gateway before polling", asy
     },
     configPath: path.join(temp, "openclaw.json"),
     stateDir: path.join(temp, "state"),
-    sutToken: "sut-token",
   });
   const gateway = ownChild(
     spawn(process.execPath, [gatewayScript], {
@@ -329,6 +328,40 @@ test("lease revocation between startup Bot API calls prevents update polling", a
     (error) => error === leaseError,
   );
   assert.deepEqual(methods, ["getWebhookInfo"]);
+});
+
+test("clears a leased bot webhook before polling updates", async () => {
+  const methods = [];
+  const bodies = [];
+  const results = [
+    { url: "https://example.test/webhook", pending_update_count: 2 },
+    true,
+    [],
+    { url: "", pending_update_count: 0 },
+  ];
+  const fetchImpl = async (url, init) => {
+    methods.push(new URL(url).pathname.split("/").at(-1));
+    bodies.push(JSON.parse(init.body));
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, result: results.shift() }),
+    };
+  };
+  const result = await drainSutUpdates(
+    "sut-token",
+    { assertHealthy: () => {}, whenUnhealthy: new Promise(() => {}) },
+    fetchImpl,
+  );
+
+  assert.deepEqual(methods, ["getWebhookInfo", "deleteWebhook", "getUpdates", "getWebhookInfo"]);
+  assert.deepEqual(bodies[1], { drop_pending_updates: true });
+  assert.deepEqual(result, {
+    webhookUrlSet: true,
+    pendingBefore: 2,
+    drained: 0,
+    pendingAfter: 0,
+  });
 });
 
 test("lease loss during a credential command stops every owned child before its side effect", async (context) => {

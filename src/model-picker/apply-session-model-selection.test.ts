@@ -9,11 +9,20 @@ import {
   replaceSessionEntry,
 } from "../config/sessions/session-accessor.js";
 import type { SessionEntry } from "../config/sessions/types.js";
+import type { ModelDefinitionConfig } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   onSessionLifecycleEvent,
   type SessionLifecycleEvent,
 } from "../sessions/session-lifecycle-events.js";
+
+// Runtime eligibility belongs to the published-owner tests; these cases exercise its consumers.
+vi.mock("../agents/model-runtime-choice.js", () => ({
+  preparePublishedModelRuntimeChoice: vi.fn(async () => ({
+    kind: "ready",
+    validate: () => undefined,
+  })),
+}));
 
 vi.mock("../agents/model-catalog.runtime.js", () => ({
   loadProviderScopedThinkingCatalog: vi.fn(async () => []),
@@ -27,6 +36,11 @@ const effects = vi.hoisted(() => ({
   triggerSessionPatchHook: vi.fn(),
   warn: vi.fn(),
 }));
+const placementMocks = vi.hoisted(() => ({
+  getMany: vi.fn(),
+  resolveWorkerPlacementSessionRuntimeCapabilities: vi.fn(),
+}));
+
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 let lifecycleEvents: SessionLifecycleEvent[];
 let unsubscribeLifecycle: () => void;
@@ -57,6 +71,18 @@ vi.mock("../logging/subsystem.js", async () => {
         : actual.createSubsystemLogger(subsystem),
   };
 });
+
+vi.mock("../gateway/session-worker-placement-context.js", () => ({
+  resolveSessionWorkerPlacementContext: () => ({
+    workerSessionPlacementService: {
+      getMany: placementMocks.getMany,
+    },
+  }),
+}));
+vi.mock("../gateway/worker-environments/placement-session-runtime.js", () => ({
+  resolveWorkerPlacementSessionRuntimeCapabilities:
+    placementMocks.resolveWorkerPlacementSessionRuntimeCapabilities,
+}));
 
 import {
   applySessionModelSelection,
@@ -122,11 +148,69 @@ beforeEach(() => {
   });
   effects.refreshQueuedFollowupSession.mockReset();
   effects.triggerSessionPatchHook.mockReset();
+  placementMocks.getMany.mockReset().mockReturnValue(new Map());
+  placementMocks.resolveWorkerPlacementSessionRuntimeCapabilities.mockReset();
 });
 
 afterEach(() => unsubscribeLifecycle());
 
 describe("applySessionModelSelection", () => {
+  it.each([false, true])("uses configured default only with reset intent=%s", async (reset) => {
+    const modelCatalog = [
+      { provider: "fixture", id: "automatic", name: "Automatic" },
+      { provider: "fixture", id: "manual", name: "Manual" },
+    ];
+    const sessionEntry = createEntry({ providerOverride: "fixture", modelOverride: "manual" });
+    const result = await applySessionModelSelection(
+      createParams({
+        cfg: {
+          agents: {
+            defaults: {
+              model: "fixture/automatic",
+              modelPolicy: { allow: ["fixture/manual"] },
+            },
+          },
+          models: {
+            providers: {
+              fixture: {
+                api: "openai-completions",
+                baseUrl: "https://fixture.invalid/v1",
+                models: modelCatalog.map<ModelDefinitionConfig>(({ id, name }) => ({
+                  id,
+                  name,
+                  reasoning: false,
+                  input: ["text"],
+                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                  maxTokens: 4_096,
+                })),
+              },
+            },
+          },
+        },
+        sessionEntry,
+        defaultProvider: "fixture",
+        defaultModel: "stale-default-hint",
+        currentProvider: "fixture",
+        currentModel: "manual",
+        modelCatalog,
+        thinkingCatalog: modelCatalog,
+        request: {
+          provider: "fixture",
+          model: reset ? "manual" : "automatic",
+          isDefault: true,
+          ...(reset ? { resetToDefault: true as const } : {}),
+          runtime: { kind: "unchanged" },
+        },
+      }),
+    );
+    expect(result).toMatchObject(
+      reset
+        ? { status: "applied", provider: "fixture", model: "automatic" }
+        : { status: "rejected", reason: "not-allowed" },
+    );
+    expect(sessionEntry.modelOverride).toBe(reset ? undefined : "manual");
+  });
+
   it("uses selected route metadata for context and thinking outside the prepared inventory", async () => {
     const selected: ModelCatalogEntry = {
       provider: "fixture-route",
@@ -289,7 +373,9 @@ describe("applySessionModelSelection", () => {
       );
 
       expect(result).toMatchObject({ status: "applied", changed: true });
-      expect(lifecycleEvents).toEqual([{ sessionKey, agentId: "main", reason: "patch" }]);
+      expect(lifecycleEvents).toEqual([
+        { sessionKey, agentId: "main", reason: "patch", catalogChanged: true },
+      ]);
       expect(publishedEntry).toMatchObject({
         sessionId: "session-1",
         modelOverride: "gpt-5.6-luna",
@@ -385,6 +471,7 @@ describe("applySessionModelSelection", () => {
     expect(result).toMatchObject({ status: "applied", runtimeChange: { kind: "clear" } });
     expect(sessionEntry.providerOverride).toBeUndefined();
     expect(sessionEntry.modelOverride).toBeUndefined();
+    expect(sessionEntry.modelOverrideSource).toBe("default");
     expect(sessionEntry.authProfileOverride).toBeUndefined();
     expect(sessionEntry.authProfileOverrideSource).toBeUndefined();
     expect(sessionEntry.authProfileOverrideCompactionCount).toBeUndefined();
@@ -425,7 +512,7 @@ describe("applySessionModelSelection", () => {
     expect(result).not.toHaveProperty("configuredDefaultUpdate");
     expect(sessionEntry.providerOverride).toBeUndefined();
     expect(sessionEntry.modelOverride).toBeUndefined();
-    expect(sessionEntry.modelOverrideSource).toBeUndefined();
+    expect(sessionEntry.modelOverrideSource).toBe("default");
     expect(sessionEntry.modelOverrideRouteResolution).toBeUndefined();
     expect(sessionEntry).toMatchObject({
       authProfileOverride: "openai:work",
@@ -533,6 +620,28 @@ describe("applySessionModelSelection", () => {
         "failed sticky model persistence agentId=main model=openai/gpt-4o reason=config write failed",
       ),
     );
+  });
+
+  it("resolves SDK effective persistence from the current write draft", async () => {
+    const cfg = { agents: { defaults: { model: "anthropic/claude-opus-4-6" } } };
+    const draft = {
+      agents: {
+        ...cfg.agents,
+        entries: { main: { model: "anthropic/claude-sonnet-4-6" } },
+      },
+    };
+    effects.mutateConfigFileWithRetry.mockImplementationOnce(
+      async ({ mutate }: { mutate: (config: OpenClawConfig) => string }) => ({
+        nextConfig: draft,
+        result: mutate(draft),
+      }),
+    );
+
+    await applySessionModelSelection(createParams({ cfg, canPersistStickyModelSelection: true }));
+
+    await vi.waitFor(() => expect(effects.info).toHaveBeenCalledOnce());
+    expect(draft.agents.defaults.model).toBe("anthropic/claude-opus-4-6");
+    expect(draft.agents.entries.main.model).toBe("openai/gpt-4o");
   });
 
   it.each([
@@ -734,6 +843,34 @@ describe("applySessionModelSelection", () => {
     expect(effects.triggerSessionPatchHook).not.toHaveBeenCalled();
     expect(effects.refreshQueuedFollowupSession).not.toHaveBeenCalled();
     expect(effects.enqueueSystemEvent).not.toHaveBeenCalled();
+  });
+
+  it("rejects account selection authority revoked during metadata preparation", async () => {
+    const metadata = createDeferred<ModelCatalogEntry[]>();
+    vi.mocked(loadProviderScopedThinkingCatalog).mockReturnValueOnce(metadata.promise);
+    let authorized = true;
+    const params = createParams({
+      validateAuthProfileSelection: () => (authorized ? undefined : "Select an account you own."),
+      request: {
+        provider: "openai",
+        model: "gpt-4o",
+        isDefault: false,
+        profileOverride: "openai:work",
+        runtime: { kind: "unchanged" },
+      },
+    });
+    const initial = structuredClone(params.sessionEntry);
+    const pending = applySessionModelSelection(params);
+    authorized = false;
+    metadata.resolve([]);
+
+    expect(await pending).toMatchObject({
+      status: "rejected",
+      message: "Select an account you own.",
+    });
+    expect(params.sessionEntry).toEqual(initial);
+    expect(lifecycleEvents).toEqual([]);
+    expect(effects.refreshQueuedFollowupSession).not.toHaveBeenCalled();
   });
 
   it.each([

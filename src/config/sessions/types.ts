@@ -7,7 +7,11 @@ import type {
 } from "@openclaw/acp-core/types";
 import { asNonNegativeFiniteNumber } from "@openclaw/normalization-core/number-coercion";
 import { normalizeOptionalString, type FastMode } from "@openclaw/normalization-core/string-coerce";
-import type { SessionRow, SessionRunStatus } from "../../../packages/gateway-protocol/src/index.js";
+import type {
+  SessionEntryArchiveReason,
+  SessionRow,
+  SessionRunStatus,
+} from "../../../packages/gateway-protocol/src/index.js";
 import type { QueueMode } from "../../../packages/gateway-protocol/src/schema/logs-chat.js";
 import type { SessionGoal } from "../../../packages/gateway-protocol/src/schema/sessions-goal.js";
 import type { SessionObserverDigest } from "../../../packages/gateway-protocol/src/schema/sessions.js";
@@ -47,6 +51,7 @@ export type { SessionSystemPromptReport } from "./session-system-prompt-report.j
 
 export type SessionScope = "per-sender" | "global";
 export type SessionChatType = ChatType;
+export type PersistedSessionRunStatus = SessionRunStatus | "interrupted";
 export const SESSION_TOTAL_TOKENS_VERSION = 1 as const;
 type SessionVisibility = "shared" | "read-only" | "suggest" | "draft";
 
@@ -330,6 +335,8 @@ type SessionEntryCore = SessionRestartRecoveryState &
     archivedAt?: number;
     /** Actor that archived the session; cleared when the session is restored. */
     archivedBy?: SessionActor;
+    /** Stable lifecycle cause; absent values are legacy archives and remain manually protected. */
+    archiveReason?: SessionEntryArchiveReason;
     /** Timestamp (ms) when the session was pinned for quick access. */
     pinnedAt?: number;
     /** Timestamp (ms) when an operator client last marked the session read. */
@@ -338,6 +345,8 @@ type SessionEntryCore = SessionRestartRecoveryState &
     agentStatus?: SessionAgentStatus;
     /** Latest utility-model status judgment for idle session status surfaces. */
     observerDigest?: SessionObserverDigest;
+    /** Versioned, reconstructible Activity recap; never authoritative task status. */
+    activitySummary?: import("./activity-summary.js").SessionActivitySummary;
     /** Timestamp (ms) when an operator explicitly marked the session unread; cleared on read. */
     markedUnreadAt?: number;
     /** Timestamp (ms) of the latest completed agent run; metadata patches do not update it. */
@@ -365,6 +374,8 @@ type SessionEntryCore = SessionRestartRecoveryState &
     };
     /** Project registry id selected when this logical session node was created. */
     projectId?: string;
+    /** Durable cloud repository owner; never identifies a Gateway filesystem path. */
+    repositoryWorkspaceId?: string;
     /** Explicit parent session linkage for dashboard-created child sessions. */
     parentSessionKey?: string;
     /** Exact parent incarnation captured when this child was created. */
@@ -428,7 +439,7 @@ type SessionEntryCore = SessionRestartRecoveryState &
     /** Accumulated runtime across subagent follow-up runs, persisted after completion. */
     runtimeMs?: number;
     /** Final persisted subagent run status, used after in-memory run archival. */
-    status?: SessionRunStatus;
+    status?: PersistedSessionRunStatus;
     /** Compact user-facing reason for the latest failed or timed-out run. */
     lastRunError?: string;
     /**
@@ -499,11 +510,11 @@ type SessionEntryCore = SessionRestartRecoveryState &
     /** Session-scoped agent runtime/harness override selected with the model picker. */
     agentRuntimeOverride?: string;
     /**
-     * Tracks whether the persisted model override came from an explicit user
-     * action (`/model`, `sessions.patch`) or from a temporary runtime fallback.
-     * Resets only preserve user-driven overrides.
+     * Tracks whether the persisted model selection came from an explicit user
+     * action (`/model`, `sessions.patch`), a temporary runtime fallback, or an
+     * explicit configured-default selection that blocks parent inheritance.
      */
-    modelOverrideSource?: "auto" | "user";
+    modelOverrideSource?: "auto" | "user" | "default";
     /** Present only when providerOverride/modelOverride are a canonical route pair. */
     modelOverrideRouteResolution?: "resolved";
     /** Selected model that produced the current auto fallback override. */
@@ -512,7 +523,7 @@ type SessionEntryCore = SessionRestartRecoveryState &
     /** One-run rollback guard for a model selected by the agent sessions tool. */
     modelFallback?: AgentPatchedSessionModelFallback;
     authProfileOverride?: string;
-    authProfileOverrideSource?: "auto" | "user";
+    authProfileOverrideSource?: "auto" | "user" | "user-link";
     authProfileOverrideCompactionCount?: number;
     /**
      * Set on explicit user-driven session model changes (for example `/model`
@@ -579,7 +590,9 @@ type SessionEntryCore = SessionRestartRecoveryState &
     acpSessionBinding?: AcpSessionBinding;
     claudeCliSessionId?: string;
     label?: string;
-    /** Persistent operator/agent-set sidebar emoji icon (single grapheme). */
+    /** Automatic device name; never claims a custom label or overrides a generated title. */
+    autoLabel?: string;
+    /** Persistent sidebar emoji, named glyph, or canonical SVG image data URL. */
     icon?: string;
     /** Named sidebar tint (SESSION_COLOR_IDS); palette mirrors Claude Code /color for import. */
     color?: string;
@@ -587,16 +600,22 @@ type SessionEntryCore = SessionRestartRecoveryState &
     category?: string;
     /** Preferred Control UI face when a caller opens this session without explicit face intent. */
     boardFace?: SessionBoardFace;
+    /** Shared dashboard presentation default; absence uses the built-in split view. */
+    boardPresentation?: NonNullable<SessionRow["boardPresentation"]>;
     displayName?: string;
     /** Canonical delivery state. Legacy delivery fields are migrated by `openclaw doctor --fix`. */
     delivery?: SessionDeliveryState;
     groupId?: string;
     subject?: string;
+    /** Display-only topic name; subject remains the group name used for routing. */
+    topicName?: string;
     groupChannel?: string;
     space?: string;
     /** Last ambient room message durably appended to this transcript, keyed by channel scope. */
     ambientTranscriptWatermarks?: Record<string, AmbientTranscriptWatermark>;
     skillsSnapshot?: SessionSkillSnapshot;
+    /** Explicit authorized immutable library pins; current speakers never replace this selection. */
+    skillLibrarySelections?: import("../../../packages/gateway-protocol/src/schema/skill-library.js").SkillLibrarySelection[];
     systemPromptReport?: SessionSystemPromptReport;
     /**
      * Generic plugin-owned runtime debug entries shown in verbose status surfaces.
@@ -610,6 +629,10 @@ export interface SessionEntry extends SessionEntryCore {}
 
 /** Internal durable fields excluded from public/plugin session projections. */
 export type InternalSessionEntryCore = SessionEntryCore & {
+  /** Transcript-wide account provenance; native binding replacement must not replace it. */
+  cliHistoryBoundary?: import("./cli-history-boundary.js").CliHistoryBoundary;
+  /** Explicit world-readable publication, bound to one transcript generation. */
+  publicShare?: { id: string; sessionId: string; createdAt: number };
   /** Run that owns the current non-terminal Gateway lifecycle projection. */
   lifecycleRunId?: string;
   /** Exact run that produced the latest terminal Gateway lifecycle projection. */
@@ -623,6 +646,8 @@ export type InternalSessionEntryCore = SessionEntryCore & {
     workspace?: string;
     name?: string;
     baseRef?: string;
+    /** Verified commit used for checkout while baseRef remains user-facing metadata. */
+    baseCommit?: string;
     titleSource: string;
   };
   /** Suppresses repeated byte-triggered compaction after an oversized successor was observed. */
@@ -641,7 +666,13 @@ export interface InternalSessionEntry extends InternalSessionEntryCore {}
 export function isTerminalSessionStatus(
   status: unknown,
 ): status is Exclude<NonNullable<SessionEntry["status"]>, "running"> {
-  return status === "done" || status === "failed" || status === "killed" || status === "timeout";
+  return (
+    status === "done" ||
+    status === "failed" ||
+    status === "interrupted" ||
+    status === "killed" ||
+    status === "timeout"
+  );
 }
 
 function isSessionPluginTraceLine(line: string): boolean {
@@ -805,6 +836,9 @@ function mergeSessionEntryWithPolicy(
   }
   if (existing.projectId !== undefined) {
     next.projectId = existing.projectId;
+  }
+  if (existing.repositoryWorkspaceId !== undefined) {
+    next.repositoryWorkspaceId = existing.repositoryWorkspaceId;
   }
   if (existing.forkSource !== undefined) {
     next.forkSource = existing.forkSource;

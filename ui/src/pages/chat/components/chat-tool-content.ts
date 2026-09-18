@@ -17,6 +17,7 @@ import {
   type ToolPreview,
 } from "../../../lib/chat/tool-cards.ts";
 import { formatToolDetail, resolveToolDisplay } from "../../../lib/chat/tool-display.ts";
+import type { PluginToolIcons } from "../chat-tool-icon-controller.ts";
 import { renderHighlightedCommand } from "./chat-command-highlight.ts";
 import { renderDiffBlock } from "./chat-diff-render.ts";
 import type { SidebarContent } from "./chat-sidebar.ts";
@@ -160,12 +161,14 @@ function renderToolDataBlock(params: { label?: string; text: string }) {
   const codeClass = isMarkdownBlockArtText(text) ? "markdown-block-art" : "";
   return html`
     <div class="chat-tool-card__block">
-      ${label
-        ? html`<div class="chat-tool-card__block-header">
-            <span class="chat-tool-card__block-icon">${icons.zap}</span>
-            <span class="chat-tool-card__block-label">${label}</span>
-          </div>`
-        : nothing}
+      ${
+        label
+          ? html`<div class="chat-tool-card__block-header">
+              <span class="chat-tool-card__block-icon">${icons.zap}</span>
+              <span class="chat-tool-card__block-label">${label}</span>
+            </div>`
+          : nothing
+      }
       <pre class="chat-tool-card__block-content"><code class=${codeClass}>${text}</code></pre>
     </div>
   `;
@@ -290,15 +293,17 @@ function renderToolWorkspaceFilePath(
 /** Neutral end-state line every expanded tool surface closes with. */
 export function renderToolOutcome(outcome: ToolCardOutcome, exitCode?: number) {
   const label =
-    outcome === "failed"
-      ? exitCode === undefined
-        ? t("chat.toolCards.failed")
-        : t("chat.toolCards.exitCode", { code: String(exitCode) })
-      : outcome === "running"
-        ? t("chat.toolCards.running")
-        : outcome === "succeeded"
-          ? t("chat.toolCards.completed")
-          : null;
+    outcome === "skipped"
+      ? t("chat.toolCards.skipped")
+      : outcome === "failed"
+        ? exitCode === undefined
+          ? t("chat.toolCards.failed")
+          : t("chat.toolCards.exitCode", { code: String(exitCode) })
+        : outcome === "running"
+          ? t("chat.toolCards.running")
+          : outcome === "succeeded"
+            ? t("chat.toolCards.completed")
+            : null;
   return label ? html`<div class="chat-tool-card__outcome">${label}</div>` : nothing;
 }
 
@@ -309,9 +314,11 @@ function renderTerminalBlock(command: string, output: string | undefined) {
         <span class="chat-tool-term__prompt">$</span
         ><code>${renderHighlightedCommand(command)}</code>
       </div>
-      ${output?.trim()
-        ? html`<pre class="chat-tool-term__out"><code>${output}</code></pre>`
-        : nothing}
+      ${
+        output?.trim()
+          ? html`<pre class="chat-tool-term__out"><code>${output}</code></pre>`
+          : nothing
+      }
     </div>
   `;
 }
@@ -325,8 +332,9 @@ function renderToolCardModes(
   file: DiffFilePaths,
 ) {
   // Call IDs repeat across messages; scope DOM identity without copying source cards.
+  // Web Awesome links ARIA references in later observer callbacks; initial render needs them too.
   const id = `${messageKey}:${card.id}`;
-  const active = isError ? "raw" : "diff";
+  const active = isError || outcome === "skipped" ? "raw" : "diff";
   const modeLabel = t("chat.toolCards.viewMode");
   return html`
     <wa-tab-group
@@ -337,16 +345,38 @@ function renderToolCardModes(
       without-scroll-controls
       ${ref((element) => syncTabGroupLabel(element, modeLabel))}
     >
-      <wa-tab slot="nav" id=${`${id}-diff-tab`} panel="diff" ?active=${active === "diff"}>
+      <wa-tab
+        slot="nav"
+        id=${`${id}-diff-tab`}
+        aria-controls=${`${id}-diff-panel`}
+        panel="diff"
+        ?active=${active === "diff"}
+      >
         ${t("chat.toolCards.diff")}
       </wa-tab>
-      <wa-tab slot="nav" id=${`${id}-raw-tab`} panel="raw" ?active=${active === "raw"}>
+      <wa-tab
+        slot="nav"
+        id=${`${id}-raw-tab`}
+        aria-controls=${`${id}-raw-panel`}
+        panel="raw"
+        ?active=${active === "raw"}
+      >
         ${t("chat.toolCards.raw")}
       </wa-tab>
-      <wa-tab-panel id=${`${id}-diff-panel`} name="diff" ?active=${active === "diff"}>
+      <wa-tab-panel
+        id=${`${id}-diff-panel`}
+        aria-labelledby=${`${id}-diff-tab`}
+        name="diff"
+        ?active=${active === "diff"}
+      >
         ${renderDiffBlock(diff, outcome, undefined, file)}
       </wa-tab-panel>
-      <wa-tab-panel id=${`${id}-raw-panel`} name="raw" ?active=${active === "raw"}>
+      <wa-tab-panel
+        id=${`${id}-raw-panel`}
+        aria-labelledby=${`${id}-raw-tab`}
+        name="raw"
+        ?active=${active === "raw"}
+      >
         ${renderToolDataBlock({
           ...(isError ? { label: t("chat.toolCards.toolError") } : {}),
           text: card.outputText!,
@@ -363,7 +393,11 @@ function serializeDiff(lines: readonly { kind: string; text: string }[]): string
 }
 
 export type ToolRenderOptions = {
+  pluginToolIcons?: PluginToolIcons;
   messageKey: string;
+  sessionKey?: string;
+  agentId?: string;
+  presented?: boolean;
   runActive?: boolean;
   onOpenSidebar?: (content: SidebarContent) => void;
   onOpenWorkspaceFile?: (target: { path: string; line?: number | null }) => void;
@@ -413,18 +447,24 @@ export function renderExpandedToolCardContent(
       ? renderCopyButton(serializeDiff(view.diff), t("common.copy"))
       : nothing;
 
-  // Command calls render terminal-style: `$ command` + raw output. Remaining
-  // args (workdir, timeout, env…) stay visible as key-value rows so identical
-  // commands in different contexts remain distinguishable in the audit trail.
-  if (view.kind === "command" && view.command && !card.preview) {
+  // Code-mode hooks pair code/command aliases; code selects plain source.
+  // Source stays visible before serialized inputText arrives, and only the
+  // rendered field leaves the remaining execution-context arguments.
+  if (view.kind === "command" && (view.command || view.code) && !card.preview) {
     const argsRecord = asNullableRecord(card.args);
+    const sourceKey = view.code ? "code" : "command";
     const extraArgs = Object.fromEntries(
-      Object.entries(argsRecord ?? {}).filter(([key]) => key !== "command"),
+      Object.entries(argsRecord ?? {}).filter(([key]) => key !== sourceKey),
     );
     return html`
       <div class="chat-tool-card chat-tool-card--flush ${isError ? "chat-tool-card--error" : ""}">
         <div class="chat-tool-card__actions">${sidebarAction}</div>
-        ${renderTerminalBlock(view.command, card.outputText)}
+        ${
+          view.code
+            ? html`${renderToolDataBlock({ label: t("chat.toolCards.toolInput"), text: view.code })}
+              ${hasOutput ? renderToolDataBlock({ text: card.outputText! }) : nothing}`
+            : renderTerminalBlock(view.command!, card.outputText)
+        }
         ${Object.keys(extraArgs).length > 0 ? renderArgsKeyValueList(extraArgs) : nothing}
         ${renderToolOutcome(outcome, card.exitCode)}
       </div>
@@ -445,9 +485,11 @@ export function renderExpandedToolCardContent(
           )}
           <div class="chat-tool-card__actions">${diffCopyAction}${sidebarAction}</div>
         </div>
-        ${hasOutput
-          ? renderToolCardModes(card, messageKey, view.diff, outcome, isError, file)
-          : renderDiffBlock(view.diff, outcome, undefined, file)}
+        ${
+          hasOutput
+            ? renderToolCardModes(card, messageKey, view.diff, outcome, isError, file)
+            : renderDiffBlock(view.diff, outcome, undefined, file)
+        }
         ${renderToolOutcome(outcome, card.exitCode)}
       </div>
     `;
@@ -463,39 +505,47 @@ export function renderExpandedToolCardContent(
 
   return html`
     <div class="chat-tool-card ${isError ? "chat-tool-card--error" : ""}">
-      ${detail || canOpenSidebar
-        ? html`
-            <div class="chat-tool-card__header">
-              ${detail
-                ? view.kind === "read"
-                  ? renderToolWorkspaceFilePath(detail, workspaceFilePath, onOpenWorkspaceFile)
-                  : html`<div class="chat-tool-card__detail">${detail}</div>`
-                : nothing}
-              <div class="chat-tool-card__actions">${sidebarAction}</div>
-            </div>
-          `
-        : nothing}
-      ${showInputBlock
-        ? canRenderArgsAsKeyValue(inputBlockArgs)
-          ? renderArgsKeyValueList(inputBlockArgs)
-          : renderToolDataBlock({
-              label: t("chat.toolCards.toolInput"),
-              text: card.inputText!,
-            })
-        : nothing}
-      ${hasOutput
-        ? card.preview?.kind === "canvas"
-          ? renderRawOutputToggle(card.outputText!)
-          : renderToolDataBlock({
-              ...(isError ? { label: t("chat.toolCards.toolError") } : {}),
-              text: card.outputText!,
-            })
-        : isError
-          ? renderToolDataBlock({
-              label: t("chat.toolCards.toolError"),
-              text: t("chat.toolCards.noOutputFailed"),
-            })
-          : nothing}
+      ${
+        detail || canOpenSidebar
+          ? html`
+              <div class="chat-tool-card__header">
+                ${
+                  detail
+                    ? view.kind === "read"
+                      ? renderToolWorkspaceFilePath(detail, workspaceFilePath, onOpenWorkspaceFile)
+                      : html`<div class="chat-tool-card__detail">${detail}</div>`
+                    : nothing
+                }
+                <div class="chat-tool-card__actions">${sidebarAction}</div>
+              </div>
+            `
+          : nothing
+      }
+      ${
+        showInputBlock
+          ? canRenderArgsAsKeyValue(inputBlockArgs)
+            ? renderArgsKeyValueList(inputBlockArgs)
+            : renderToolDataBlock({
+                label: t("chat.toolCards.toolInput"),
+                text: card.inputText!,
+              })
+          : nothing
+      }
+      ${
+        hasOutput
+          ? card.preview?.kind === "canvas"
+            ? renderRawOutputToggle(card.outputText!)
+            : renderToolDataBlock({
+                ...(isError ? { label: t("chat.toolCards.toolError") } : {}),
+                text: card.outputText!,
+              })
+          : isError
+            ? renderToolDataBlock({
+                label: t("chat.toolCards.toolError"),
+                text: t("chat.toolCards.noOutputFailed"),
+              })
+            : nothing
+      }
       ${renderToolOutcome(outcome, card.exitCode)}
     </div>
   `;

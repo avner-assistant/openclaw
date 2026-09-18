@@ -1,8 +1,5 @@
 import { uniqueStrings } from "@openclaw/normalization-core/string-normalization";
-import {
-  resolveSessionStoreAgentId,
-  resolveSessionStoreKey,
-} from "../../gateway/session-store-key.js";
+import { resolveSessionStoreIdentity } from "../../gateway/session-store-key.js";
 import { isIncognitoSessionKey, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
 import { resolveIncognitoOpenClawAgentSqlitePath } from "../../state/openclaw-agent-db.js";
 import type { OpenClawConfig } from "../types.openclaw.js";
@@ -17,7 +14,6 @@ import {
   rehomeSqliteSessionDeliveryReferencesForCanonicalRepairBatch as rehomeSessionDeliveryReferencesForCanonicalRepairBatch,
 } from "./session-accessor.sqlite-canonical-repair.js";
 import {
-  countSessionEntryRowsReadOnly,
   ensureSessionEntrySync,
   hasSessionEntriesByStatusReadOnly,
   listSessionChildEntriesReadOnly,
@@ -25,6 +21,8 @@ import {
   listSessionEntriesReadOnly,
   listSessionEntryKeysReadOnly,
   loadExactSessionEntry,
+  loadExactSessionEntryCandidates,
+  loadExactSessionEntryCandidatesReadOnlyBatch,
   loadExactSessionEntryReadOnly,
   loadSessionEntry,
   loadSessionEntryReadOnly,
@@ -33,9 +31,10 @@ import {
   readSessionUpdatedAtCore,
   replaceSessionEntry,
   replaceSessionEntrySync,
-  resolveSessionEntry,
   upsertSessionEntryCore,
+  withSessionEntryReadOnlyScope,
 } from "./session-accessor.sqlite-entry.js";
+import { resolveSessionEntry } from "./session-accessor.sqlite-exact-read.js";
 import { readSessionStoreSummaryReadOnly } from "./session-accessor.sqlite-summary.js";
 import type {
   SessionAccessScope,
@@ -66,7 +65,6 @@ export { clearPluginOwnedSessionState };
 
 // SQLite is the only runtime session store. Re-export its canonical entry operations directly.
 export {
-  countSessionEntryRowsReadOnly,
   copySessionOwnedStateForCanonicalRepair,
   ensureTranscriptGenerationsForCanonicalRepair,
   ensureSessionEntrySync,
@@ -78,6 +76,8 @@ export {
   rehomeSessionDeliveryReferencesForCanonicalRepairBatch,
   listSessionEntryKeysReadOnly,
   loadExactSessionEntry,
+  loadExactSessionEntryCandidates,
+  loadExactSessionEntryCandidatesReadOnlyBatch,
   loadExactSessionEntryReadOnly,
   loadSessionEntry,
   loadSessionEntryReadOnly,
@@ -91,6 +91,7 @@ export {
   resolveSessionEntryFromStore,
   readSessionStoreSummaryReadOnly,
   upsertSessionEntryCore,
+  withSessionEntryReadOnlyScope,
 };
 
 /** Resolves a session directly through canonical SQLite row and alias ownership. */
@@ -168,17 +169,11 @@ function findCanonicalSessionEntryMatch(
   options: { readOnly?: boolean } = {},
 ): SessionEntrySummary | undefined {
   let selected: SessionEntrySummary | undefined;
-  for (const candidate of candidateKeys) {
-    const trimmed = candidate.trim();
-    if (!trimmed) {
-      continue;
-    }
-    const loadExact =
-      options.readOnly === false ? loadExactSessionEntry : loadExactSessionEntryReadOnly;
-    const match = loadExact({ ...scope, sessionKey: trimmed });
-    if (!match) {
-      continue;
-    }
+  for (const match of loadExactSessionEntryCandidates({
+    ...scope,
+    sessionKeys: candidateKeys,
+    readOnly: options.readOnly !== false,
+  })) {
     if (selected) {
       throw canonicalSessionKeyMigrationRequiredError(
         `duplicate rows resolve to canonical session key ${canonicalKey}`,
@@ -263,16 +258,11 @@ function resolveSessionEntryStoreTarget(
   scope: LogicalSessionAccessScope,
 ): ResolvedSessionEntryStoreTarget {
   const requestedKey = scope.sessionKey.trim();
-  // Scoped aliases can become global, so validate both the requested and fixed-store owners.
-  const requestedAgentId = scope.agentId
-    ? resolveSessionStoreAgentId(scope.cfg, requestedKey, scope.agentId)
-    : undefined;
-  const canonicalKey = resolveSessionStoreKey({
+  const { agentId, canonicalKey } = resolveSessionStoreIdentity({
     cfg: scope.cfg,
     sessionKey: requestedKey,
-    storeAgentId: requestedAgentId,
+    agentId: scope.agentId,
   });
-  const agentId = resolveSessionStoreAgentId(scope.cfg, canonicalKey, requestedAgentId);
   const scanTargets = buildLogicalSessionEntryCandidateKeys({
     agentId,
     canonicalKey,
@@ -430,8 +420,3 @@ export async function patchSessionEntryWithKey(
   const entry = await patchSessionEntryCore(scope, update, options);
   return entry ? { sessionKey: normalizeStoreSessionKey(scope.sessionKey), entry } : null;
 }
-
-/**
- * Copies one parent transcript into a new child transcript target.
- * This is for guarded callers that already own the eventual entry commit.
- */

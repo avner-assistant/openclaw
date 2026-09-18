@@ -12,6 +12,7 @@ import {
   sanitizeForPlainText,
 } from "openclaw/plugin-sdk/channel-outbound";
 import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/channel-send-result";
+import { PAIRING_APPROVED_MESSAGE } from "openclaw/plugin-sdk/channel-status";
 import { buildPassiveProbedChannelStatusSummary } from "openclaw/plugin-sdk/extension-shared";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import { questionGatewayRuntime } from "openclaw/plugin-sdk/question-gateway-runtime";
@@ -125,7 +126,7 @@ async function registerDeliveredIMessageApprovalPayload(
     payload: params.payload,
     results: params.results,
   });
-  (
+  await (
     await loadIMessageApprovalReactionsModule()
   ).registerIMessageApprovalReactionTargetForDeliveredPayload({
     accountId,
@@ -156,6 +157,8 @@ const imessageMessageAdapter = defineChannelMessageAdapter({
         accountId: ctx.accountId ?? undefined,
         deps: (ctx as typeof ctx & IMessageMessageContextExtras).deps,
         replyToId: ctx.replyToId ?? undefined,
+        assertDirectAdapterHandoff: ctx.assertDirectAdapterHandoff,
+        onPlatformSendDispatch: ctx.onPlatformSendDispatch,
         conversationReadOrigin: (ctx as typeof ctx & IMessageMessageContextExtras)
           .conversationReadOrigin,
       });
@@ -176,6 +179,8 @@ const imessageMessageAdapter = defineChannelMessageAdapter({
         accountId: ctx.accountId ?? undefined,
         deps: (ctx as typeof ctx & IMessageMessageContextExtras).deps,
         replyToId: ctx.replyToId ?? undefined,
+        assertDirectAdapterHandoff: ctx.assertDirectAdapterHandoff,
+        onPlatformSendDispatch: ctx.onPlatformSendDispatch,
         conversationReadOrigin: (ctx as typeof ctx & IMessageMessageContextExtras)
           .conversationReadOrigin,
         ...(ctx.onDeliveryResult
@@ -359,9 +364,16 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount, IMessageProb
             if (!chatType) {
               return null;
             }
+            const parsed = parseIMessageTarget(to);
+            const display =
+              parsed.kind === "handle" &&
+              !isCanonicalIMessageDirectHandle(parsed.to, normalizeIMessageHandle(parsed.to))
+                ? parsed.to.trim()
+                : undefined;
             return {
               to,
               kind: chatType === "direct" ? "user" : "group",
+              ...(display ? { display } : {}),
               source: "normalized" as const,
             };
           },
@@ -417,9 +429,16 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount, IMessageProb
     pairing: {
       text: {
         idLabel: "imessageSenderId",
-        message: "OpenClaw: your access has been approved.",
-        notify: async ({ id, cfg }) =>
-          await (await loadIMessageChannelRuntime()).notifyIMessageApproval({ id, cfg }),
+        message: PAIRING_APPROVED_MESSAGE,
+        notify: async (params) => {
+          await (
+            await loadIMessageChannelRuntime()
+          ).sendIMessageOutbound({
+            ...params,
+            to: params.id,
+            text: params.message,
+          });
+        },
       },
     },
     security: imessageSecurityAdapter,
@@ -460,7 +479,16 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount, IMessageProb
       },
       attachedResults: {
         channel: "imessage",
-        sendText: async ({ cfg, to, text, accountId, deps, replyToId }) =>
+        sendText: async ({
+          cfg,
+          to,
+          text,
+          accountId,
+          deps,
+          replyToId,
+          assertDirectAdapterHandoff,
+          onPlatformSendDispatch,
+        }) =>
           await (
             await loadIMessageChannelRuntime()
           ).sendIMessageOutbound({
@@ -470,6 +498,8 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount, IMessageProb
             accountId: accountId ?? undefined,
             deps,
             replyToId: replyToId ?? undefined,
+            assertDirectAdapterHandoff,
+            onPlatformSendDispatch,
           }),
         sendMedia: async ({
           cfg,
@@ -484,6 +514,8 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount, IMessageProb
           deps,
           replyToId,
           onDeliveryResult,
+          assertDirectAdapterHandoff,
+          onPlatformSendDispatch,
         }) =>
           await (
             await loadIMessageChannelRuntime()
@@ -499,6 +531,8 @@ export const imessagePlugin: ChannelPlugin<ResolvedIMessageAccount, IMessageProb
             accountId: accountId ?? undefined,
             deps,
             replyToId: replyToId ?? undefined,
+            assertDirectAdapterHandoff,
+            onPlatformSendDispatch,
             ...(onDeliveryResult
               ? {
                   onDeliveryResult: async (result) => {

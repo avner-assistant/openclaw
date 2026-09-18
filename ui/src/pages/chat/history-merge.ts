@@ -14,6 +14,7 @@ import type {
   ChatInputReceipts,
   ChatPendingInputsPage,
 } from "../../../../packages/gateway-protocol/src/schema/logs-chat.js";
+import type { GatewaySessionRow } from "../../api/types.ts";
 import type {
   ApplicationChatSubmissions,
   RetainedChatSubmission,
@@ -25,12 +26,19 @@ import {
   resolveUiSelectedSessionAgentId,
   resolveUiConversationIdentity,
 } from "../../lib/sessions/session-key.ts";
+import { matchesCompactionOperation } from "./chat-progress.ts";
+import type { CompactionStatus, ProviderPolicyNotice } from "./tool-stream-contract.ts";
 
 const chatSessionProjections = new WeakMap<
   object,
   {
     projection?: SessionProjectionState;
     runId?: string;
+    modelObservation?: {
+      runId: string;
+      model: string | undefined;
+      provider: string | undefined;
+    };
   }
 >();
 // Display ownership outlives active-state cleanup. It is not the foreground
@@ -49,7 +57,18 @@ type ChatSessionProjectionOwner = ChatComposerScope & {
   chatSubmissions?: ApplicationChatSubmissions;
   currentSessionId?: string | null;
   chatDisplayedLeafEntryId?: string | null;
+  compactionStatus?: CompactionStatus | null;
+  compactionClearTimer?: number | null;
+  providerPolicyNotice?: ProviderPolicyNotice | null;
 };
+
+function resetCompactionProjection(owner: ChatSessionProjectionOwner): void {
+  if (owner.compactionClearTimer != null) {
+    clearTimeout(owner.compactionClearTimer);
+    owner.compactionClearTimer = null;
+  }
+  owner.compactionStatus = null;
+}
 
 type ChatSessionProjectionScopeOptions = Omit<SessionProjectionScope, "sessionId"> & {
   sessionId?: string | null;
@@ -85,13 +104,8 @@ function readChatSubmissionBatch(owner: ChatSessionProjectionOwner, scope: Sessi
         handoff.pending = false;
       }
     },
-    receive: (
-      message: unknown,
-      identity: SessionMessageIdentity | null,
-      persisted = false,
-      acceptedRunId?: string,
-    ) => {
-      const runId = acceptedRunId ?? identity?.idempotencyKey?.replace(/:user$/u, "");
+    receive: (message: unknown, identity: SessionMessageIdentity | null, persisted = false) => {
+      const runId = identity?.idempotencyKey?.replace(/:user$/u, "");
       if (identity?.role !== "user" || !runId) {
         return message;
       }
@@ -99,26 +113,27 @@ function readChatSubmissionBatch(owner: ChatSessionProjectionOwner, scope: Sessi
       if (receipt) {
         retire(runId);
       }
+      const delivered = submissions.readDelivered(key + runId, client ?? owner);
+      if (
+        !receipt &&
+        !identity.isImported &&
+        delivered?.kind === "delivered" &&
+        !delivered.pending &&
+        (!delivered.sessionId || !scope.sessionId || delivered.sessionId === scope.sessionId)
+      ) {
+        return undefined;
+      }
       if (!handoff || identity.isImported || runId !== handoff.pendingRunId) {
         return message;
       }
       // Cached bytes for this retained submission are not a receipt. Omit
       // that snapshot copy; the pane admits the recorded local owner through
       // sendPending, preserving provenance even with sender/reply metadata.
-      if (!receipt && !acceptedRunId) {
+      if (!receipt) {
         return undefined;
       }
       handoff.pending = false;
-      const authoritative = asNullableRecord(message) ?? {};
-      // Initial inline bytes replace managed media, never duplicate it. The
-      // received object and its authoritative sender attribution stay intact.
-      const { media: _media, ...metadata } = asNullableRecord(authoritative["__openclaw"]) ?? {};
-      return {
-        ...handoff.message,
-        ...authoritative,
-        content: handoff.message.content,
-        __openclaw: metadata,
-      };
+      return message;
     },
   };
 }
@@ -197,8 +212,46 @@ export function getChatRunOwner(owner: object): string | undefined {
   return chatSessionProjections.get(owner)?.runId;
 }
 
+export function getChatRunOwnerSessionKey(owner: object): string | undefined {
+  const current = chatSessionProjections.get(owner);
+  return current?.runId ? current.projection?.scope.sessionKey : undefined;
+}
+
 export function setChatRunOwner(owner: object, runId: string | undefined): void {
-  chatSessionProjections.set(owner, { ...chatSessionProjections.get(owner), runId });
+  const current = chatSessionProjections.get(owner);
+  chatSessionProjections.set(owner, {
+    ...current,
+    runId,
+    modelObservation:
+      current?.modelObservation && current.modelObservation.runId === runId
+        ? current.modelObservation
+        : undefined,
+  });
+}
+
+export function observeChatRunModel(
+  owner: object,
+  runId: string | undefined,
+  row?: GatewaySessionRow,
+): void {
+  chatSessionProjections.set(owner, {
+    ...chatSessionProjections.get(owner),
+    modelObservation:
+      runId && row
+        ? { runId, model: row.activeModel, provider: row.activeModelProvider }
+        : undefined,
+  });
+}
+
+export function getChatModelObservedRunId(
+  owner: object,
+  row: GatewaySessionRow | undefined,
+): string | undefined {
+  const observation = chatSessionProjections.get(owner)?.modelObservation;
+  return observation?.model === row?.activeModel &&
+    observation?.provider === row?.activeModelProvider
+    ? observation?.runId
+    : undefined;
 }
 
 /** The only mutation boundary for the reducer and its rendered message array. */
@@ -208,15 +261,39 @@ export function publishChatSessionProjection(
 ): void {
   const current = chatSessionProjections.get(owner);
   const runId = current?.runId;
+  const previousScope = current?.projection?.scope;
+  const scopeChanged = previousScope && chatProjectionScopeChanged(previousScope, projection.scope);
+  if (scopeChanged) {
+    const status = owner.compactionStatus;
+    const sessionKeys = ["sessionKey", "sessionId", "agentId"] as const;
+    const sessionChanged = sessionKeys.some(
+      (key) =>
+        Object.hasOwn(projection.scope, key) &&
+        previousScope[key] !== undefined &&
+        previousScope[key] !== projection.scope[key],
+    );
+    if (sessionChanged) {
+      owner.providerPolicyNotice = null;
+    }
+    // Appending the completed marker advances the active leaf. Retain its live
+    // identity through that refresh, but never carry it into another session or branch.
+    if (
+      sessionChanged ||
+      !status ||
+      !projection.messages.some((message) => matchesCompactionOperation(message, status))
+    ) {
+      resetCompactionProjection(owner);
+    }
+  }
+  const retainedRunId =
+    runId && Object.hasOwn(projection.runs, runId) && !scopeChanged ? runId : undefined;
   chatSessionProjections.set(owner, {
     projection,
-    runId:
-      runId &&
-      Object.hasOwn(projection.runs, runId) &&
-      (!current.projection ||
-        !chatProjectionScopeChanged(current.projection.scope, projection.scope))
-        ? runId
-        : undefined,
+    modelObservation:
+      scopeChanged || (current?.modelObservation?.runId === runId && !retainedRunId)
+        ? undefined
+        : current?.modelObservation,
+    runId: retainedRunId,
   });
   // Run-only transitions share the transcript array. Preserve their ownership
   // updates above without traversing or republishing every displayed row.
@@ -237,7 +314,6 @@ export function publishChatSessionProjectionMessages(
   messages: readonly unknown[],
   options: {
     event?: SessionProjectionEvent;
-    retainSupersededMessages?: boolean;
     scope?: SessionProjectionScope;
   } = {},
 ): SessionProjectionState {
@@ -246,9 +322,9 @@ export function publishChatSessionProjectionMessages(
   const current = options.event ? reduceSessionProjection(base, { ...options.event, scope }) : base;
   const eventMessage = options.event?.type === "messagePersisted" ? options.event.message : null;
   const currentMessages = new Set(current.messages);
-  const supersededMessages = options.retainSupersededMessages
-    ? new Set<unknown>()
-    : new Set(base.messages.filter((message) => !currentMessages.has(message)));
+  const supersededMessages = new Set(
+    base.messages.filter((message) => !currentMessages.has(message)),
+  );
   const eventAccepted = eventMessage === null || currentMessages.has(eventMessage);
   const acceptedMessages: unknown[] = [];
   let eventPublished = false;
@@ -329,14 +405,26 @@ export function reconcileChatInputCustody(
   page: ChatPendingInputsPage | undefined,
   receipts: ChatInputReceipts = [],
 ) {
-  const scope = readChatSessionProjectionScope(owner, {
-    agentId: resolveUiSelectedSessionAgentId(owner),
-  });
   const acceptedRunIds = new Set(
     [...(page?.items ?? []), ...receipts]
       .map((item) => item.runId)
       .filter((runId) => typeof runId === "string"),
   );
+  retireChatSubmissionDisplay(owner, acceptedRunIds);
+  return {
+    acceptedRunIds,
+    page: page ?? { items: [], total: 0 },
+  };
+}
+
+/** Canonical custody retires local display ownership even outside the loaded history page. */
+export function retireChatSubmissionDisplay(
+  owner: ChatSessionProjectionOwner,
+  acceptedRunIds: ReadonlySet<string>,
+): void {
+  const scope = readChatSessionProjectionScope(owner, {
+    agentId: resolveUiSelectedSessionAgentId(owner),
+  });
   const submissions = readChatSubmissionBatch(owner, scope);
   submissions?.accept(acceptedRunIds);
   if (acceptedRunIds.size) {
@@ -359,24 +447,6 @@ export function reconcileChatInputCustody(
       });
     }
   }
-  return {
-    acceptedRunIds,
-    page:
-      page && submissions?.initial
-        ? {
-            ...page,
-            items: page.items.map((input) => ({
-              ...input,
-              message: submissions.receive(
-                input.message,
-                readSessionMessageIdentity(input.message),
-                false,
-                input.runId,
-              ),
-            })),
-          }
-        : (page ?? { items: [], total: 0 }),
-  };
 }
 
 export function shouldDisplayChatSubmission(
@@ -463,6 +533,10 @@ export function reduceChatSessionProjection(
     });
   }
   projection = reduceSessionProjection(projection, { ...preparedEvent, scope });
+  if (event.type === "sessionReset" && projection !== current) {
+    resetCompactionProjection(owner);
+    owner.providerPolicyNotice = null;
+  }
   // Without a transcript anchor this is best-effort display chronology, assuming
   // comparable browser/Gateway clocks. Never assign a sequence or reorder canonical
   // rows; older or untimestamped history stays ahead until authoritative adoption.

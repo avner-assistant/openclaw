@@ -5,13 +5,16 @@ import {
   OPENCLAW_AGENT_SCHEMA_VERSION,
   openOpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
+import { removeCanonicalValidationFromHistoricalAgentFixture } from "../state/openclaw-agent-db.test-support.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
 import { migrateLegacyMediaPersistence } from "./state-migrations.media-persistence.js";
 
 const tempDirs: string[] = [];
 
-function createV17AdditiveFixture(options: { schemaDrift?: "missing-cache-table" } = {}) {
+function createV17AdditiveFixture(
+  options: { schemaDrift?: "missing-cache-table" | "participant-dependency" } = {},
+) {
   const stateDir = makeTempDir(tempDirs, "media-persistence-v17-additive-");
   const env = { OPENCLAW_STATE_DIR: stateDir };
   const opened = openOpenClawAgentDatabase({ agentId: "main", env });
@@ -21,6 +24,7 @@ function createV17AdditiveFixture(options: { schemaDrift?: "missing-cache-table"
 
   const { DatabaseSync } = requireNodeSqlite();
   const database = new DatabaseSync(databasePath);
+  removeCanonicalValidationFromHistoricalAgentFixture(database);
   database.exec(`
     DROP TABLE session_participants;
     DROP TRIGGER session_conversations_route_context_invalidate_after_update;
@@ -29,6 +33,22 @@ function createV17AdditiveFixture(options: { schemaDrift?: "missing-cache-table"
     PRAGMA user_version = 17;
     UPDATE schema_meta SET schema_version = 17;
   `);
+  if (options.schemaDrift === "participant-dependency") {
+    database.exec(`
+      CREATE TABLE session_participants (
+        session_key TEXT NOT NULL,
+        actor_type TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        actor_source TEXT,
+        contribution_count INTEGER,
+        first_prompted_at INTEGER NOT NULL,
+        last_prompted_at INTEGER NOT NULL,
+        PRIMARY KEY (session_key, actor_type, actor_id),
+        FOREIGN KEY (session_key) REFERENCES session_nodes(session_key) ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX idx_test_participant_dependency ON session_participants(actor_id);
+    `);
+  }
   if (options.schemaDrift === "missing-cache-table") {
     database.exec("DROP TABLE cache_entries;");
   }
@@ -43,7 +63,7 @@ describe("legacy media persistence additive schema repair", () => {
     cleanupTempDirs(tempDirs);
   });
 
-  it("repairs same-version additive session schema before media validation", async () => {
+  it("repairs schema-19 additive session schema before media validation", async () => {
     const stateDir = makeTempDir(tempDirs, "media-persistence-current-additive-");
     const env = { OPENCLAW_STATE_DIR: stateDir };
     const opened = openOpenClawAgentDatabase({ agentId: "main", env });
@@ -64,7 +84,11 @@ describe("legacy media persistence additive schema repair", () => {
 
     const { DatabaseSync } = requireNodeSqlite();
     const database = new DatabaseSync(databasePath);
+    removeCanonicalValidationFromHistoricalAgentFixture(database);
     database.exec(`
+      DROP TABLE session_transcript_cold_archives;
+      PRAGMA user_version = 19;
+      UPDATE schema_meta SET schema_version = 19 WHERE meta_key = 'primary';
       DROP TRIGGER session_nodes_entry_valid_after_insert;
       DROP TRIGGER session_nodes_entry_valid_after_entry_update;
       DROP TRIGGER session_nodes_entry_valid_after_identity_update;
@@ -127,6 +151,46 @@ describe("legacy media persistence additive schema repair", () => {
       ).toEqual({ name: "idx_agent_transcript_event_identity_sequence" });
     } finally {
       repaired.close();
+    }
+  });
+
+  it("rolls back v17 preflight repairs when identity migration rejects drift", async () => {
+    const { databasePath, env } = createV17AdditiveFixture({
+      schemaDrift: "participant-dependency",
+    });
+    const { DatabaseSync } = requireNodeSqlite();
+    const result = await migrateLegacyMediaPersistence({ env });
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]).toContain(
+      "Participant migration cannot rebuild unknown indexes, views, or triggers",
+    );
+    closeOpenClawAgentDatabasesForTest();
+
+    const rolledBack = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(rolledBack.prepare("PRAGMA user_version").get()).toEqual({ user_version: 17 });
+      expect(
+        rolledBack
+          .prepare("SELECT name FROM pragma_table_info('session_conversations') WHERE name = ?")
+          .get("route_context_json"),
+      ).toBeUndefined();
+      expect(
+        rolledBack
+          .prepare("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND name = ?")
+          .get("session_conversations_route_context_invalidate_after_update"),
+      ).toBeUndefined();
+      expect(
+        rolledBack
+          .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = ?")
+          .get("idx_agent_transcript_event_identity_sequence"),
+      ).toBeUndefined();
+      expect(
+        rolledBack
+          .prepare("SELECT name FROM sqlite_schema WHERE type = 'index' AND name = ?")
+          .get("idx_test_participant_dependency"),
+      ).toEqual({ name: "idx_test_participant_dependency" });
+    } finally {
+      rolledBack.close();
     }
   });
 

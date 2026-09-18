@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { resolveManagedUnsetPathsForWrite } from "../config/config-path-mutation.js";
 import { replaceConfigFile } from "../config/config.js";
+import { getDeferredPluginMigrationConfigFacts } from "../config/deferred-plugin-migration-config.js";
 import { AUTO_MANAGED_CONFIG_META_PATHS } from "../config/io.meta.js";
 import { prepareConfigWriteTopology } from "../config/io.write-topology.js";
 import { ConfigMutationConflictError } from "../config/mutation-conflict.js";
@@ -47,6 +48,7 @@ import {
   printConfigDryRunResult,
   type ConfigSetDryRunResult,
 } from "./config-set-dryrun.js";
+import type { ConfigSetCurrentExpectation } from "./config-set-input.js";
 import { exitCliAfterOutput } from "./one-shot-exit.js";
 
 const GATEWAY_AUTH_MODE_PATH: PathSegment[] = ["gateway", "auth", "mode"];
@@ -222,9 +224,6 @@ function configApplyHintForOperations(
   if (paths.length === 0) {
     return "No gateway restart needed.";
   }
-  if (paths.some((path) => path === "plugins.entries" || path.startsWith("plugins.entries."))) {
-    return "Restart the gateway to apply.";
-  }
   const plan = buildGatewayReloadPlan(paths, { candidateConfig: afterConfig });
   if (
     plan.restartGateway ||
@@ -245,11 +244,40 @@ async function loadMutationSchema(): Promise<JsonSchemaRecord | undefined> {
   }
 }
 
+function assertConfigSetCurrentExpectation(params: {
+  authoredConfig: OpenClawConfig;
+  operation: ConfigSetOperation;
+  expectation: ConfigSetCurrentExpectation;
+}): void {
+  const current = getAtPath(params.authoredConfig, params.operation.setPath);
+  const matches =
+    params.expectation.kind === "absent"
+      ? !current.found
+      : current.found && isDeepStrictEqual(current.value, params.expectation.value);
+  if (!matches) {
+    throw new ConfigMutationConflictError(
+      "conditional config set expectation did not match the authored config",
+      { retryable: false },
+    );
+  }
+}
+
+function assertConfigSetCurrentExpectationPath(params: {
+  operation: ConfigSetOperation;
+  writePath: readonly PathSegment[];
+}): void {
+  if (!pathEquals(params.operation.requestedPath, params.writePath)) {
+    throw new Error("conditional config set requires a direct, non-redirected config path");
+  }
+}
+
 export async function runConfigOperations(params: {
   runtime: RuntimeEnv;
   operations: ConfigSetOperation[];
   options: ConfigMutationOptions;
   successMode: "set" | "patch";
+  currentExpectation?: ConfigSetCurrentExpectation;
+  beforePersistentApply?: () => void;
 }) {
   const { runtime, operations, options } = params;
   if (
@@ -265,6 +293,21 @@ export async function runConfigOperations(params: {
   }
   const mutationStart = await loadValidConfigForWrite(runtime);
   const { snapshot } = mutationStart;
+  const currentExpectation = params.currentExpectation;
+  let assertCurrentExpectation: (() => void) | undefined;
+  if (currentExpectation) {
+    const expectationOperation = operations[0];
+    if (!expectationOperation) {
+      throw new Error("conditional config set requires one resolved operation");
+    }
+    assertCurrentExpectation = () => {
+      assertConfigSetCurrentExpectation({
+        authoredConfig: snapshot.resolved,
+        operation: expectationOperation,
+        expectation: currentExpectation,
+      });
+    };
+  }
   // Mutate resolved config so runtime defaults never leak into the authored file.
   const next = structuredClone(snapshot.resolved) as Record<string, unknown>;
   const currentConfig = normalizeConfigMutationModelRefs(snapshot.resolved);
@@ -292,6 +335,12 @@ export async function runConfigOperations(params: {
     const merge =
       operation.mutation === "merge" || (options.merge && operation.mutation !== "replace");
     roster.prepare(operation, Boolean(merge));
+    if (currentExpectation) {
+      assertConfigSetCurrentExpectationPath({
+        operation,
+        writePath: roster.writePath(operation.setPath),
+      });
+    }
     if (operation.mutation === "delete") {
       const writePath = recordOperation(operation);
       const unsetResult = unsetAtPath(next, operation.setPath);
@@ -322,6 +371,7 @@ export async function runConfigOperations(params: {
           assertStrictConfigForMutation(
             currentConfig,
             mutationStart.writeOptions.basePluginMetadataSnapshot,
+            getDeferredPluginMigrationConfigFacts(snapshot.sourceConfig),
           );
         }
         throw new Error(message);
@@ -375,23 +425,34 @@ export async function runConfigOperations(params: {
     configPath: snapshot.path,
     unchanged: params.successMode === "set" && isDeepStrictEqual(currentConfig, nextConfig),
     pluginMetadataSnapshot: mutationStart.writeOptions.basePluginMetadataSnapshot,
+    deferredPluginMigrations: getDeferredPluginMigrationConfigFacts(snapshot.sourceConfig),
   });
   if (validation.kind === "dry-run") {
     printConfigDryRunResult(validation.result, runtime, options.json);
     return;
   }
   if (validation.kind === "unchanged") {
+    assertCurrentExpectation?.();
     runtime.log(info("No change"));
     return;
   }
 
   await replaceConfigFile({
-    nextConfig,
+    sourceConfig: nextConfig,
     snapshot,
     ...(snapshot.hash !== undefined ? { baseHash: snapshot.hash } : {}),
     writeOptions: {
       ...mutationStart.writeOptions,
       auditOrigin: "cli",
+      ...(assertCurrentExpectation || params.beforePersistentApply
+        ? {
+            assertConfigPathForWrite: () => {
+              mutationStart.writeOptions.assertConfigPathForWrite?.();
+              assertCurrentExpectation?.();
+              params.beforePersistentApply?.();
+            },
+          }
+        : {}),
       ...(unsetPaths.length > 0 ? { unsetPaths } : {}),
       ...(normalizedExplicitSetPaths.length > 0
         ? { explicitSetPaths: normalizedExplicitSetPaths }

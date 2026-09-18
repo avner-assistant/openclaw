@@ -300,6 +300,12 @@ function latestRun(runs: WorkflowRun[]) {
   )[0];
 }
 
+function latestNonSkippedScheduledRun(runs: WorkflowRun[]) {
+  return latestRun(
+    runs.filter((run) => !(run.status === "completed" && run.conclusion === "skipped")),
+  );
+}
+
 function runUpdatedAtMs(run: Pick<WorkflowRun, "updated_at"> | undefined) {
   const value = Date.parse(run?.updated_at ?? "");
   return Number.isFinite(value) ? value : null;
@@ -543,7 +549,10 @@ function successfulRunOrThrow(
   }: { allowManual?: boolean; nowMs?: number; ciGateJobs?: CiGateJob[] } = {},
 ) {
   const matchingRuns = matchingAuthoritativeRuns(runs, workflowName, sha, allowManual);
-  const run = workflowName === "CI" ? preferredCiRun(matchingRuns, nowMs) : latestRun(matchingRuns);
+  const run =
+    workflowName === "CI"
+      ? preferredCiRun(matchingRuns, nowMs)
+      : latestNonSkippedScheduledRun(matchingRuns);
   if (run && isSuccessfulRecentRun(run, nowMs)) {
     return run;
   }
@@ -625,7 +634,7 @@ function canCoverQueuedBuildArtifacts(
     if (matchingRuns.length === 0 && notApplicableScheduledWorkflowNames?.has(workflowName)) {
       return true;
     }
-    const run = latestRun(matchingRuns);
+    const run = latestNonSkippedScheduledRun(matchingRuns);
     return isSuccessfulRecentRun(run, nowMs);
   });
   if (!supportingGatesPassed) {
@@ -967,22 +976,20 @@ function loadCiReuseCandidateRuns(repo: string, headBranch: string) {
   }
   // The workflow selector above supplies the path identity that the REST
   // release-gate matcher normally reads from each full workflow-run object.
-  return runs.map(
-    (run): WorkflowRun => ({
-      id: optionalNumber(run, "databaseId"),
-      name: readStringField(run, "workflowName"),
-      event: readStringField(run, "event"),
-      status: readStringField(run, "status"),
-      conclusion: optionalNullableString(run, "conclusion"),
-      head_sha: readStringField(run, "headSha"),
-      head_branch: readStringField(run, "headBranch"),
-      path: CI_WORKFLOW_PATH,
-      created_at: readStringField(run, "createdAt"),
-      updated_at: readStringField(run, "updatedAt"),
-      html_url: readStringField(run, "url"),
-      display_title: readStringField(run, "displayTitle"),
-    }),
-  );
+  return runs.map((run): WorkflowRun => ({
+    id: optionalNumber(run, "databaseId"),
+    name: readStringField(run, "workflowName"),
+    event: readStringField(run, "event"),
+    status: readStringField(run, "status"),
+    conclusion: optionalNullableString(run, "conclusion"),
+    head_sha: readStringField(run, "headSha"),
+    head_branch: readStringField(run, "headBranch"),
+    path: CI_WORKFLOW_PATH,
+    created_at: readStringField(run, "createdAt"),
+    updated_at: readStringField(run, "updatedAt"),
+    html_url: readStringField(run, "url"),
+    display_title: readStringField(run, "displayTitle"),
+  }));
 }
 
 export function loadPullRequestCommitShas(

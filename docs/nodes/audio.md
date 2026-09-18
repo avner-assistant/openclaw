@@ -20,6 +20,14 @@ When audio understanding is enabled (or auto-detected), OpenClaw:
 
 When transcription succeeds, `CommandBody`/`RawBody` are also set to the transcript so slash commands still work. With `--verbose`, logs show when transcription runs and when it replaces the body.
 
+For plugin callers, file transcription returns `decision.attachmentProcessing`,
+keyed by attachment index. `"completed"` means a CLI or provider completed input
+processing, including successful empty output; `"omitted"` means none completed.
+This fact is separate from usable transcript text and attachment display markers.
+An absent field in an older SDK result means processing is unknown. For Discord
+batch voice, known omitted input prevents a partial utterance from becoming a
+conversation command or active-run control; valid captured notes remain saved.
+
 ## Auto-detection (default)
 
 If you have not configured models and `tools.media.audio.enabled` is not `false`, OpenClaw auto-detects in this order and stops at the first working option:
@@ -57,10 +65,27 @@ The provider inventory reports the local fallback winner separately from global 
 
 ## OpenAI transcription alongside ChatGPT/Codex OAuth
 
-An OpenAI API key and a ChatGPT/Codex OAuth login are separate credentials even
-though both use the `openai` provider. To keep OAuth first for normal text and
-reasoning requests while using an API key for speech-to-text, create a dedicated
-API-key profile and select it only on the audio model entry.
+OpenAI audio uses the standard `/v1/audio/transcriptions` endpoint with the
+selected API-key or ChatGPT/Codex OAuth profile. An OAuth login can transcribe
+when the account permits it; access, quota, and billing remain account-specific.
+The default model is `gpt-4o-transcribe`; configured models, prompts, and language
+hints are sent through the same multipart request for either credential class.
+Custom endpoints and request overrides require an API-key profile.
+
+Automatic selection can try another provider or local backend when the OpenAI
+plugin rejects authentication or configuration before uploading audio. The
+rejection remains visible in the attempt results; missing credentials simply
+leave that candidate unavailable. Once a provider attempts transcription,
+upload or HTTP failures are reported without automatically sending the recording
+to another provider or switching credential classes. Explicit model lists retain
+their configured fallback order.
+
+Unless a profile or OAuth auth mode is explicitly selected, an authored OpenAI
+provider key takes precedence over ambient OAuth for audio.
+To keep audio billing explicitly separate while keeping OAuth first for normal
+text and reasoning, create a dedicated API-key profile and select it only on the
+audio model entry. This is optional; an API key is not required merely to choose
+a transcription model.
 
 Repeat these steps for every agent that can receive audio. For a single-agent
 installation, run them once for that agent.
@@ -108,7 +133,7 @@ installation, run them once for that agent.
          models: [
            {
              provider: "openai",
-             model: "gpt-transcribe",
+             model: "gpt-4o-transcribe",
              profile: "openai:audio",
              baseUrl: "https://api.openai.com/v1",
              capabilities: ["audio"],
@@ -241,7 +266,7 @@ provider-wide rather than scoped to the audio model entry.
 
 ### Resident local STT
 
-Auto-detected local STT remains process-per-request. OpenClaw does not currently manage a resident whisper.cpp server because the standard Homebrew `whisper-cpp` package disables that server, while the upstream example has no configured bounded admission queue. A plugin-owned resident lifecycle needs a maintained packaged worker with health/startup, model residency, bounded queueing, cancellation/timeout, loopback-only no-auth operation, and no cloud fallback before it can be enabled safely.
+Auto-detected local STT remains process-per-request. OpenClaw does not manage a resident whisper.cpp server because the standard Homebrew `whisper-cpp` package disables that server, while the upstream example has no configured bounded admission queue. A plugin-owned resident lifecycle needs a maintained packaged worker with health/startup, model residency, bounded queueing, cancellation/timeout, loopback-only no-auth operation, and no cloud fallback before it can be enabled safely.
 
 ### Proxy environment support
 
@@ -289,3 +314,4 @@ On channels that support audio preflight, OpenClaw transcribes audio **before** 
 - [Media understanding](/nodes/media-understanding)
 - [Talk mode](/nodes/talk)
 - [Voice wake](/nodes/voicewake)
+- [Media overview](/tools/media-overview) — how the media tools fit together

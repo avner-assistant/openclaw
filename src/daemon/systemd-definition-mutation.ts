@@ -9,12 +9,16 @@ import { sha256Hex } from "../infra/crypto-digest.js";
 import { hasErrnoCode } from "../infra/errno.js";
 import { withFileLock } from "../infra/file-lock.js";
 import { canonicalPathFromExistingAncestor, findExistingAncestor } from "../infra/fs-safe.js";
+import { readServiceFileState, type GatewayServiceStagedFiles } from "./service-stage.js";
 import {
   assertServiceDefinitionWritable,
   type GatewayServiceEnv,
   type ServiceDefinitionMutationArtifact,
   type ServiceDefinitionMutationCapability,
+  type SystemdServiceReadBinding,
+  type SystemdServiceReadTarget,
 } from "./service-types.js";
+import { assertGatewayServiceUpdateCurrent } from "./service-update-authority.js";
 import {
   readSystemdServiceExecStart,
   resolveSystemdEnvironmentFilePath,
@@ -25,6 +29,8 @@ import { assertNoSystemSystemdOwnership, isSystemSystemdOwnershipError } from ".
 type Snapshot = { contents: Buffer; mode: number } | null;
 type SystemdDefinitionMutation = {
   snapshots: Map<string, Snapshot>;
+  stagedFiles: GatewayServiceStagedFiles["files"];
+  assertCurrent: () => Promise<void>;
   publish: (file: string, contents: string | Buffer, mode: number) => Promise<void>;
   restore: (file: string, snapshot: Snapshot) => Promise<void>;
 };
@@ -79,14 +85,24 @@ async function readStableFile(
   }
 }
 
-async function inspect(env: GatewayServiceEnv, environment: GatewayServiceEnv, timeoutMs?: number) {
+async function inspect(
+  env: GatewayServiceEnv,
+  environment: GatewayServiceEnv,
+  timeoutMs?: number,
+  requireLoaded = false,
+  systemdReadBinding?: SystemdServiceReadBinding,
+) {
   const { unit, generated } = resolveMutationTargets(env, environment);
   const snapshots = new Map<string, Snapshot>();
   const fingerprint = new Map<string, string>();
   let shared = new Set<string>();
   let sourcePath: string | undefined;
+  let artifactPath: string | undefined;
   const result = (capability: ServiceDefinitionMutationCapability) => ({
-    capability,
+    capability:
+      capability.kind !== "writable" && capability.artifact === "service-file" && artifactPath
+        ? { ...capability, path: artifactPath }
+        : capability,
     snapshots,
     fingerprint,
     shared,
@@ -97,6 +113,8 @@ async function inspect(env: GatewayServiceEnv, environment: GatewayServiceEnv, t
     const command = await readSystemdServiceExecStart(env, {
       requireEffective: true,
       timeoutMs,
+      ...(systemdReadBinding ? { systemdReadBinding } : {}),
+      ...(requireLoaded ? { requireLoaded: true } : {}),
     });
     sourcePath = command?.sourcePath;
     const targets = new Set([unit, generated, `${unit}.bak`]);
@@ -128,6 +146,7 @@ async function inspect(env: GatewayServiceEnv, environment: GatewayServiceEnv, t
             : "definition-directory";
       const inspected =
         directory && !required ? ((await findExistingAncestor(file)) ?? file) : file;
+      artifactPath = inspected;
       const stat = await fs.lstat(inspected).catch((error: unknown) => {
         if (required || !hasErrnoCode(error, "ENOENT")) {
           throw error;
@@ -174,17 +193,43 @@ async function inspect(env: GatewayServiceEnv, environment: GatewayServiceEnv, t
 
 export async function readSystemdDefinitionMutationCapability(
   env: GatewayServiceEnv,
-  options?: { environment?: GatewayServiceEnv; timeoutMs?: number },
+  options?: {
+    environment?: GatewayServiceEnv;
+    timeoutMs?: number;
+    requireLoaded?: boolean;
+    systemdReadBinding?: SystemdServiceReadBinding;
+    systemdReadTarget?: SystemdServiceReadTarget;
+  },
 ): Promise<ServiceDefinitionMutationCapability> {
+  if (options?.systemdReadTarget?.scope === "system") {
+    return { kind: "sealed", reason: "system-owned" };
+  }
   const selected = path.basename(resolveSystemdUnitPath(env));
   const names =
     selected === "openclaw-gateway.service" ? [selected, "openclaw.service"] : [selected];
-  const deadlineAt = options?.timeoutMs ? Date.now() + options.timeoutMs : undefined;
+  const budget =
+    options?.timeoutMs && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+      ? options.timeoutMs
+      : options?.requireLoaded
+        ? 5000
+        : undefined;
+  const deadlineAt = budget === undefined ? undefined : performance.now() + budget;
+  const remaining = () => {
+    if (deadlineAt === undefined) {
+      return undefined;
+    }
+    const value = deadlineAt - performance.now();
+    if (value <= 0) {
+      throw new Error("Definition inspection deadline expired.");
+    }
+    return value;
+  };
   for (const name of names) {
     try {
       await assertNoSystemSystemdOwnership(
         name,
-        deadlineAt === undefined ? undefined : Math.max(1, deadlineAt - Date.now()),
+        remaining(),
+        ...(options?.requireLoaded ? [{ requireLoaded: true }] : []),
       );
     } catch (error) {
       const owned =
@@ -194,19 +239,38 @@ export async function readSystemdDefinitionMutationCapability(
         : { kind: "unknown", reason: "system-ownership-unverified" };
     }
   }
-  return (await inspect(env, options?.environment ?? env, options?.timeoutMs)).capability;
+  try {
+    return (
+      await inspect(
+        env,
+        options?.environment ?? env,
+        remaining(),
+        options?.requireLoaded,
+        options?.systemdReadBinding,
+      )
+    ).capability;
+  } catch {
+    return { kind: "unknown", reason: "inspection-failed" };
+  }
 }
 
 export async function withSystemdDefinitionMutation<T>(
   env: GatewayServiceEnv,
   environment: GatewayServiceEnv,
   run: (mutation: SystemdDefinitionMutation) => Promise<T>,
+  options?: { timeoutMs?: number },
 ): Promise<T> {
-  let initial = await inspect(env, environment);
+  const deadlineAt =
+    options?.timeoutMs && options.timeoutMs > 0 ? performance.now() + options.timeoutMs : undefined;
+  const remainingTimeoutMs = () =>
+    deadlineAt === undefined ? undefined : Math.max(1, deadlineAt - performance.now());
+  let initial = await inspect(env, environment, remainingTimeoutMs());
   assertServiceDefinitionWritable(initial.capability);
   const { unit, generated } = resolveMutationTargets(env, environment);
   // Group-writable umasks must not create directories that inspect() would reject.
+  assertGatewayServiceUpdateCurrent();
   await fs.mkdir(path.dirname(unit), { recursive: true, mode: 0o755 });
+  assertGatewayServiceUpdateCurrent();
   await fs.mkdir(path.dirname(generated), { recursive: true, mode: 0o700 });
   const canonicalTargets = () =>
     Promise.all([unit, generated].map(canonicalPathFromExistingAncestor));
@@ -216,7 +280,7 @@ export async function withSystemdDefinitionMutation<T>(
     .toSorted();
   const execute = async (): Promise<T> => {
     const refresh = async (unchanged = false, firstUnitPublication = false) => {
-      const current = await inspect(env, environment);
+      const current = await inspect(env, environment, remainingTimeoutMs());
       assertServiceDefinitionWritable(current.capability);
       const expected = new Map(initial.fingerprint);
       // LoadUnit can reveal shared defaults only after the first base publication.
@@ -240,6 +304,7 @@ export async function withSystemdDefinitionMutation<T>(
     }
     const allowed = new Set([unit, generated, `${unit}.bak`]);
     const publications = new Map<string, string>();
+    const stagedFiles: GatewayServiceStagedFiles["files"] = [];
     const publish = async (
       file: string,
       contents: string | Buffer,
@@ -251,14 +316,28 @@ export async function withSystemdDefinitionMutation<T>(
       }
       await refresh(true);
       const previous = initial.snapshots.get(file) ?? null;
+      const before = await readServiceFileState(file);
+      await refresh(true);
       const directory = await fs.realpath(path.dirname(file));
       const temporary = path.join(directory, `${path.basename(file)}.${randomUUID()}.tmp`);
       try {
-        await fs.writeFile(temporary, contents, { flag: "wx", mode });
+        // Keep owner-write during preparation so the descriptor can be reopened
+        // even when the final snapshot mode is read-only.
+        assertGatewayServiceUpdateCurrent();
+        await fs.writeFile(temporary, contents, { flag: "wx", mode: mode | 0o200 });
+        const temporaryHandle = await fs.open(temporary, constants.O_WRONLY | constants.O_NOFOLLOW);
+        try {
+          // Creation mode is filtered by umask. Apply the admitted mode through
+          // the already-open inode so rollback restores the exact snapshot mode.
+          await temporaryHandle.chmod(mode);
+        } finally {
+          await temporaryHandle.close();
+        }
         const written = await fs.lstat(temporary);
         await refresh(true);
         // Locks coordinate OpenClaw writers, not external editors: POSIX rename
         // has no expected-inode check. Quiesce administrative edits during installation.
+        assertGatewayServiceUpdateCurrent();
         await fs.rename(temporary, file);
         // Re-read every artifact against this inode/payload. Canonical temp paths
         // keep cleanup in the original directory even if the publication alias moves.
@@ -267,6 +346,18 @@ export async function withSystemdDefinitionMutation<T>(
         publications.set(file, published);
         try {
           await refresh(true, file === unit && previous === null);
+          const after = await readServiceFileState(file);
+          if (
+            !after ||
+            after.dev !== written.dev ||
+            after.ino !== written.ino ||
+            after.sha256 !== sha256Hex(Buffer.from(contents)) ||
+            after.mode !== mode
+          ) {
+            throw new Error("Managed service artifact changed after publication.");
+          }
+          await refresh(true);
+          stagedFiles.push({ sourcePath: file, before, after });
         } catch (error) {
           // Roll back only our unchanged publication; a failing rollback must not recurse.
           if (rollback) {
@@ -286,7 +377,7 @@ export async function withSystemdDefinitionMutation<T>(
       if (published === undefined) {
         return;
       }
-      const current = await inspect(env, environment);
+      const current = await inspect(env, environment, remainingTimeoutMs());
       // A refreshed global snapshot never grants ownership of another artifact's edit.
       if (current.capability.kind !== "writable" || current.fingerprint.get(file) !== published) {
         return;
@@ -296,21 +387,44 @@ export async function withSystemdDefinitionMutation<T>(
         await publish(file, snapshot.contents, snapshot.mode, false);
       } else {
         await refresh(true);
+        assertGatewayServiceUpdateCurrent();
         await fs.unlink(file);
         initial.fingerprint.set(file, "missing");
         await refresh(true);
       }
       publications.delete(file);
     };
-    return await run({ snapshots: initial.snapshots, publish, restore });
+    return await run({
+      snapshots: initial.snapshots,
+      stagedFiles,
+      assertCurrent: async () => {
+        await refresh(true);
+        for (const file of stagedFiles) {
+          if (!isDeepStrictEqual(await readServiceFileState(file.sourcePath), file.after)) {
+            throw new Error("Staged service identity changed before native load.");
+          }
+        }
+        await refresh(true);
+      },
+      publish,
+      restore,
+    });
   };
-  const lockOptions = {
-    stale: 60_000,
-    retries: { retries: 100, factor: 1, minTimeout: 50, maxTimeout: 100 },
+  const lockOptions = () => {
+    const timeoutMs = remainingTimeoutMs();
+    return {
+      stale: 60_000,
+      retries: {
+        retries: timeoutMs === undefined ? 100 : Math.max(0, Math.ceil(timeoutMs / 50) - 1),
+        factor: 1,
+        minTimeout: 50,
+        maxTimeout: 100,
+      },
+    };
   };
   const acquire = async (index: number): Promise<T> =>
     index === targets.length
       ? execute()
-      : withFileLock(targets[index]!, lockOptions, () => acquire(index + 1));
+      : withFileLock(targets[index]!, lockOptions(), () => acquire(index + 1));
   return await acquire(0);
 }

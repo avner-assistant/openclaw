@@ -3,12 +3,13 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { rawDataToString } from "@openclaw/gateway-client/websocket-data";
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { WebSocket } from "ws";
+import { WebSocket, type RawData } from "ws";
 import { createDeferred } from "../../test/helpers/promise.js";
 import type { InternalGetReplyOptions } from "../auto-reply/reply/get-reply.types.js";
 import { replyRunRegistry } from "../auto-reply/reply/reply-run-registry.js";
-import { loadSessionEntry } from "../config/sessions/session-accessor.js";
+import { loadSessionEntry, updateSessionEntry } from "../config/sessions/session-accessor.js";
 import { replaceTranscriptEvents } from "../config/sessions/session-accessor.sqlite-transcript-write.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import {
@@ -29,9 +30,9 @@ import {
   getActiveSessionWorkAdmissionCount,
 } from "../sessions/session-lifecycle-admission.js";
 import { extractFirstTextBlock } from "../shared/chat-message-content.js";
-import { captureEnv, setTestEnvValue } from "../test-utils/env.js";
 import { GATEWAY_CLIENT_MODES, GATEWAY_CLIENT_NAMES } from "../utils/message-channel.js";
 import * as sessionLifecycleState from "./session-lifecycle-state.js";
+import { removeChatTestDirectory as removeTempDir } from "./session-test-directories.test-support.js";
 import {
   agentDiscoveryMock,
   connectOk,
@@ -109,10 +110,6 @@ describe("gateway server chat", () => {
   beforeEach(() => {
     dispatchInboundMessageMock.mockReset();
   });
-
-  const removeTempDir = async (dir: string): Promise<void> => {
-    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-  };
 
   const buildNoReplyHistoryFixture = (includeMixedAssistant = false) => [
     createGatewayHistoryText("user", "hello", 1),
@@ -421,59 +418,243 @@ describe("gateway server chat", () => {
     });
   });
 
-  test("delivers a queued WebChat reply over the live Gateway WebSocket after its source ends", async () => {
-    await withMainSessionStore(async () => {
-      let options: InternalGetReplyOptions | undefined;
-      const releaseDispatch = createDeferred();
-      dispatchInboundMessageMock.mockImplementationOnce(async (args: unknown) => {
-        options = (args as { replyOptions?: InternalGetReplyOptions }).replyOptions;
-        options?.turnAdoptionLifecycle?.onDeferred?.();
-        await releaseDispatch.promise;
-        return {};
-      });
+  test.each([
+    {
+      name: "text",
+      completion: { kind: "completed" as const },
+      payloads: [{ text: "late answer arrived over the live WebSocket" }],
+      state: "final",
+    },
+    { name: "empty", completion: { kind: "completed" as const }, payloads: [], state: "final" },
+    {
+      name: "canvas",
+      completion: { kind: "completed" as const, allowCanvasOnly: true as const },
+      payloads: [],
+      state: "final",
+    },
+    {
+      name: "silent-canvas",
+      completion: { kind: "completed" as const, allowCanvasOnly: true as const },
+      payloads: [],
+      state: "final",
+    },
+    {
+      name: "suppressed-canvas",
+      completion: { kind: "completed" as const },
+      payloads: [],
+      state: "final",
+    },
+    {
+      name: "failure",
+      completion: { kind: "failed" as const, error: "follow-up failed" },
+      payloads: [],
+      state: "error",
+    },
+    {
+      name: "timeout",
+      completion: {
+        kind: "failed" as const,
+        error: "provider timed out",
+        errorKind: "timeout" as const,
+        stopReason: "timeout",
+      },
+      payloads: [],
+      state: "error",
+    },
+    {
+      name: "abort",
+      completion: { kind: "aborted" as const, stopReason: "restart" },
+      payloads: [],
+      state: "aborted",
+    },
+  ])(
+    "completes a queued WebChat $name once after its source ends",
+    async ({ name, completion, payloads, state }) => {
+      await withMainSessionStore(async () => {
+        let options: InternalGetReplyOptions | undefined;
+        const releaseDispatch = createDeferred();
+        dispatchInboundMessageMock.mockImplementationOnce(async (args: unknown) => {
+          options = (args as { replyOptions?: InternalGetReplyOptions }).replyOptions;
+          options?.turnAdoptionLifecycle?.onDeferred?.();
+          await releaseDispatch.promise;
+          return {};
+        });
 
-      const sourceRunId = "idem-live-webchat-late-source";
-      const sourceFinal = onceMessage(
-        ws,
-        (event) =>
-          event.type === "event" &&
-          event.event === "chat" &&
-          event.payload?.state === "final" &&
-          event.payload?.runId === sourceRunId,
-        CHAT_RESPONSE_TIMEOUT_MS,
-      );
-      const response = await rpcReq(ws, "chat.send", {
-        sessionKey: "main",
-        message: "queue a reply while the previous run is active",
-        idempotencyKey: sourceRunId,
-      });
-      expect(response.ok).toBe(true);
-      await waitForFast(() => expect(options?.onQueuedFollowupReplyBatch).toBeTypeOf("function"));
-      releaseDispatch.resolve();
-      await sourceFinal;
+        const sourceRunId = `idem-live-webchat-late-source-${name}`;
+        const sourceFinal = onceMessage(
+          ws,
+          (event) =>
+            event.type === "event" &&
+            event.event === "chat" &&
+            event.payload?.state === "final" &&
+            event.payload?.runId === sourceRunId,
+          CHAT_RESPONSE_TIMEOUT_MS,
+        );
+        const response = await rpcReq(ws, "chat.send", {
+          sessionKey: "main",
+          message: "queue a reply while the previous run is active",
+          idempotencyKey: sourceRunId,
+        });
+        expect(response.ok).toBe(true);
+        await waitForFast(() => expect(options?.onQueuedFollowupReplyBatch).toBeTypeOf("function"));
+        releaseDispatch.resolve();
+        await sourceFinal;
 
-      const followupRunId = "idem-live-webchat-late-followup";
-      const queuedFinal = onceMessage(
-        ws,
-        (event) =>
-          event.type === "event" &&
-          event.event === "chat" &&
-          event.payload?.state === "final" &&
-          event.payload?.runId === followupRunId,
-        CHAT_RESPONSE_TIMEOUT_MS,
-      );
-      await options?.onQueuedFollowupReplyBatch?.({
-        kind: "queued-followup",
-        runId: followupRunId,
-        originatingChannel: "webchat",
-        payloads: [{ text: "late answer arrived over the live WebSocket" }],
+        const followupRunId = `idem-live-webchat-late-followup-${name}`;
+        const terminalFrames: unknown[] = [];
+        const deltaFrames: unknown[] = [];
+        const recordFollowup = (raw: RawData) => {
+          const frame = JSON.parse(rawDataToString(raw));
+          if (
+            frame.event === "chat" &&
+            frame.payload?.runId === followupRunId &&
+            frame.payload?.state !== "delta"
+          ) {
+            terminalFrames.push(frame.payload);
+          } else if (frame.event === "chat" && frame.payload?.runId === followupRunId) {
+            deltaFrames.push(frame.payload);
+          }
+        };
+        ws.on("message", recordFollowup);
+        const queuedFinal = onceMessage(
+          ws,
+          (event) =>
+            event.type === "event" &&
+            event.event === "chat" &&
+            event.payload?.state === state &&
+            event.payload?.runId === followupRunId,
+          CHAT_RESPONSE_TIMEOUT_MS,
+        );
+        registerAgentRunContext(followupRunId, { sessionKey: "main" });
+        registerAgentRunContext(followupRunId, { completionSource: "reply-dispatch" });
+        if (
+          name === "canvas" ||
+          name === "silent-canvas" ||
+          name === "suppressed-canvas" ||
+          name === "abort"
+        ) {
+          emitAgentEvent({
+            runId: followupRunId,
+            stream: "tool",
+            data: {
+              phase: "result",
+              name: "show_widget",
+              result: {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      kind: "canvas",
+                      presentation: {
+                        target: "assistant_message",
+                        title: "Result",
+                        sandbox: "scripts",
+                      },
+                      view: {
+                        id: "result",
+                        url: "/__openclaw__/canvas/documents/result/index.html",
+                      },
+                    }),
+                  },
+                ],
+              },
+            },
+          });
+        }
+        if (name === "text") {
+          await options?.onQueuedFollowupReplyBatch?.({
+            kind: "queued-followup",
+            completion: { kind: "progress" },
+            runId: followupRunId,
+            originatingChannel: "webchat",
+            payloads: [{ text: "working" }],
+          });
+        }
+        emitAgentEvent({
+          runId: followupRunId,
+          stream: "assistant",
+          data: {
+            text:
+              name === "canvas" || name === "suppressed-canvas"
+                ? ""
+                : name === "silent-canvas"
+                  ? "NO_REPLY"
+                  : "late answer arrived over the live WebSocket",
+          },
+        });
+        if (completion.kind === "failed" || completion.kind === "aborted") {
+          emitAgentEvent({
+            runId: followupRunId,
+            stream: "assistant",
+            data: {
+              text: "late answer arrived over the live WebSocket tail",
+              delta: " tail",
+            },
+          });
+        }
+        emitAgentEvent({
+          runId: followupRunId,
+          stream: "lifecycle",
+          data: {
+            phase: completion.kind === "failed" ? "error" : "end",
+            executionSettled: true,
+            ...(completion.kind === "aborted" ? { aborted: true, stopReason: "restart" } : {}),
+          },
+        });
+        await options?.onQueuedFollowupReplyBatch?.({
+          kind: "queued-followup",
+          completion,
+          runId: followupRunId,
+          originatingChannel: "webchat",
+          payloads,
+        });
+        const completed = await queuedFinal;
+        expect(completed.payload?.state).toBe(state);
+        if (name === "timeout") {
+          expect(completed.payload).toMatchObject({ errorKind: "timeout", stopReason: "timeout" });
+        }
+        if (name === "abort") {
+          expect(completed.payload).toMatchObject({ stopReason: "restart" });
+        }
+        if (name === "canvas" || name === "abort") {
+          expect(completed.payload?.message).toMatchObject({
+            content: expect.arrayContaining([expect.objectContaining({ type: "canvas" })]),
+          });
+        }
+        if (name === "silent-canvas" || name === "suppressed-canvas") {
+          expect(completed.payload?.message).toBeUndefined();
+        }
+        if (name === "text") {
+          expect(completed.payload?.message).toMatchObject({
+            content: [
+              { type: "text", text: "working" },
+              { type: "text", text: "late answer arrived over the live WebSocket" },
+            ],
+          });
+        }
+        await rpcReq(ws, "health", {});
+        expect(terminalFrames).toHaveLength(1);
+        if (completion.kind === "failed" || completion.kind === "aborted") {
+          expect(deltaFrames.at(-1)).toMatchObject({
+            message: {
+              content: expect.arrayContaining([
+                { type: "text", text: "late answer arrived over the live WebSocket tail" },
+              ]),
+            },
+          });
+        }
+        if (completion.kind === "aborted") {
+          expect(completed.payload?.message).toMatchObject({
+            content: expect.arrayContaining([
+              { type: "text", text: "late answer arrived over the live WebSocket tail" },
+            ]),
+          });
+        }
+        ws.off("message", recordFollowup);
+        options?.turnAdoptionLifecycle?.onSettled?.();
       });
-      expect((await queuedFinal).payload?.message).toMatchObject({
-        content: [{ type: "text", text: "late answer arrived over the live WebSocket" }],
-      });
-      options?.turnAdoptionLifecycle?.onSettled?.();
-    });
-  });
+    },
+  );
 
   const waitForAgentRunOk = async (runId: string, timeoutMs = 1_000) => {
     const res = await rpcReq(ws, "agent.wait", {
@@ -498,10 +679,7 @@ describe("gateway server chat", () => {
   };
 
   const mockBlockedChatReply = () => {
-    let releaseBlockedReply: (() => void) | undefined;
-    const blockedReply = new Promise<void>((resolve) => {
-      releaseBlockedReply = resolve;
-    });
+    const { promise: blockedReply, resolve: releaseBlockedReply } = createDeferred();
     mockGetReplyFromConfigOnce(async (_ctx, opts) => {
       await new Promise<void>((resolve) => {
         let settled = false;
@@ -925,7 +1103,12 @@ describe("gateway server chat", () => {
     let webchatWs: WebSocket | undefined;
     agentDiscoveryMock.enabled = true;
     agentDiscoveryMock.models = [
-      { id: "claude-opus-4-6", provider: "anthropic", input: ["text", "image"] },
+      {
+        id: "claude-opus-4-6",
+        name: "Claude Opus 4.6",
+        provider: "anthropic",
+        input: ["text", "image"],
+      },
     ];
 
     try {
@@ -1287,8 +1470,10 @@ describe("gateway server chat", () => {
             (o) =>
               o.type === "event" &&
               o.event === "sessions.changed" &&
-              o.payload?.reason === "chat.dispatch-error" &&
-              o.payload?.sessionKey === "agent:main:main",
+              o.payload?.sessionKey === "agent:main:main" &&
+              o.payload?.status === "failed" &&
+              o.payload?.lastRunId === "idem-dispatch-error-1" &&
+              o.payload?.hasActiveRun === false,
             8_000,
           );
           messagePromises.push(sessionChangedPromise);
@@ -1303,7 +1488,6 @@ describe("gateway server chat", () => {
           });
           markGatewayRestartDraining();
           rejectDispatch.resolve();
-          await errorPromise;
           await persistenceEntered.promise;
           const restartInspectors = {
             getQueueSize: () => 0,
@@ -1319,6 +1503,7 @@ describe("gateway server chat", () => {
             counts: { rootRequests: 1 },
           });
           releasePersistence.resolve();
+          await errorPromise;
           const changed = await sessionChangedPromise;
           await waitForFast(() => {
             expect(createSafeGatewayRestartPreflight(restartInspectors).safe).toBe(true);
@@ -1502,6 +1687,27 @@ describe("gateway server chat", () => {
         { type: "message", content: JSON.stringify({ ok: true, messageId: "content-result" }) },
       ],
       visible: true,
+    },
+    {
+      name: "chat.history hides failed delivery encoded in a result text block",
+      content: [{ type: "text", text: JSON.stringify({ ok: false }) }],
+      visible: false,
+    },
+    {
+      name: "chat.history honors a dry-run result after an earlier success block",
+      content: [
+        { type: "text", text: JSON.stringify({ ok: true }) },
+        { type: "message", content: JSON.stringify({ dryRun: true }) },
+      ],
+      visible: false,
+    },
+    {
+      name: "chat.history honors suppressed delivery after an earlier success block",
+      content: [
+        { type: "text", text: JSON.stringify({ ok: true }) },
+        { type: "message", content: JSON.stringify({ deliveryStatus: "suppressed" }) },
+      ],
+      visible: false,
     },
     {
       name: "chat.history hides suppressed delivery encoded in a result text block",
@@ -2365,9 +2571,8 @@ describe("gateway server chat", () => {
 
   test("chat.history persists assistant image data URLs as managed image blocks", async () => {
     await withMainSessionStore(
-      async (dir) => {
-        const envSnapshot = captureEnv(["OPENCLAW_STATE_DIR"]);
-        setTestEnvValue("OPENCLAW_STATE_DIR", dir);
+      async () => {
+        // Keep the connected owner's profile and media in the suite-owned state directory.
         const pngB64 =
           "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
         dispatchInboundMessageMock.mockImplementationOnce(async (...args: unknown[]) => {
@@ -2393,64 +2598,62 @@ describe("gateway server chat", () => {
           };
         });
 
-        try {
-          const finalPromise = onceMessage(
-            ws,
-            (o) =>
-              o.type === "event" &&
-              o.event === "chat" &&
-              o.payload?.state === "final" &&
-              o.payload?.runId === "idem-managed-image-history",
-            8000,
-          );
-          const res = await rpcReq(ws, "chat.send", {
+        const finalPromise = onceMessage(
+          ws,
+          (o) =>
+            o.type === "event" &&
+            o.event === "chat" &&
+            o.payload?.state === "final" &&
+            o.payload?.runId === "idem-managed-image-history",
+          8000,
+        );
+        await Promise.all([
+          rpcReq(ws, "chat.send", {
             sessionKey: "main",
             message: "show me an image",
             idempotencyKey: "idem-managed-image-history",
-          });
+          }).then((res) => {
+            expect(res.ok, JSON.stringify(res)).toBe(true);
+            expect(res.payload?.runId).toBe("idem-managed-image-history");
+          }),
+          finalPromise,
+        ]);
 
-          expect(res.ok).toBe(true);
-          expect(res.payload?.runId).toBe("idem-managed-image-history");
-          await finalPromise;
-
-          let assistantMessage: Record<string, unknown> | undefined;
-          await waitForFast(
-            async () => {
-              const historyRes = await rpcReq<{ messages?: unknown[] }>(ws, "chat.history", {
-                sessionKey: "main",
-              });
-              expect(historyRes.ok).toBe(true);
-              const messages = historyRes.payload?.messages ?? [];
-              assistantMessage = messages.find(
-                (message): message is Record<string, unknown> =>
-                  typeof message === "object" &&
-                  message !== null &&
-                  (message as { role?: unknown }).role === "assistant",
-              );
-              if (!assistantMessage) {
-                throw new Error("Expected assistant history message");
-              }
-            },
-            { timeout: CHAT_RESPONSE_TIMEOUT_MS },
-          );
-          const assistantContent = (assistantMessage as { content?: unknown[] }).content ?? [];
-          expect(assistantContent).toHaveLength(2);
-          expect(assistantContent[0]).toEqual({ type: "text", text: "Image reply" });
-          const imageBlock = expectRecordFields(assistantContent[1], {
-            type: "image",
-            alt: "Generated image 1",
-            mimeType: "image/png",
-            width: 1,
-            height: 1,
-          });
-          expect(String(imageBlock.url)).toContain("/api/chat/media/outgoing/");
-          expect(String(imageBlock.openUrl)).toContain("/full");
-          const serializedAssistant = JSON.stringify(assistantMessage);
-          expect(serializedAssistant).not.toContain("data:image/png;base64");
-          expect(serializedAssistant).not.toContain(pngB64);
-        } finally {
-          envSnapshot.restore();
-        }
+        let assistantMessage: Record<string, unknown> | undefined;
+        await waitForFast(
+          async () => {
+            const historyRes = await rpcReq<{ messages?: unknown[] }>(ws, "chat.history", {
+              sessionKey: "main",
+            });
+            expect(historyRes.ok).toBe(true);
+            const messages = historyRes.payload?.messages ?? [];
+            assistantMessage = messages.find(
+              (message): message is Record<string, unknown> =>
+                typeof message === "object" &&
+                message !== null &&
+                (message as { role?: unknown }).role === "assistant",
+            );
+            if (!assistantMessage) {
+              throw new Error("Expected assistant history message");
+            }
+          },
+          { timeout: CHAT_RESPONSE_TIMEOUT_MS },
+        );
+        const assistantContent = (assistantMessage as { content?: unknown[] }).content ?? [];
+        expect(assistantContent).toHaveLength(2);
+        expect(assistantContent[0]).toEqual({ type: "text", text: "Image reply" });
+        const imageBlock = expectRecordFields(assistantContent[1], {
+          type: "image",
+          alt: "Generated image 1",
+          mimeType: "image/png",
+          width: 1,
+          height: 1,
+        });
+        expect(String(imageBlock.url)).toContain("/api/chat/media/outgoing/");
+        expect(String(imageBlock.openUrl)).toContain("/full");
+        const serializedAssistant = JSON.stringify(assistantMessage);
+        expect(serializedAssistant).not.toContain("data:image/png;base64");
+        expect(serializedAssistant).not.toContain(pngB64);
       },
       { sessionId: "sess-managed-image-history" },
     );
@@ -2510,7 +2713,9 @@ describe("gateway server chat", () => {
         },
       });
       agentDiscoveryMock.enabled = true;
-      agentDiscoveryMock.models = [{ id: "gpt-5", provider: "openai", reasoning: true }];
+      agentDiscoveryMock.models = [
+        { id: "gpt-5", name: "GPT-5", provider: "openai", reasoning: true },
+      ];
       await prepareGatewayReplyRuntimeForTest({ force: true });
 
       const historyRes = await rpcReq<{
@@ -2605,49 +2810,108 @@ describe("gateway server chat", () => {
     });
   });
 
-  test("chat.send does not rotate sessions for operator.write reset triggers", async () => {
-    await withGatewayServer(async ({ port: portLocal }) => {
-      await withMainSessionStore(async () => {
-        let scopedWs: WebSocket | undefined;
-
-        try {
-          scopedWs = new WebSocket(`ws://127.0.0.1:${portLocal}`);
-          trackConnectChallengeNonce(scopedWs);
-          await new Promise<void>((resolve) => {
-            scopedWs?.once("open", resolve);
-          });
-          await connectOk(scopedWs, {
-            scopes: ["operator.write"],
-          });
-
-          const sendRes = await rpcReq(scopedWs, "chat.send", {
-            sessionKey: "main",
-            message: "/reset",
-            idempotencyKey: "idem-write-scope-reset-no-rotate",
-          });
-          expect(sendRes.ok).toBe(true);
-
-          const waitRes = await rpcReq(scopedWs, "agent.wait", {
-            runId: "idem-write-scope-reset-no-rotate",
-            timeoutMs: 1_000,
-          });
-          expect(waitRes.ok).toBe(true);
-          expect(waitRes.payload?.status).toBe("ok");
-
+  test.each([
+    "/new",
+    "/new Create a note",
+    "/reset",
+    "/reset Create a note",
+    "/reset soft",
+    "/reset soft Create a note",
+  ])(
+    "chat.send does not rotate sessions for operator.write reset triggers and replies with denial: %s",
+    async (message) => {
+      const { getReplyFromConfig } = await import("../auto-reply/reply/get-reply.js");
+      const { withFullRuntimeReplyConfig } =
+        await import("../auto-reply/reply/get-reply-fast-path.js");
+      const replyRun = await import("../auto-reply/reply/get-reply-run.js");
+      const runSpy = vi.spyOn(replyRun, "runPreparedReply").mockResolvedValue(undefined);
+      // Keep real command/session dispatch; only intercept the model-run boundary.
+      mockGetReplyFromConfigOnce((ctx, opts, cfg) =>
+        getReplyFromConfig(ctx, opts, cfg ? withFullRuntimeReplyConfig(cfg) : cfg),
+      );
+      try {
+        await withMainSessionStore(async () => {
           const sessionStorePath = testState.sessionStorePath;
           if (!sessionStorePath) {
             throw new Error("session store path was not initialized");
           }
+          const resetState = {
+            lifecycleRevision: "before-reset",
+            cliSessionIds: { "claude-cli": "existing-cli-binding" },
+          };
           expect(
-            loadSessionEntry({ sessionKey: "agent:main:main", storePath: sessionStorePath })
-              ?.sessionId,
-          ).toBe("sess-main");
-        } finally {
-          scopedWs?.close();
-        }
-      });
-    });
-  });
+            await updateSessionEntry(
+              { sessionKey: "agent:main:main", storePath: sessionStorePath },
+              () => resetState,
+            ),
+          ).not.toBeNull();
+          let scopedWs: WebSocket | undefined;
+
+          try {
+            scopedWs = new WebSocket(`ws://127.0.0.1:${port}`);
+            trackConnectChallengeNonce(scopedWs);
+            await new Promise<void>((resolve) => {
+              scopedWs?.once("open", resolve);
+            });
+            await connectOk(scopedWs, {
+              scopes: ["operator.read", "operator.write"],
+            });
+
+            const runId = `idem-write-scope-reset-${message}`;
+            const finalPromise = onceMessage(
+              scopedWs,
+              (event) =>
+                event.type === "event" &&
+                event.event === "chat" &&
+                event.payload?.state === "final" &&
+                event.payload?.runId === runId,
+            );
+            // Observe both promises immediately so an RPC failure cannot strand the final listener.
+            const [sendRes, final] = await Promise.all([
+              rpcReq(scopedWs, "chat.send", {
+                sessionKey: "main",
+                message,
+                idempotencyKey: runId,
+              }),
+              finalPromise,
+            ]);
+            expect(sendRes.ok).toBe(true);
+            expect(sendRes.payload?.status).toBe("started");
+
+            const waitRes = await rpcReq(scopedWs, "agent.wait", {
+              runId,
+              timeoutMs: 1_000,
+            });
+            expect(waitRes.ok).toBe(true);
+            expect(waitRes.payload?.status).toBe("ok");
+
+            expect(
+              loadSessionEntry({ sessionKey: "agent:main:main", storePath: sessionStorePath }),
+            ).toMatchObject({ sessionId: "sess-main", ...resetState });
+            expect(runSpy).not.toHaveBeenCalled();
+            expect(extractFirstTextBlock(final.payload?.message)).toMatch(/not authorized/i);
+            expect(extractFirstTextBlock(final.payload?.message)).toContain("operator.admin");
+            const history = await rpcReq<{ sessionId?: string; messages?: unknown[] }>(
+              scopedWs,
+              "chat.history",
+              {
+                sessionKey: "main",
+              },
+            );
+            expect(history.ok).toBe(true);
+            expect(history.payload?.sessionId).toBe("sess-main");
+            expect(collectHistoryTextValues(history.payload?.messages ?? [])).toContain(
+              extractFirstTextBlock(final.payload?.message),
+            );
+          } finally {
+            scopedWs?.close();
+          }
+        });
+      } finally {
+        runSpy.mockRestore();
+      }
+    },
+  );
 
   test("agent.wait resolves chat.send runs that finish without lifecycle events", async () => {
     await withMainSessionStore(async () => {
@@ -2659,10 +2923,7 @@ describe("gateway server chat", () => {
 
   test("agent.wait ignores stale chat dedupe when an agent run with the same runId is in flight", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-gw-"));
-    let resolveAgentRun: (() => void) | undefined;
-    const blockedAgentRun = new Promise<void>((resolve) => {
-      resolveAgentRun = resolve;
-    });
+    const { promise: blockedAgentRun, resolve: resolveAgentRun } = createDeferred();
     const agentSpy = vi.mocked(agentCommandMock);
     agentSpy.mockImplementationOnce(async () => {
       await blockedAgentRun;
@@ -2765,7 +3026,7 @@ describe("gateway server chat", () => {
     await withMainSessionStore(async () => {
       const runId = "idem-wait-chat-active-vs-stale-agent";
       const seedAgentRes = await rpcReq(ws, "agent", {
-        sessionKey: "main",
+        sessionKey: "agent:main:stale-wait-snapshot",
         message: "seed stale agent snapshot",
         idempotencyKey: runId,
       });

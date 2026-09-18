@@ -1,5 +1,5 @@
 import type { TurnAdoptionLifecycle } from "../../auto-reply/get-reply-options.types.js";
-import type { QueuedFollowupReplyBatch } from "../../auto-reply/reply/queue/types.js";
+import type { QueuedFollowupReplyDelivery } from "../../auto-reply/reply/queue/types.js";
 import {
   completeQueuedChatTurn,
   registerQueuedChatTurn,
@@ -36,7 +36,7 @@ export function createChatSendTurnAdoptionLifecycle(params: {
   lifecycle: TurnAdoptionLifecycle;
   isEnqueued: () => boolean;
   onQueueDisposition: (reason: string) => void;
-  onQueuedFollowupReplyBatch: (batch: QueuedFollowupReplyBatch) => Promise<void>;
+  onQueuedFollowupReplyBatch: QueuedFollowupReplyDelivery;
 } {
   let enqueued = false;
   let releaseWorkAdmission: (() => void) | undefined;
@@ -53,6 +53,7 @@ export function createChatSendTurnAdoptionLifecycle(params: {
   const lifecycle: TurnAdoptionLifecycle = {
     // Gateway cancel identity only — share collect key via ownerKey.
     admission: "cancel-only",
+    abortSignal: params.controller.signal,
     ...(params.originatingLeafEntryId !== undefined
       ? { originatingLeafEntryId: params.originatingLeafEntryId }
       : {}),

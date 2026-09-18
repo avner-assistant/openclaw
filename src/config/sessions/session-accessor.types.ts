@@ -70,9 +70,17 @@ export type LogicalSessionAccessScope = {
   sessionKey: string;
 };
 
-export type SessionEntryListScope = Partial<Omit<SessionAccessScope, "sessionKey">> & {
-  /** Listing views do not consume the large per-run prompt snapshots. */
+export type SessionEntryReadScope = SessionAccessScope & {
+  /** Metadata views omit the large per-run prompt snapshots before decoding. */
   projection?: "full" | "list";
+};
+
+/** Address of the physical store admitted by an entry read; never retains its handle. */
+export type SessionEntryReadSource = Readonly<{ agentId: string; path: string }>;
+
+export type SessionEntryListScope = Partial<Omit<SessionEntryReadScope, "sessionKey">> & {
+  /** Select exact persisted keys after validating the complete listing snapshot. */
+  sessionKeys?: readonly string[];
 };
 
 export type ResolvedSessionEntryAccessTarget = {
@@ -162,6 +170,8 @@ export type SessionTranscriptReadScope = Omit<SessionTranscriptRuntimeScope, "se
   sessionKey?: string;
   /** Entry already loaded by hot callers; avoids rereading the session store. */
   sessionEntry?: Partial<Pick<SessionEntry, "sessionId">>;
+  /** Byte budget enforced via SQL before parsing transcript event rows. */
+  maxEventBytes?: number;
 };
 
 export interface SessionTranscriptReadTarget {
@@ -306,6 +316,8 @@ export type TranscriptMessageAppendOptions<TMessage> = {
   cwd?: string;
   /** How duplicate message idempotency keys are detected before append. */
   idempotencyLookup?: "scan" | "scan-assistant" | "caller-checked";
+  /** Reject the append when the transcript changed since the caller loaded it. */
+  expectedMutationAt?: number | null;
   /** Provider/channel message payload to persist. */
   message: TMessage;
   /** Testable timestamp override for the generated transcript entry. */
@@ -316,6 +328,8 @@ export type TranscriptMessageAppendOptions<TMessage> = {
   parentId?: string | null;
   /** Optional finalizer that runs after duplicate detection but before persistence. */
   prepareMessageAfterIdempotencyCheck?: (message: TMessage) => TMessage | undefined;
+  /** Synchronous assertion after replay, custody, preparation, and redaction, before insertion. */
+  beforeFreshMessageCommit?: () => void;
   /** Allow append without parent-link migration for large legacy linear transcripts. */
   useRawWhenLinear?: boolean;
 };
@@ -422,7 +436,8 @@ export type SessionTranscriptTurnPersistOptions = {
   /** Exact run provenance persisted on output rows and emitted on terminal assistant updates. */
   runId?: string;
   /**
-   * Complete appended or matched committed messages before owner drain or publication.
+   * Complete appended or matched messages synchronously after guarded SQLite commit,
+   * before the write yields to cancellation, owner drain, or transcript publication.
    * The canonical result preserves replay bytes. Throws cannot roll back committed rows.
    */
   onMessageCommitted?: (result: TranscriptMessageAppendResult<unknown>) => void;
@@ -475,6 +490,8 @@ export type SessionTranscriptManualTrimPreflightResult =
     };
 
 export type SessionEntryUpdateOptions = {
+  /** Let this write satisfy a legacy updatedAt=0 pending reset without rotating lifecycle identity. */
+  consumePendingReset?: boolean;
   /** Skip prune/cap/rotation maintenance for specialized internal updates. */
   skipMaintenance?: boolean;
   /** Let the writer cache retain the updated object without cloning. */
@@ -536,6 +553,8 @@ export type ReplySessionInitializationCommitResult =
 export type SessionEntryPatchOptions = {
   /** Synchronous final ownership check executed inside the commit transaction. */
   assertCommitAllowed?: () => void;
+  /** Let this write satisfy a legacy updatedAt=0 pending reset without rotating lifecycle identity. */
+  consumePendingReset?: boolean;
   /** Entry to synthesize when a patch operation is allowed to create. */
   fallbackEntry?: SessionEntry;
   /** Fully resolved maintenance settings when the caller already has config loaded. */
@@ -680,6 +699,7 @@ export type ForkSessionEntryFromParentTargetResult =
 
 export type ForkSessionEntryFromParentTargetParams = {
   agentId?: string;
+  commitGuard?: () => void;
   decisionSkipPatch?: (params: {
     decision: Extract<SessionParentForkDecision, { status: "skip" }>;
     entry: SessionEntry;
@@ -744,6 +764,13 @@ export type SessionMessageCutMutationParams = {
   sessionStoreKey?: string;
   storePath?: string;
   targetKey?: string;
+  /** Canonical local workspace prepared by the fork lifecycle before transcript commit. */
+  forkWorkspace?: Pick<
+    SessionEntry,
+    "projectId" | "spawnedCwd" | "spawnedWorkspaceDir" | "sessionRoot"
+  >;
+  /** Distinct repository owner prepared by the fork lifecycle before transcript commit. */
+  repositoryWorkspaceId?: string;
 };
 
 export type SessionBranchSummary = {
@@ -834,20 +861,13 @@ export type RestoreSessionFromCompactionCheckpointParams = {
   storePath: string;
 };
 
-export type TemporarySessionMappingPreservationResult<T> = {
-  /** Result returned by the operation while the temporary mapping may exist. */
-  result: T;
-  /** Snapshot failure; callers may continue when temporary cleanup is best-effort. */
-  snapshotFailure?: string;
-  /** Restore/delete failure for the original temporary mapping state. */
-  restoreFailure?: string;
-};
-
 export type SessionEntryCreateWithTranscriptContext = {
   /** Current entry under the requested key before creation, if any. */
   existingEntry?: SessionEntry;
-  /** Current entries snapshot for validation rules such as label uniqueness. */
-  sessionEntries: Record<string, SessionEntry>;
+  /** Exact normalized target from the same snapshot, distinct from an alias-resolved entry. */
+  targetEntry?: SessionEntry;
+  /** Detached sibling-label facts; excludes the exact normalized target only. */
+  isLabelInUse: (label: string) => boolean;
 };
 
 export type SessionEntryCreateWithTranscriptResult<TError = string> =

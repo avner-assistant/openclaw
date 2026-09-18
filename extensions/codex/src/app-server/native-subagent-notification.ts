@@ -1,6 +1,6 @@
 /**
  * Extracts native Codex subagent completion notifications from trusted
- * inter-agent commentary messages emitted by the app-server.
+ * contextual and inter-agent messages emitted by the app-server.
  */
 import { readStringField as readString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { CodexServerNotification, JsonObject, JsonValue } from "./protocol.js";
@@ -40,14 +40,55 @@ function extractCodexNativeSubagentCompletions(
   if (!item) {
     return [];
   }
-  const text = readTrustedInterAgentCommunicationContent(item);
-  if (!text) {
+  if (notification.method === "rawResponseItem/completed" && item.role === "user") {
+    return readTrustedContextualCompletions(item);
+  }
+  const communication = readTrustedInterAgentCommunication(item);
+  const text = communication?.content;
+  if (typeof text !== "string" || !text) {
     return [];
   }
-  const author = readTrustedInterAgentCommunicationAuthor(item);
   return extractCodexNativeSubagentCompletionsFromText(text).filter(
-    (completion) => completion.agentPath === author,
+    (completion) => completion.agentPath === communication?.author,
   );
+}
+
+function readTrustedContextualCompletions(
+  item: JsonObject,
+): CodexNativeSubagentNotificationCompletion[] {
+  const content = item.content;
+  const metadata = item.internal_chat_message_metadata_passthrough;
+  const kinds = isJsonObject(metadata) ? metadata.content_item_kinds : undefined;
+  if (
+    item.type !== "message" ||
+    !Array.isArray(content) ||
+    !Array.isArray(kinds) ||
+    content.length !== kinds.length
+  ) {
+    return [];
+  }
+  // Codex classifies each contextual fragment separately. Adjacent user text
+  // cannot borrow the native fragment's classification or forge its receipt.
+  return content.flatMap((entry, index) => {
+    if (
+      kinds[index] !== "multi_agent.subagent_notification" ||
+      !isJsonObject(entry) ||
+      entry.type !== "input_text"
+    ) {
+      return [];
+    }
+    const text = readString(entry, "text")?.trim();
+    if (
+      !text?.startsWith(CODEX_SUBAGENT_NOTIFICATION_START) ||
+      !text.endsWith(CODEX_SUBAGENT_NOTIFICATION_END)
+    ) {
+      return [];
+    }
+    const completion = parseCodexNativeSubagentNotificationBody(
+      text.slice(CODEX_SUBAGENT_NOTIFICATION_START.length, -CODEX_SUBAGENT_NOTIFICATION_END.length),
+    );
+    return completion ? [completion] : [];
+  });
 }
 
 /** Parses one or more tagged subagent completion payloads from commentary text. */
@@ -83,11 +124,31 @@ export const codexNativeSubagentNotifications = {
 
 /** Reads native delivery receipts, leaving status and result ownership with the child lifecycle. */
 function readDeliveredNativeCompletionPaths(notification: CodexServerNotification): string[] {
+  const params = isJsonObject(notification.params) ? notification.params : undefined;
+  const item = isJsonObject(params?.item) ? params.item : undefined;
+  // V1 wait returns these exact terminal states to the foreground parent.
+  // The wait tool finishing alone says nothing about a still-running child.
+  if (
+    notification.method === "item/completed" &&
+    item?.type === "collabAgentToolCall" &&
+    item.tool === "wait" &&
+    (item.status === "completed" || item.status === "failed") &&
+    item.senderThreadId === params?.threadId &&
+    Array.isArray(item.receiverThreadIds) &&
+    isJsonObject(item.agentsStates)
+  ) {
+    const receivers = new Set(item.receiverThreadIds);
+    return Object.entries(item.agentsStates).flatMap(([threadId, state]) =>
+      receivers.has(threadId) &&
+      isJsonObject(state) &&
+      ["completed", "errored", "shutdown", "notFound"].includes(readString(state, "status") ?? "")
+        ? [threadId]
+        : [],
+    );
+  }
   if (notification.method !== "rawResponseItem/completed") {
     return [];
   }
-  const params = isJsonObject(notification.params) ? notification.params : undefined;
-  const item = isJsonObject(params?.item) ? params.item : undefined;
   if (!item || readString(item, "type") !== "agent_message") {
     return extractCodexNativeSubagentCompletions(notification).map(
       (completion) => completion.agentPath,
@@ -224,19 +285,9 @@ function completedWithoutFinalAssistantMessage(): {
   kind: "no_final_assistant_message";
 } {
   return {
-    text: "Codex native subagent completed without a final assistant message.",
+    text: "Subagent completed without a final assistant message.",
     kind: "no_final_assistant_message",
   };
-}
-
-function readTrustedInterAgentCommunicationContent(item: JsonObject): string | undefined {
-  const communication = readTrustedInterAgentCommunication(item);
-  return typeof communication?.content === "string" ? communication.content : undefined;
-}
-
-function readTrustedInterAgentCommunicationAuthor(item: JsonObject): string | undefined {
-  const communication = readTrustedInterAgentCommunication(item);
-  return typeof communication?.author === "string" ? communication.author : undefined;
 }
 
 function readTrustedInterAgentCommunication(item: JsonObject): JsonObject | undefined {

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAgentLifecycleTerminalBackstop } from "../../auto-reply/reply/agent-lifecycle-terminal.js";
+import { getAgentEventLifecycleGeneration } from "../../infra/agent-events.js";
 import { createSourceDeliveryPlan } from "../../infra/outbound/source-delivery-plan.js";
 import type { SkillSnapshot } from "../../skills/types.js";
 import type { CronJob } from "../types.js";
@@ -193,6 +195,8 @@ describe("executeCronRun sourceDelivery mapping", () => {
 
     expect(runEmbeddedAgentMock).toHaveBeenCalledTimes(1);
     const args = getEmbeddedRunArg();
+    expect(args.runId).toBe("source-delivery-run");
+    expect(args.sessionId).toBe("test-session-id");
     expect(args.sourceReplyDeliveryMode).toBeUndefined();
     expect(args.allowEmptyAssistantReplyAsSilent).toBe(true);
     expect(args.terminalReplyExpectation).toBe("optional");
@@ -386,6 +390,7 @@ function makeExecuteCronRunParams(overrides: Record<string, unknown> = {}) {
   };
 
   return {
+    runId: "source-delivery-run",
     cfg: {},
     cfgWithAgentDefaults: {},
     job,
@@ -405,6 +410,12 @@ function makeExecuteCronRunParams(overrides: Record<string, unknown> = {}) {
     cronSession: makeCronSession() as unknown as MutableCronSession,
     commandBody: "run a task",
     persistSessionEntry: vi.fn().mockResolvedValue(undefined),
+    lifecycle: createAgentLifecycleTerminalBackstop({
+      runId: "source-delivery-run",
+      sessionKey: "cron:source-delivery-guard:run:test-session-id",
+      getLifecycleGeneration: getAgentEventLifecycleGeneration,
+      resolveTerminationFields: () => ({}),
+    }),
     abortReason: () => "aborted",
     isAborted: () => false,
     immutableThinkLevel: undefined,

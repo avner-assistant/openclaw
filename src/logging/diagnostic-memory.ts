@@ -124,12 +124,12 @@ function resolveThresholds(
   const rssWarningBase = useBunRssCaps
     ? BUN_HEAP_WARNING_MAX_BYTES
     : useHeapForRss
-      ? heapWarningBytes
+      ? Math.max(DEFAULT_RSS_WARNING_BYTES, heapWarningBytes)
       : DEFAULT_RSS_WARNING_BYTES;
   const rssCriticalBase = useBunRssCaps
     ? BUN_HEAP_CRITICAL_MAX_BYTES
     : useHeapForRss
-      ? heapCriticalBytes
+      ? Math.max(DEFAULT_RSS_CRITICAL_BYTES, heapCriticalBytes)
       : DEFAULT_RSS_CRITICAL_BYTES;
   const processWarningBytes = hasProcessMemoryLimit
     ? Math.floor(usableProcessMemoryLimitBytes * DEFAULT_HEAP_WARNING_RATIO)
@@ -309,17 +309,13 @@ function formatPressureSummary(
   return parts.filter((part): part is string => Boolean(part)).join(" ");
 }
 
-function formatPressureNextStep(
-  pressure: Omit<DiagnosticMemoryPressureEvent, "seq" | "ts" | "type">,
-): string {
-  return pressure.level === "critical"
-    ? "nextStep=inspect latest stability bundle or run openclaw gateway diagnostics export; restart gateway if process is unstable"
-    : "nextStep=run openclaw gateway status --deep and openclaw gateway diagnostics export; restart gateway if pressure persists";
-}
-
 function logMemoryPressure(
   pressure: Omit<DiagnosticMemoryPressureEvent, "seq" | "ts" | "type">,
 ): void {
+  const nextStep =
+    pressure.level === "critical"
+      ? "nextStep=run openclaw gateway diagnostics export, inspect an existing bundle with openclaw gateway stability --bundle latest, or on Node sample allocations with openclaw gateway call diagnostics.heapProfile --timeout 30000."
+      : "nextStep=run openclaw gateway status --deep and openclaw gateway diagnostics export; restart gateway if pressure persists";
   const message =
     `memory pressure: level=${pressure.level} reason=${pressure.reason}` +
     ` ${formatPressureSummary(pressure)}` +
@@ -328,8 +324,7 @@ function logMemoryPressure(
     formatOptionalPressureMetric("thresholdBytes", pressure.thresholdBytes) +
     formatOptionalPressureMetric("rssGrowthBytes", pressure.rssGrowthBytes) +
     formatOptionalPressureMetric("windowMs", pressure.windowMs) +
-    (pressure.level === "critical" ? " memoryPressureSnapshot=disabled" : "") +
-    ` ${formatPressureNextStep(pressure)}`;
+    ` ${nextStep}`;
   log.warn(message);
 }
 
@@ -374,9 +369,6 @@ export function emitDiagnosticMemorySample(options?: {
       ...pressure,
     });
     logMemoryPressure(pressure);
-    if (pressure.level === "critical") {
-      log.warn("critical memory pressure snapshot disabled");
-    }
   }
   return memory;
 }

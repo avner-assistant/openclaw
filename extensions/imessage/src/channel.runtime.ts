@@ -4,7 +4,6 @@ import {
   createAccountStatusSink,
   resolveOutboundSendDep,
 } from "openclaw/plugin-sdk/channel-outbound";
-import { PAIRING_APPROVED_MESSAGE } from "openclaw/plugin-sdk/channel-status";
 import type { ChannelPlugin } from "openclaw/plugin-sdk/core";
 import {
   listEnabledIMessageAccounts,
@@ -35,6 +34,8 @@ export async function sendIMessageOutbound(params: {
   replyToId?: string;
   conversationReadOrigin?: "delegated" | "direct-operator";
   onDeliveryResult?: NonNullable<Parameters<IMessageSendFn>[2]["onDeliveryResult"]>;
+  assertDirectAdapterHandoff?: () => void;
+  onPlatformSendDispatch?: () => Promise<void>;
 }) {
   const send =
     resolveOutboundSendDep<IMessageSendFn>(params.deps, "imessage", {
@@ -55,6 +56,8 @@ export async function sendIMessageOutbound(params: {
     accountId: params.accountId ?? undefined,
     replyToId: params.replyToId ?? undefined,
     conversationReadOrigin: params.conversationReadOrigin,
+    assertDirectAdapterHandoff: params.assertDirectAdapterHandoff,
+    onPlatformSendDispatch: params.onPlatformSendDispatch,
     ...(params.onDeliveryResult ? { onDeliveryResult: params.onDeliveryResult } : {}),
   });
   const meta = {
@@ -63,13 +66,6 @@ export async function sendIMessageOutbound(params: {
     ...(result.sentText ? { imessageVisibleText: result.sentText } : {}),
   };
   return Object.keys(meta).length > 0 ? { ...result, meta } : result;
-}
-
-export async function notifyIMessageApproval(params: {
-  cfg: Parameters<typeof import("./accounts.js").resolveIMessageAccount>[0]["cfg"];
-  id: string;
-}): Promise<void> {
-  await sendMessageIMessage(params.id, PAIRING_APPROVED_MESSAGE, { config: params.cfg });
 }
 
 export async function probeIMessageAccount(params?: {

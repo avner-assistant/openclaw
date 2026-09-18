@@ -6,6 +6,7 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { z } from "zod";
 import { resolveStateDir } from "../config/paths.js";
 import { requireDirectorySync, syncDirectorySync } from "../infra/directory-durability.js";
+import { assertNoSymlinkParentsSync } from "../infra/fs-safe-advanced.js";
 import * as replaceFile from "../infra/replace-file.js";
 import { VERSION } from "../version.js";
 import {
@@ -45,14 +46,21 @@ export type SessionSqliteMigrationTargetManifest = SessionSqliteMigrationTargetI
   validationBeforeArchive: "not_run" | "passed" | "failed";
 };
 
+export type SessionSqliteMigrationGithubIssue = {
+  marker: string;
+  status: "attempted";
+  title: string;
+};
+
 export type SessionSqliteMigrationManifest = {
   completedAt?: string;
   failedAt?: string;
   failureReports?: {
+    githubIssue?: SessionSqliteMigrationGithubIssue;
     jsonPath: string;
     markdownPath: string;
   };
-  manifestVersion: 1 | 2 | 3;
+  manifestVersion: 1 | 2 | 3 | 4;
   openClawVersion: string;
   restore?: {
     attemptedAt: string;
@@ -110,6 +118,12 @@ const RestoreConflictSchema = z.object({
   reason: z.string(),
   sourcePath: AbsolutePathSchema,
 });
+const GithubIssueMarkerSchema = z.string().regex(/^openclaw-report:[a-f0-9]{64}$/u);
+const MigrationGithubIssueSchema = z.object({
+  marker: GithubIssueMarkerSchema,
+  status: z.literal("attempted"),
+  title: z.string().min(1).max(512),
+});
 const MigrationTargetSchema = z
   .object({
     agentId: z.string().min(1),
@@ -161,11 +175,12 @@ const MigrationManifestSchema = z
     failedAt: z.string().optional(),
     failureReports: z
       .object({
+        githubIssue: MigrationGithubIssueSchema.optional(),
         jsonPath: AbsolutePathSchema,
         markdownPath: AbsolutePathSchema,
       })
       .optional(),
-    manifestVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    manifestVersion: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
     openClawVersion: z.string().min(1),
     restore: z
       .object({
@@ -182,6 +197,13 @@ const MigrationManifestSchema = z
     targets: z.array(MigrationTargetSchema),
   })
   .superRefine((manifest, context) => {
+    if (manifest.failureReports?.githubIssue && manifest.manifestVersion !== 4) {
+      context.addIssue({
+        code: "custom",
+        message: "GitHub issue receipt requires manifest version 4",
+        path: ["failureReports", "githubIssue"],
+      });
+    }
     const targetKeys = new Set<string>();
     for (const target of manifest.targets) {
       const targetKey = sessionSqliteMigrationTargetKey(target);
@@ -398,24 +420,24 @@ export function isRegularFileWithoutFollowingSymlinks(filePath: string): boolean
   }
 }
 
-export function hasSymbolicLinkInDirectoryPath(directoryPath: string): boolean {
+export function hasSymbolicLinkInDirectoryPath(
+  directoryPath: string,
+  allowRootChildSymlink = false,
+): boolean {
   const resolvedPath = path.resolve(directoryPath);
   const root = path.parse(resolvedPath).root;
-  let currentPath = root;
-  for (const segment of path.relative(root, resolvedPath).split(path.sep).filter(Boolean)) {
-    currentPath = path.join(currentPath, segment);
-    try {
-      if (fs.lstatSync(currentPath).isSymbolicLink()) {
-        return true;
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        continue;
-      }
-      return true;
-    }
+  // Node can drop the trailing separator from an exact Windows extended drive root.
+  const rootDir = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  try {
+    assertNoSymlinkParentsSync({
+      rootDir,
+      targetPath: resolvedPath === root ? rootDir : resolvedPath,
+      allowRootChildSymlink,
+    });
+    return false;
+  } catch {
+    return true;
   }
-  return false;
 }
 
 export function filterRestoreManifestTargets(
@@ -550,27 +572,10 @@ function hasUnsupportedV1DirectorySymlink(manifest: SessionSqliteMigrationManife
       path.dirname(move.sourcePath),
     ]),
   ]);
-  return directoryPaths.some((directoryPath) => {
-    const resolvedPath = path.resolve(directoryPath);
-    const root = path.parse(resolvedPath).root;
-    let currentPath = root;
-    for (const segment of path.relative(root, resolvedPath).split(path.sep).filter(Boolean)) {
-      currentPath = path.join(currentPath, segment);
-      try {
-        const stat = fs.lstatSync(currentPath);
-        // Version 1 predates canonical paths. Only filesystem-root aliases such as
-        // macOS /var and /tmp are safe to normalize without trusting manifest data.
-        if (stat.isSymbolicLink() && path.dirname(currentPath) !== root) {
-          return true;
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          return true;
-        }
-      }
-    }
-    return false;
-  });
+  // Version 1 predates canonical paths; only filesystem-root aliases may normalize.
+  return directoryPaths.some((directoryPath) =>
+    hasSymbolicLinkInDirectoryPath(directoryPath, true),
+  );
 }
 
 export function canonicalMigrationFilePath(filePath: string): string {

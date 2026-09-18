@@ -568,7 +568,10 @@ describe("CodexAppServerEventProjector reasoning and guardian projection", () =>
     );
     expect(result.toolMetas).toEqual([{ toolName: "sessions_send", isError: false }]);
     expect(result.messagesSnapshot.map((message) => message.role)).toEqual(["user", "assistant"]);
-    expect(JSON.stringify(result.messagesSnapshot[1])).toContain("Codex reasoning");
+    expect(result.messagesSnapshot[1]).toMatchObject({
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "thinking" }],
+    });
     expect(JSON.stringify(result.messagesSnapshot)).not.toContain("Codex plan:");
     expect(result.compactionCount).toBe(1);
     expect(requireRecord(result.itemLifecycle, "item lifecycle")).not.toHaveProperty(
@@ -664,4 +667,56 @@ describe("CodexAppServerEventProjector reasoning and guardian projection", () =>
       isReasoningSnapshot: true,
     });
   });
+
+  it.each([false, true])(
+    "uses completed reasoning sections for streams and history with prior deltas=%s",
+    async (streamDeltas) => {
+      const onReasoningStream = vi.fn();
+      const onReasoningEnd = vi.fn();
+      const projector = await createProjector({
+        ...(await createParams()),
+        onReasoningStream,
+        onReasoningEnd,
+      });
+      if (streamDeltas) {
+        await projector.handleNotification(
+          forCurrentTurn("item/reasoning/summaryTextDelta", {
+            itemId: "reason-1",
+            summaryIndex: 1,
+            delta: "Partial summary",
+          }),
+        );
+        await projector.handleNotification(
+          forCurrentTurn("item/reasoning/textDelta", {
+            itemId: "reason-1",
+            contentIndex: 1,
+            delta: "Superseded section",
+          }),
+        );
+      }
+      await projector.handleNotification(
+        forCurrentTurn("item/completed", {
+          item: {
+            type: "reasoning",
+            id: "reason-1",
+            summary: ["First summary", "Second summary"],
+            content: ["Completed reasoning"],
+          },
+        }),
+      );
+      await projector.handleNotification(
+        forCurrentTurn("item/completed", {
+          item: { type: "reasoning", id: "reason-2", summary: ["Next item"], content: [] },
+        }),
+      );
+      await projector.handleNotification(turnCompleted());
+
+      const text = "First summary\n\nSecond summary\n\nCompleted reasoning\n\nNext item";
+      expect(onReasoningStream).toHaveBeenLastCalledWith({ text, isReasoningSnapshot: true });
+      expect(onReasoningEnd).toHaveBeenCalledOnce();
+      expect(projector.buildResult(buildEmptyToolTelemetry()).messagesSnapshot).toContainEqual(
+        expect.objectContaining({ content: [{ type: "thinking", thinking: text }] }),
+      );
+    },
+  );
 });

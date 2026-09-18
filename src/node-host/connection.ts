@@ -9,11 +9,15 @@ import {
   NODE_WORKER_BUNDLE_STATUS_VERSION,
   NODE_WORKER_ENVIRONMENT_SESSION_VERSION,
   NODE_WORKER_PORTAL_STREAM_VERSION,
+  NODE_WORKER_PREPARED_WORKSPACE_VERSION,
   NODE_WORKER_SUPERVISOR_PROTOCOL_FEATURE,
   type NodeWorkerCapacitySnapshot,
 } from "../infra/node-runner-inventory.js";
 import { redactSensitiveText } from "../logging/redact.js";
+import { NODE_HOST_STATS_EVENT, NODE_HOST_STATS_INTERVAL_MS } from "../shared/node-host-stats.js";
 import type { NodeHostClient } from "./client.js";
+import { sampleNodeHostStats } from "./host-stats.js";
+import { buildNodeEventParams } from "./node-event-params.js";
 import type { prepareNodeHostRuntime, NodeHostInventory } from "./runtime.js";
 
 type PreparedRuntime = Awaited<ReturnType<typeof prepareNodeHostRuntime>>;
@@ -95,21 +99,25 @@ export function startNodeHostConnection({
   prepared,
   client,
   onManifestChanged,
+  onWorkerHostingChanged,
   writeStderrLine,
 }: {
   prepared: PreparedRuntime;
   client: NodeHostClient;
   onManifestChanged: NonNullable<Parameters<PreparedRuntime["start"]>[0]["onManifestChanged"]>;
+  onWorkerHostingChanged?: (enabled: boolean) => void;
   writeStderrLine: (message: string) => void;
 }) {
   let publicationClient = client;
   let workerHostingEnabled = prepared.workerHostingEnabled;
   let inventory: NodeHostInventory = prepared.initialInventory;
   let workerCapacity: NodeWorkerCapacitySnapshot | undefined;
+  let reportedWorkerHostingEnabled = false;
   let gatewayHelloReceived = false;
   let gatewayConnectionGeneration = 0;
   let connectedGatewayProtocol = 0;
   let gatewayCapabilities: ReadonlySet<string> = new Set();
+  let hostStatsTimer: NodeJS.Timeout | undefined;
   const optionalPublicationStates = new Map<
     NodeOptionalPublicationMethod,
     NodeOptionalPublicationState
@@ -127,7 +135,36 @@ export function startNodeHostConnection({
     gatewayHelloReceived = false;
     connectedGatewayProtocol = 0;
     gatewayCapabilities = new Set();
+    if (hostStatsTimer) {
+      clearInterval(hostStatsTimer);
+      hostStatsTimer = undefined;
+    }
     retireOptionalPublications();
+  };
+
+  const startHostStatsPublication = () => {
+    const generation = gatewayConnectionGeneration;
+    const connectionClient = publicationClient;
+    let failureLogged = false;
+    const publish = async () => {
+      // A queued timer or late rejection must never act for a replacement connection.
+      if (generation !== gatewayConnectionGeneration || !gatewayHelloReceived) {
+        return;
+      }
+      try {
+        // payloadJSON keeps the native bridge's fire-and-forget node-event frame usable.
+        const params = buildNodeEventParams(NODE_HOST_STATS_EVENT, sampleNodeHostStats());
+        await connectionClient.request("node.event", params);
+      } catch (error) {
+        if (generation === gatewayConnectionGeneration && !failureLogged) {
+          failureLogged = true;
+          writeStderrLine(`node host stats publish failed: ${redactSensitiveText(String(error))}`);
+        }
+      }
+    };
+    void publish();
+    hostStatsTimer = setInterval(() => void publish(), NODE_HOST_STATS_INTERVAL_MS);
+    hostStatsTimer.unref();
   };
 
   const queueOptionalPublication = (
@@ -136,13 +173,12 @@ export function startNodeHostConnection({
     label: string,
     isRetry = false,
   ): void => {
-    if (!gatewayHelloReceived) {
+    if (!gatewayHelloReceived || prepared.restrictedSurface) {
       return;
     }
     const connectionGeneration = gatewayConnectionGeneration;
     const gatewayProtocol = connectedGatewayProtocol;
     const connectionClient = publicationClient;
-    const connectionIsCurrent = () => connectionGeneration === gatewayConnectionGeneration;
     let state = optionalPublicationStates.get(method);
     if (!state) {
       state = {
@@ -156,6 +192,9 @@ export function startNodeHostConnection({
       };
       optionalPublicationStates.set(method, state);
     }
+    const connectionIsCurrent = () =>
+      connectionGeneration === gatewayConnectionGeneration &&
+      optionalPublicationStates.get(method) === state;
     if (state.hasInFlightParams && isDeepStrictEqual(state.inFlightParams, params)) {
       // The latest desired value remains authoritative even when it matches the
       // active request. Replace a newer pending value so A -> B -> A cannot publish B.
@@ -316,31 +355,39 @@ export function startNodeHostConnection({
   };
 
   const publishRunnerInventory = () => {
+    const hostingCapacity = workerHostingEnabled ? workerCapacity : undefined;
+    const hostingEnabled = hostingCapacity !== undefined;
+    if (hostingEnabled !== reportedWorkerHostingEnabled) {
+      reportedWorkerHostingEnabled = hostingEnabled;
+      onWorkerHostingChanged?.(hostingEnabled);
+    }
     queueOptionalPublication(
       NODE_RUNNER_INVENTORY_UPDATE_METHOD,
       {
         protocolFeatures: [NODE_WORKER_SUPERVISOR_PROTOCOL_FEATURE],
-        workerHost:
-          workerHostingEnabled && workerCapacity
-            ? {
-                enabled: true,
-                capacity: workerCapacity,
-                bundlePrewarm: WORKER_BUNDLE_PREWARM_VERSION,
-                ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_RETENTION)
-                  ? { bundleRetention: NODE_WORKER_BUNDLE_RETENTION_VERSION }
-                  : {}),
-                ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_RETENTION) &&
-                gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_STATUS)
-                  ? { bundleStatus: NODE_WORKER_BUNDLE_STATUS_VERSION }
-                  : {}),
-                ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_PORTAL_STREAM)
-                  ? { portalStream: NODE_WORKER_PORTAL_STREAM_VERSION }
-                  : {}),
-                ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_ENVIRONMENT_SESSION)
-                  ? { environmentSession: NODE_WORKER_ENVIRONMENT_SESSION_VERSION }
-                  : {}),
-              }
-            : { enabled: false },
+        workerHost: hostingCapacity
+          ? {
+              enabled: true,
+              capacity: hostingCapacity,
+              ...(prepared.preparedWorkspacesEnabled
+                ? { preparedWorkspace: NODE_WORKER_PREPARED_WORKSPACE_VERSION }
+                : {}),
+              bundlePrewarm: WORKER_BUNDLE_PREWARM_VERSION,
+              ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_RETENTION)
+                ? { bundleRetention: NODE_WORKER_BUNDLE_RETENTION_VERSION }
+                : {}),
+              ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_RETENTION) &&
+              gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_BUNDLE_STATUS)
+                ? { bundleStatus: NODE_WORKER_BUNDLE_STATUS_VERSION }
+                : {}),
+              ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_PORTAL_STREAM)
+                ? { portalStream: NODE_WORKER_PORTAL_STREAM_VERSION }
+                : {}),
+              ...(gatewayCapabilities.has(GATEWAY_SERVER_CAPS.NODE_WORKER_ENVIRONMENT_SESSION)
+                ? { environmentSession: NODE_WORKER_ENVIRONMENT_SESSION_VERSION }
+                : {}),
+            }
+          : { enabled: false },
       },
       "runner inventory",
     );
@@ -378,6 +425,19 @@ export function startNodeHostConnection({
   });
   return {
     ...runtime,
+    refreshRunnerInventory() {
+      if (!gatewayHelloReceived) {
+        return;
+      }
+      const previous = optionalPublicationStates.get(NODE_RUNNER_INVENTORY_UPDATE_METHOD);
+      if (previous?.retryTimer) {
+        clearTimeout(previous.retryTimer);
+      }
+      // Approval retires the Gateway's declaration without replacing this transport.
+      // Retire its acknowledgment too, including requests still settling in flight.
+      optionalPublicationStates.delete(NODE_RUNNER_INVENTORY_UPDATE_METHOD);
+      publishRunnerInventory();
+    },
     connect(connection: NodeHostGatewayConnection, connectionClient: NodeHostClient = client) {
       retireGatewayConnection();
       publicationClient = connectionClient;
@@ -387,6 +447,9 @@ export function startNodeHostConnection({
         ...(connection.cloudflareAccess ? { cloudflareAccess: connection.cloudflareAccess } : {}),
       });
       gatewayHelloReceived = true;
+      if (!prepared.restrictedSurface) {
+        startHostStatsPublication();
+      }
       connectedGatewayProtocol = connection.protocol;
       gatewayCapabilities = new Set(connection.capabilities);
       publishRunnerInventory();
@@ -395,6 +458,8 @@ export function startNodeHostConnection({
     disconnect,
     close() {
       retireGatewayConnection();
+      workerHostingEnabled = false;
+      publishRunnerInventory();
       runtime.updateGatewayConnection();
       return runtime.close();
     },

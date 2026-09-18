@@ -151,7 +151,7 @@ describe("fork boundaries from imported Codex history", () => {
           },
         });
       }
-      const sourceBinding = await bindingStore.read(identity);
+      const sourceBinding = bindingStore.read(identity);
       const response = forkResponse();
       const namedResponse = { ...response, thread: { ...response.thread, name } };
       const nativeThreads = new Map<string, CodexThread>([
@@ -194,8 +194,11 @@ describe("fork boundaries from imported Codex history", () => {
           bindingStore,
           controlFactory: {
             forRequest: () => control,
-            forUpstream: () => control,
-            homesForAgent: () => [],
+            forNode: async () => {
+              throw new Error("Node source is outside this local fork fixture");
+            },
+            forUpstream: async () => control,
+            homesForAgent: async () => [],
           },
           harnessRuntimeId: "codex",
           resolveConfig: () => ({ session: { store: history.target.storePath } }),
@@ -222,7 +225,7 @@ describe("fork boundaries from imported Codex history", () => {
       expect(
         childEntries.filter((entry) => entry.role === "user").map((entry) => entry.message),
       ).toEqual([expect.objectContaining({ content: "one" })]);
-      expect(await bindingStore.read(identity)).toEqual(sourceBinding);
+      expect(bindingStore.read(identity)).toEqual(sourceBinding);
       expect(getSessionEntry(history.target)).toEqual(sourceEntry);
       expect(getSessionEntry(history.target)?.label).toBe(name);
       expect(await readVisibleSessionTranscriptMessageEntries(history.target)).toEqual(
@@ -246,8 +249,8 @@ describe("fork boundaries from imported Codex history", () => {
       editorText: "edit me",
       boundary: {
         beforeTurnId: "turn-2",
-        targetTurnId: "turn-2",
-        retainedMarker: { turnId: "turn-1", userMessageCount: 1 },
+
+        lastRetainedTurnId: "turn-1",
       },
     });
   });
@@ -270,8 +273,8 @@ describe("fork boundaries from imported Codex history", () => {
         editorText: text,
         boundary: {
           beforeTurnId: `turn-${count - 1}`,
-          targetTurnId: `turn-${count - 1}`,
-          retainedMarker: { turnId: `turn-${count - 2}`, userMessageCount: 1 },
+
+          lastRetainedTurnId: `turn-${count - 2}`,
         },
       });
     },
