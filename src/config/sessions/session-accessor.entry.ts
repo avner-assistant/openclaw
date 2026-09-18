@@ -14,7 +14,6 @@ import {
   rehomeSqliteSessionDeliveryReferencesForCanonicalRepairBatch as rehomeSessionDeliveryReferencesForCanonicalRepairBatch,
 } from "./session-accessor.sqlite-canonical-repair.js";
 import {
-  countSessionEntryRowsReadOnly,
   ensureSessionEntrySync,
   hasSessionEntriesByStatusReadOnly,
   listSessionChildEntriesReadOnly,
@@ -33,6 +32,7 @@ import {
   replaceSessionEntry,
   replaceSessionEntrySync,
   upsertSessionEntryCore,
+  withSessionEntryReadOnlyScope,
 } from "./session-accessor.sqlite-entry.js";
 import { resolveSessionEntry } from "./session-accessor.sqlite-exact-read.js";
 import { readSessionStoreSummaryReadOnly } from "./session-accessor.sqlite-summary.js";
@@ -65,7 +65,6 @@ export { clearPluginOwnedSessionState };
 
 // SQLite is the only runtime session store. Re-export its canonical entry operations directly.
 export {
-  countSessionEntryRowsReadOnly,
   copySessionOwnedStateForCanonicalRepair,
   ensureTranscriptGenerationsForCanonicalRepair,
   ensureSessionEntrySync,
@@ -92,6 +91,7 @@ export {
   resolveSessionEntryFromStore,
   readSessionStoreSummaryReadOnly,
   upsertSessionEntryCore,
+  withSessionEntryReadOnlyScope,
 };
 
 /** Resolves a session directly through canonical SQLite row and alias ownership. */

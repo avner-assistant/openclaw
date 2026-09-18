@@ -3,9 +3,7 @@
 import { html, render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessageClientSource } from "../../../../../src/chat/message-client-source.js";
-import { GatewayBrowserClient } from "../../../api/gateway.ts";
 import * as markdown from "../../../components/markdown.ts";
-import { SessionLinkTitler } from "../../../components/session-link-titling.ts";
 import type { MessageGroup } from "../../../lib/chat/chat-types.ts";
 import { setAvatarGatewayOrigin } from "../../../lib/identity-avatar-context.ts";
 import * as localStorageModule from "../../../local-storage.ts";
@@ -431,13 +429,9 @@ function createAssistantCanvasBlock(params: {
   url?: string;
   preferredHeight?: number;
   presentationTarget?: "assistant_message" | "tool_card";
-  mcpApp?: { viewId: string };
 }) {
   const viewId = `cv_inline_${params.suffix}`;
-  const preview = {
-    ...createCanvasPreview({ ...params, viewId }),
-    ...(params.mcpApp ? { mcpApp: params.mcpApp } : {}),
-  };
+  const preview = createCanvasPreview({ ...params, viewId });
   return {
     type: "canvas",
     preview,
@@ -2206,7 +2200,7 @@ describe("grouped chat rendering", () => {
     { client: { id: "openclaw-ios", mode: "node" }, label: "App" },
     { client: { id: "gateway-client", mode: "backend" }, label: "RPC" },
   ] satisfies Array<{ client: MessageClientSource; label: string }>)(
-    "shows $label separately from the authenticated human author",
+    "keeps $label client provenance separate from the authenticated human author",
     ({ client, label }) => {
       const message = createUserMessage("Follow up on the current task.", {
         __openclaw: {
@@ -2223,23 +2217,40 @@ describe("grouped chat rendering", () => {
         container,
       );
       expect(container.querySelector(".chat-sender-name")?.textContent).toBe("Current Name");
-      expect(container.querySelector(".chat-message-source")?.textContent).toBe(
-        `via ${label} (Task helper)`,
-      );
+      const source = container.querySelector(".chat-message-source");
+      if (label === "Web") {
+        expect(source).toBeNull();
+      } else {
+        expect(source?.textContent).toBe(`via ${label} (Task helper)`);
+      }
     },
   );
 
-  it.each(["gutter", "footer"] as const)(
-    "does not borrow the viewer's name or %s avatar for source-only input",
-    (avatarPlacement) => {
+  it.each(
+    (["gutter", "footer"] as const).flatMap((avatarPlacement) => [
+      {
+        avatarPlacement,
+        source: "collected Web and external clients",
+        clients: [
+          { id: "openclaw-control-ui", mode: "webchat" },
+          { id: "cli", mode: "cli", displayName: "Release helper" },
+          { id: "gateway-client", mode: "backend", displayName: "Build helper" },
+        ],
+        expectedSource: "via CLI (Release helper), RPC (Build helper)",
+      },
+      {
+        avatarPlacement,
+        source: "Web only",
+        clients: [{ id: "openclaw-control-ui", mode: "webchat" }],
+        expectedSource: null,
+      },
+    ]),
+  )(
+    "does not borrow the viewer's name or $avatarPlacement avatar for source-only input from $source",
+    ({ avatarPlacement, clients, expectedSource }) => {
       const message = createUserMessage("Collected follow-ups.", {
         __openclaw: {
-          transport: {
-            clients: [
-              { id: "cli", mode: "cli", displayName: "Release helper" },
-              { id: "gateway-client", mode: "backend", displayName: "Build helper" },
-            ],
-          },
+          transport: { clients },
         },
       });
       const group = prepareMessageGroup(createMessageEntry("source-only-message", message));
@@ -2255,9 +2266,12 @@ describe("grouped chat rendering", () => {
       expect(container.querySelector(".chat-sender-name")).toBeNull();
       expect(container.querySelector(".chat-avatar, .chat-author-avatar")).toBeNull();
       expect(container.textContent).not.toContain("Unrelated Viewer");
-      expect(container.querySelector(".chat-message-source")?.textContent).toBe(
-        "via CLI (Release helper), RPC (Build helper)",
-      );
+      const source = container.querySelector(".chat-message-source");
+      if (expectedSource === null) {
+        expect(source).toBeNull();
+      } else {
+        expect(source?.textContent).toBe(expectedSource);
+      }
     },
   );
 
@@ -2403,7 +2417,7 @@ describe("grouped chat rendering", () => {
       label: "attributed sender without a viewer",
       sender: { id: "other-user" },
       userId: null,
-      peer: true,
+      peer: false,
     },
   ])("sets peer alignment for $label", ({ sender, userId, peer }) => {
     const container = document.createElement("div");
@@ -2692,6 +2706,7 @@ describe("grouped chat rendering", () => {
             showReasoning: true,
             showToolCalls: true,
             assistantName: "OpenClaw",
+            userId: "local-viewer",
             avatarPlacement,
           },
         ),
@@ -2774,218 +2789,6 @@ describe("grouped chat rendering", () => {
       container,
     );
     expect(container.querySelector(".chat-author-avatar")).toBeNull();
-  });
-
-  it("preserves custom assistant sender labels without forwarded provenance", () => {
-    const container = document.createElement("div");
-    const message = { role: "assistant", content: "forwarded report", timestamp: 1000 };
-    const group = createMessageGroup(message, "assistant", {
-      key: "forwarded-group",
-      senderLabel: "Forwarded from main",
-      messages: [createMessageEntry("forwarded-message", message)],
-    });
-
-    render(renderTestMessageGroup(group), container);
-
-    const sender = container.querySelector<HTMLElement>(".chat-group.assistant .chat-sender-name");
-    expect(sender?.textContent).toBe("Forwarded from main");
-    expect(container.querySelector(".chat-group--forwarded")).toBeNull();
-  });
-
-  it("renders forwarded messages with a source-session chip, own avatar, and timestamp/actions", () => {
-    const container = document.createElement("div");
-    const message = createAssistantMessage("forwarded report", { timestamp: 1000 });
-    const group = createMessageGroup(message, "assistant", {
-      senderLabel: "Forwarded from main",
-      senderSession: { sessionKey: "agent:main:main", agentId: "main" },
-    });
-
-    render(renderTestMessageGroup(group), container);
-
-    const forwarded = container.querySelector<HTMLElement>(".chat-group--forwarded");
-    expect(forwarded).not.toBeNull();
-    expect(forwarded?.classList.contains("chat-group--sender-tint")).toBe(true);
-    expect(forwarded?.style.getPropertyValue("--chat-sender-hue")).not.toBe("");
-    const attribution = container.querySelector(".chat-group--forwarded .chat-reply-attribution");
-    const link = attribution?.querySelector<HTMLAnchorElement>(
-      'a.markdown-session-link[data-session-key="agent:main:main"]',
-    );
-    expect(attribution?.textContent).toContain("From");
-    expect(link?.textContent).toBe("agent:main:main");
-    expect(link?.tabIndex).toBe(0);
-    expect(attribution?.nextElementSibling?.classList.contains("chat-bubble")).toBe(true);
-    expect(container.querySelector(".chat-avatar--forwarded svg path")?.namespaceURI).toBe(
-      "http://www.w3.org/2000/svg",
-    );
-    expect(container.querySelector(".chat-avatar.assistant")).toBeNull();
-    expect(container.querySelector(".chat-group-footer .chat-sender-name")).toBeNull();
-    expect(container.querySelector(".chat-group-footer .chat-group-timestamp")).not.toBeNull();
-    expect(container.querySelector(".chat-group-footer-actions")).not.toBeNull();
-  });
-
-  it.each([
-    { agentId: "research", avatar: "blob:research-avatar", expected: "image" },
-    { agentId: "research", avatar: null, expected: "face" },
-    { agentId: "research", avatar: "https://example.test/avatar.png", expected: "face" },
-    { agentId: "main", avatar: "blob:main-avatar", expected: "face" },
-    { agentId: "removed", avatar: "blob:stale-avatar", expected: "glyph" },
-    { agentId: undefined, avatar: null, expected: "glyph" },
-  ])(
-    "renders $expected for forwarded agent $agentId with $avatar",
-    async ({ agentId, avatar, expected }) => {
-      const container = document.createElement("div");
-      const group = createMessageGroup(createAssistantMessage("forwarded report"), "assistant", {
-        senderSession: { agentId },
-      });
-      const options = {
-        agentId: "main",
-        agents: [{ id: "main" }, { id: "research", identity: { name: "Research Agent" } }],
-        senderAgentAvatars: new Map(agentId ? [[agentId, avatar]] : []),
-      };
-      render(renderTestMessageGroup(group, options), container);
-
-      const image = container.querySelector("img.chat-avatar.assistant");
-      expect(image !== null).toBe(expected === "image");
-      expect(container.querySelector(".chat-avatar--forwarded") !== null).toBe(
-        expected === "glyph",
-      );
-      if (expected === "image") {
-        expect(image?.getAttribute("src")).toBe(avatar);
-        expect(image?.getAttribute("alt")).toBe("Research Agent");
-      }
-      if (expected === "face") {
-        await vi.dynamicImportSettled();
-        await vi.waitFor(() =>
-          expect(container.querySelector(".identity-avatar__agent-face")).not.toBeNull(),
-        );
-        expect(container.querySelector(".chat-avatar--sender-initials")).toBeNull();
-      }
-    },
-  );
-
-  // Label rules: an agent's main session reads as the agent itself; other
-  // sessions read as the session (titler-resolved), prefixed with the agent
-  // name only when the sender is a different agent.
-  it.each([
-    {
-      name: "another agent's main session labels as that agent",
-      key: "agent:research:main",
-      chipText: "Research Agent",
-      prefix: null,
-      titled: true,
-    },
-    {
-      name: "own main session labels as the local agent",
-      key: "agent:main:main",
-      chipText: "main",
-      prefix: null,
-      titled: true,
-    },
-    {
-      name: "same-agent session leaves the key for the titler",
-      key: "agent:main:bench",
-      chipText: "agent:main:bench",
-      prefix: null,
-      titled: false,
-    },
-    {
-      name: "other-agent session prefixes the agent name",
-      key: "agent:research:bench",
-      chipText: "agent:research:bench",
-      prefix: "Research Agent —",
-      titled: false,
-    },
-  ])("$name", ({ key, chipText, prefix, titled }) => {
-    const container = document.createElement("div");
-    const group = createMessageGroup(createAssistantMessage("forwarded report"), "assistant", {
-      senderSession: { sessionKey: key, agentId: key.split(":")[1] },
-    });
-    render(
-      renderTestMessageGroup(group, {
-        agentId: "main",
-        agents: [{ id: "main" }, { id: "research", identity: { name: "Research Agent" } }],
-        mainKey: "main",
-      }),
-      container,
-    );
-
-    const chip = expectElement(
-      container,
-      `a.markdown-session-link[data-session-key="${key}"]`,
-      HTMLAnchorElement,
-    );
-    expect(chip.textContent).toBe(chipText);
-    expect(chip.querySelector(":scope > .session-label")?.textContent).toBe(chipText);
-    expect(chip.classList.contains("markdown-session-link--titled")).toBe(titled);
-    const attributionText =
-      container
-        .querySelector(".chat-group--forwarded .chat-reply-attribution")
-        ?.textContent?.replace(/\s+/g, " ")
-        .trim() ?? "";
-    if (prefix) {
-      expect(attributionText).toContain(prefix.replace(/\s+/g, " "));
-    } else {
-      expect(attributionText).not.toContain("—");
-    }
-  });
-
-  it.each([
-    { senderSession: { agentId: "main" }, label: "Forwarded from main" },
-    { senderSession: undefined, label: "Forwarded message" },
-    // Non-agent-prefixed keys are not navigable (titler, hovercard, and click
-    // handlers all reject them), so they stay readable plain text.
-    { senderSession: { sessionKey: "legacy-session" }, label: "From legacy-session" },
-  ])(
-    "keeps legacy forwarded attribution visible without a session link: $label",
-    ({ senderSession, label }) => {
-      const container = document.createElement("div");
-      const message = createAssistantMessage("legacy report", {
-        provenance: { kind: "inter_session", sourceTool: "sessions_send" },
-      });
-      render(
-        renderTestMessageGroup(createMessageGroup(message, "assistant", { senderSession })),
-        container,
-      );
-
-      expect(container.querySelector(".chat-group--forwarded")).not.toBeNull();
-      const attribution = container.querySelector(".chat-group--forwarded .chat-reply-attribution");
-      expect(attribution?.textContent?.replace(/\s+/g, " ").trim()).toBe(label);
-      expect(attribution?.querySelector("a")).toBeNull();
-      expect(attribution?.querySelector("[tabindex]")).toBeNull();
-      expect(container.querySelector(".chat-group-footer .chat-sender-name")).toBeNull();
-    },
-  );
-
-  // A rendered group's source cannot change in place: messages are immutable
-  // and grouping splits on senderSession, so a different source produces a new
-  // group key and a fresh anchor. The protected behavior is that the titler's
-  // stamped title and href survive ordinary re-renders of the same group.
-  it("keeps titled source chips usable across rerenders", async () => {
-    const container = document.createElement("div");
-    const group = createMessageGroup(createAssistantMessage("forwarded report"), "assistant", {
-      senderSession: { sessionKey: "agent:main:main" },
-    });
-    const titler = new SessionLinkTitler(container);
-    titler.client = new GatewayBrowserClient({ url: "ws://localhost" });
-    vi.spyOn(titler.client, "request").mockResolvedValueOnce({
-      status: "ok",
-      sessionKey: "agent:main:main",
-      agentId: "main",
-      title: "Main session",
-    });
-    const sourceLink = () =>
-      expectElement(
-        container,
-        ".chat-group--forwarded .chat-reply-attribution a",
-        HTMLAnchorElement,
-      );
-
-    render(renderTestMessageGroup(group), container);
-    await titler.decorate(sourceLink(), true);
-    expect(sourceLink().textContent).toBe("Main session");
-    expect(() => render(renderTestMessageGroup(group), container)).not.toThrow();
-    expect(sourceLink().textContent).toBe("Main session");
-    expect(sourceLink().title).toBe("agent:main:main");
   });
 
   it("uses the assistant name when an assistant group has no sender label", () => {
@@ -4155,14 +3958,14 @@ describe("grouped chat rendering", () => {
     renderMessage();
     expect(container.textContent).not.toContain("Outside allowed folders");
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    await flushAssistantAttachmentAvailabilityChecks();
-
-    expect(
-      container
-        .querySelector<HTMLAnchorElement>(".chat-assistant-attachment-card__download")
-        ?.getAttribute("href"),
-    ).toBe(
-      `/__openclaw__/assistant-media?source=${encodeURIComponent(source)}&mediaTicket=ticket-bootstrap-audio`,
+    await vi.waitFor(() =>
+      expect(
+        container
+          .querySelector<HTMLAnchorElement>(".chat-assistant-attachment-card__download")
+          ?.getAttribute("href"),
+      ).toBe(
+        `/__openclaw__/assistant-media?source=${encodeURIComponent(source)}&mediaTicket=ticket-bootstrap-audio`,
+      ),
     );
   });
 
@@ -4980,16 +4783,14 @@ describe("grouped chat rendering", () => {
       );
 
     rerender();
-    await flushAssistantAttachmentAvailabilityChecks();
     const download = () =>
       container
         .querySelector<HTMLAnchorElement>(".chat-assistant-attachment-card__download")
         ?.getAttribute("href");
-    expect(download()).toContain("mediaTicket=ticket-old");
+    await vi.waitFor(() => expect(download()).toContain("mediaTicket=ticket-old"));
 
     await vi.advanceTimersByTimeAsync(1_001);
-    await flushAssistantAttachmentAvailabilityChecks();
-    expect(download()).toContain("mediaTicket=ticket-new");
+    await vi.waitFor(() => expect(download()).toContain("mediaTicket=ticket-new"));
     expect(container.querySelector("openclaw-chat-audio-player")).not.toBeNull();
   });
 
@@ -6177,43 +5978,6 @@ describe("grouped chat rendering", () => {
     });
   });
 
-  it("updates the authenticated widget's script policy when grouped messages rerender", () => {
-    const container = document.createElement("div");
-    const renderCanvas = (embedSandboxMode: "strict" | "scripts") =>
-      renderMessageGroups(
-        container,
-        [
-          createMessageGroup(
-            createAssistantMessage(
-              [
-                { type: "text", text: "Inline canvas result." },
-                createAssistantCanvasBlock({ suffix: "sandbox-change" }),
-              ],
-              { id: "assistant-canvas-inline-sandbox-change" },
-            ),
-            "assistant",
-          ),
-        ],
-        { embedSandboxMode },
-      );
-
-    renderCanvas("strict");
-    const widget = expectCanvasWidget(container, {
-      docId: "cv_inline_sandbox-change",
-      title: "Inline demo",
-    });
-    expect(widget).toMatchObject({ allowScripts: false });
-
-    renderCanvas("scripts");
-    expect(container.querySelector("openclaw-canvas-widget-view")).toBe(widget);
-    expect(widget).toMatchObject({ allowScripts: true });
-
-    renderCanvas("strict");
-    expect(container.querySelector("openclaw-canvas-widget-view")).toBe(widget);
-    expect(widget).toMatchObject({ allowScripts: false });
-    expect(container.querySelector(".chat-tool-card__preview-panel > iframe")).toBeNull();
-  });
-
   it("renders assistant_message canvas results in the assistant bubble even when tool rows are visible", () => {
     const container = document.createElement("div");
     renderMessageGroups(
@@ -6273,30 +6037,6 @@ describe("grouped chat rendering", () => {
     expect(
       container.querySelector(".chat-group.tool .chat-tool-msg-summary__names")?.textContent,
     ).toBe("canvas_render");
-  });
-
-  it("keeps MCP App raw details reachable from its widget menu", () => {
-    const container = document.createElement("div");
-    const canvas = createAssistantCanvasBlock({
-      suffix: "mcp-raw",
-      mcpApp: { viewId: "view-mcp-raw" },
-    });
-    renderAssistantMessage(container, createAssistantMessage([canvas]), {
-      sessionKey: "agent:main:main",
-    });
-
-    const dropdown = expectElement(container, "wa-dropdown", HTMLElement);
-    expect(dropdown.querySelectorAll("wa-dropdown-item")).toHaveLength(1);
-    dropdown.dispatchEvent(
-      new CustomEvent("wa-select", {
-        detail: { item: { value: "raw-details" } },
-      }),
-    );
-    expect(
-      container
-        .querySelector(".chat-tool-card__widget-raw .chat-tool-card__raw-toggle")
-        ?.getAttribute("aria-expanded"),
-    ).toBe("true");
   });
 
   it("opens generic tool details instead of a canvas preview from tool rows", () => {

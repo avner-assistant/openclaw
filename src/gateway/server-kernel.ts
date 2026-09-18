@@ -15,6 +15,7 @@ import { hasRetainedPluginRuntimeCloseError } from "../plugins/runtime-close-err
 import { createPluginRegistryOwner } from "../plugins/runtime.js";
 import { clearSecretsRuntimeSnapshotState } from "../secrets/runtime-state.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
+import { getAgentDatabaseStartupAdmission } from "../state/agent-database-startup.js";
 import { startGatewayCoreRuntime } from "./server-core-runtime.js";
 import { prepareGatewayKernelRequestRuntime } from "./server-kernel-request-runtime.js";
 import { prepareGatewayLifecycle } from "./server-lifecycle.js";
@@ -29,6 +30,8 @@ type LoadGatewayModelCatalogSnapshot =
   typeof import("./server-model-catalog.js").loadGatewayModelCatalogSnapshot;
 type ReadPreparedGatewayModelCatalog =
   typeof import("./server-model-catalog.js").readPreparedGatewayModelCatalog;
+type ReadPreparedGatewayModelCatalogBatch =
+  typeof import("./server-model-catalog.js").readPreparedGatewayModelCatalogBatch;
 type LoadPreparedGatewayModelCatalogSnapshot =
   typeof import("./server-model-catalog.js").loadPreparedGatewayModelCatalogSnapshot;
 type ReadPreparedGatewayModelCatalogOwnerSnapshot =
@@ -94,6 +97,12 @@ const loadGatewayModelCatalogSnapshot: LoadGatewayModelCatalogSnapshot = async (
 const readPreparedGatewayModelCatalog: ReadPreparedGatewayModelCatalog = async (...args) => {
   const mod = await loadGatewayModelCatalogModule();
   return mod.readPreparedGatewayModelCatalog(...args);
+};
+const readPreparedGatewayModelCatalogBatch: ReadPreparedGatewayModelCatalogBatch = async (
+  ...args
+) => {
+  const mod = await loadGatewayModelCatalogModule();
+  return mod.readPreparedGatewayModelCatalogBatch(...args);
 };
 const loadPreparedGatewayModelCatalogSnapshot: LoadPreparedGatewayModelCatalogSnapshot = async (
   ...args
@@ -198,6 +207,8 @@ async function createGatewayKernelWithSdkHost(
         bootstrap,
         bootId,
         pluginRegistryOwner: preparedPluginRegistryOwner,
+        getPluginReloadStatus: () =>
+          lifecycleRuntime?.kernel.pluginRuntimeGeneration.getReloadStatus(),
         port,
         opts,
         log,
@@ -230,6 +241,10 @@ async function createGatewayKernelWithSdkHost(
       }),
     );
     lifecycleRuntime = preparedLifecycleRuntime;
+    const databaseStartupAdmission = getAgentDatabaseStartupAdmission();
+    if (databaseStartupAdmission) {
+      preparedLifecycleRuntime.registerGatewayLifetimeSidecars(databaseStartupAdmission.adopt());
+    }
     // Retain teardown first. A timer turn lets I/O run before more cached imports.
     await delay(0, undefined, { signal: runtime.connectionWork.signal });
     runtime.connectionWork.signal.throwIfAborted();
@@ -249,6 +264,7 @@ async function createGatewayKernelWithSdkHost(
         loadGatewayModelCatalog,
         loadGatewayModelCatalogSnapshot,
         readPreparedGatewayModelCatalog,
+        readPreparedGatewayModelCatalogBatch,
       }),
     );
     if (!options.deferEarlyRuntime) {

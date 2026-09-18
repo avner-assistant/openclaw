@@ -39,6 +39,12 @@ import type {
   SessionEntryMaintenanceResult,
 } from "./session-accessor.sqlite-lifecycle-types.js";
 import {
+  invalidateSessionEntryMaintenanceAgeFact,
+  readSessionEntryMaintenanceAgeFact,
+  readSessionEntryMaintenanceNextAgeAt,
+  recordSessionEntryMaintenanceAgeFact,
+} from "./session-accessor.sqlite-maintenance-age.js";
+import {
   collectSqliteSessionMaintenanceBaseKeys,
   readSessionMaintenanceAgeCandidates,
   readSessionMaintenanceCapCandidates,
@@ -57,6 +63,7 @@ import { collectSessionMaintenancePreserveKeysForStore } from "./store-maintenan
 import { resolveMaintenanceConfig } from "./store-maintenance-runtime.js";
 import {
   normalizeResolvedMaintenanceConfigInput,
+  shouldRunSessionEntryMaintenance,
   type ResolvedSessionMaintenanceConfigInput,
 } from "./store-maintenance.js";
 
@@ -363,17 +370,32 @@ export function applySessionEntryMaintenance(
   // Key projections and indexed age candidates keep unrelated entry payloads out
   // of automatic maintenance. Exact full entries load only for rows selected to change.
   const entryCount = readSessionEntryCount(database, { includeArchived: false });
+  if (
+    !shouldRunSessionEntryMaintenance({
+      entryCount,
+      maxEntries: maintenance.maxEntries,
+      force: params.forceMaintenance,
+    })
+  ) {
+    const ageFact = readSessionEntryMaintenanceAgeFact(database.db, maintenance);
+    if (ageFact && Date.now() < ageFact.next.at) {
+      return {
+        entryRemovals: [],
+        stateDeletePlans: [],
+        archived: 0,
+        capArchived: 0,
+        modelRunPruned: 0,
+        pruned: 0,
+        capped: 0,
+      };
+    }
+  }
+  invalidateSessionEntryMaintenanceAgeFact(database.db);
+  const plannedAt = Date.now();
   const activeSessionKeys = uniqueStrings([
     params.activeSessionKey ?? "",
     ...(params.activeSessionKeys ?? []),
   ]);
-  const keyProjection = readSessionMaintenanceKeyProjection(database);
-  const preserveKeys =
-    collectSessionMaintenancePreserveKeysForStore({
-      storePath: params.storePath,
-      store: keyProjection,
-      baseKeys: collectSqliteSessionMaintenanceBaseKeys(keyProjection, activeSessionKeys),
-    }) ?? new Set<string>();
   const removalReasons = new Map<
     string,
     NonNullable<SessionEntryMaintenancePlan["entryRemovals"][number]["maintenanceReason"]>
@@ -385,7 +407,14 @@ export function applySessionEntryMaintenance(
       maintenance,
       initialUnarchivedCount: entryCount,
       forceMaintenance: params.forceMaintenance,
-      preserveKeys,
+      readPreserveKeys: () => {
+        const keyProjection = readSessionMaintenanceKeyProjection(database);
+        return collectSessionMaintenancePreserveKeysForStore({
+          storePath: params.storePath,
+          store: keyProjection,
+          baseKeys: collectSqliteSessionMaintenanceBaseKeys(keyProjection, activeSessionKeys),
+        });
+      },
       log: false,
       readAgeCandidates: (minimumAgeMs) =>
         readSessionMaintenanceAgeCandidates({ database, minimumAgeMs }),
@@ -431,6 +460,7 @@ export function applySessionEntryMaintenance(
     const expectedEntry = selectedEntries[sessionKey];
     return expectedEntry ? [{ expectedEntry, maintenanceReason, sessionKey }] : [];
   });
+  recordSessionEntryMaintenanceAgeFact(database, maintenance, plannedAt);
   if (removals.length === 0) {
     return {
       ...(archivedWorktrees.length ? { archivedWorktrees } : {}),
@@ -483,6 +513,18 @@ export function applySessionEntryMaintenance(
     pruned,
     capped,
   };
+}
+
+export function readNextSessionEntryMaintenanceAt(
+  database: OpenClawAgentDatabase,
+  maintenanceConfig?: ResolvedSessionMaintenanceConfigInput,
+): number | undefined {
+  return readSessionEntryMaintenanceNextAgeAt(
+    database,
+    maintenanceConfig
+      ? normalizeResolvedMaintenanceConfigInput(maintenanceConfig)
+      : resolveMaintenanceConfig(),
+  );
 }
 
 /** Finalizes maintenance after its caller releases the per-store writer lane. */

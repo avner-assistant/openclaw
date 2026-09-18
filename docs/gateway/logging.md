@@ -139,6 +139,51 @@ Fast requests and requests with diagnostics disabled emit no summary. The
 record adds no job identifiers, content, query strings, targets or error text,
 and does not change individual slow-page warnings or response payloads.
 
+### Slow Codex catalog pages
+
+With diagnostics and warning logging enabled, a Codex catalog page taking at
+least one second emits `slow Codex catalog page producer`. Its existing phase
+totals distinguish client acquisition, request waiting, and page processing.
+`diagnosticEpoch` and `operationId` identify the page observation;
+`listOperationId` links its originating logical list when available.
+
+`controlWaitersV1` is a JSON-encoded array joining sampled page waits to the
+physical client and JSON-RPC attempt. Decode the string with `JSON.parse` to
+read its tuples. It keeps the first two and latest two completed waiter summaries.
+`controlWaitersOmitted` counts summaries excluded by the bounds. Each entry has
+these positions:
+
+| Index | Meaning                                                       |
+| ----: | ------------------------------------------------------------- |
+|     0 | Control request ordinal within the page                       |
+|     1 | Overload attempt ordinal within that control request          |
+|     2 | Physical client instance UUID                                 |
+|     3 | JSON-RPC request id                                           |
+|     4 | Waiter ordinal within that wire attempt                       |
+|     5 | `new` or `joined` attempt                                     |
+|     6 | Attempt creation time                                         |
+|     7 | First possible write time, or `null` before any write attempt |
+|     8 | Waiter attachment time                                        |
+|     9 | Waiter settlement time                                        |
+|    10 | Waiter outcome                                                |
+|    11 | Wire outcome observed when the waiter settled                 |
+|    12 | Wire outcome observation time, or `null` while pending        |
+
+Times are rounded process-local monotonic milliseconds, comparable within the
+same process. A later waiter retains the original attempt and possible-write
+times. Waiter outcomes distinguish `resolved`, `native-error`, `timed-out`,
+`aborted`, `authority-rejected`, `local-failed`, and `client-closed`. Wire outcomes
+are `retained-pending`, `native-ok`, `native-error`, `ingress-rejected`,
+`correlation-closed`, or `not-written`.
+
+A possible write does not prove native acceptance. A joined waiter does not
+mean another request was sent, and a timed-out waiter can leave the wire attempt
+pending. Later wire settlement is not promised after the page observation closes.
+These records contain no query, cursor, path, title, authentication data, or raw
+error. Existing bounds remain 64 active observations, 60 warnings per minute,
+28 metadata keys, and 2,048 bytes. Missing or omitted summaries are unavailable
+evidence, not zero activity; durations do not attribute native CPU or client receipt.
+
 ## Console capture
 
 The CLI captures `console.log/info/warn/error/debug/trace`, writes them to file logs, and still prints to stdout/stderr.
@@ -186,21 +231,51 @@ The gateway prints WebSocket protocol logs in two modes:
 - **Verbose mode (`--verbose`)**: prints all WS request/response traffic.
 
 With `diagnostics.enabled: true` and warning logging enabled, `sessions.list`
-handlers taking at least one second also emit `slow session list`. The record
-includes process/thread identity, the request trace, and `cacheRole`: a completed
-cache hit, an in-flight follower, a projection owner, or `unreached` if the handler
-failed before selecting a cache path. Followers can include `workTraceId` and
-`workSpanId` to identify the request producing their shared result. Successful
-list results report `selectedRowCount` for every cache role.
+handlers and `sessions.subscribe` snapshot handlers taking at least one second
+also emit `slow session list`. The `operation` field identifies which request
+produced the record. The record
+includes process/thread identity, the request trace, and row counts:
+`selectedRowCount`, `dirtyRowCount`, `materializedRowCount`, and `reusedRowCount`.
+The latter two distinguish selected rows refreshed during this request from
+selected rows already resident when it began. Dirty counts describe pending
+owner work at the start of the request.
 
-Projection owners report phase totals, visibility-repair counts, synchronous
-preparation/row time, and `yieldWaitMs`/`yieldCount` for time spent awaiting the
-event loop. Hits and followers omit those projection counters. `rows` includes
-its synchronous and yielded intervals; do not add those details to the phase
-total again. `handlerElapsedMs` starts before parameter validation and excludes
+Transcript-only row refreshes use a one-second window per resident session: the
+first notification refreshes promptly, and further notifications collapse into a
+trailing refresh. These pending notifications are not dirty rows until that
+refresh is due. Transcript freshness can therefore lag by up to one window;
+optional previews still wait for idle background backfill. Metadata, lifecycle,
+catalog, and topology publications continue to invalidate immediately.
+Transcript notifications do not invalidate parents or children: relationships,
+inherited model settings, and subagent activity have their own metadata or
+registry publications.
+
+Records report phase totals, synchronous selection/row time, and
+`yieldWaitMs`/`yieldCount` for awaiting shared projection readiness. These waits
+can include coalesced work shared with other callers. Phase totals include their
+wait intervals; do not add the detailed counters to those totals again.
+`handlerElapsedMs` starts before parameter validation and excludes
 admission before the handler. The `response` phase includes the synchronous response callback. These are elapsed
 durations, not CPU time or proof of client receipt. No query text or session
 contents are included.
+
+The same record includes fractional-millisecond current-thread CPU measurements
+for synchronous work: `prepareThreadCpuMs`, `rowThreadCpuMs`, and
+`responseThreadCpuMs`. Preparation covers resident selection, filtering, and
+sorting after projection readiness. Row CPU includes presentation and final list
+construction. Both intervals finish before the response callback is measured;
+response CPU excludes network waits. Measurements finish before this diagnostic
+record is published or logged. Projection readiness waits, background
+materialization, intervening microtasks, and worker CPU are not included.
+These are selected inclusive CPU intervals, including same-thread native work and
+garbage collection, not SQL-only CPU or a complete request CPU total.
+
+Unvisited measurements are omitted. Each request retains its own selection,
+presentation, and response CPU without inheriting shared background work.
+If a CPU counter read fails, all CPU fields are omitted for that request;
+its result and elapsed diagnostics are preserved. Existing activation and the
+one-second warning threshold are unchanged, so missing slow records do not account
+for CPU consumed by faster requests.
 
 ### WS log style
 

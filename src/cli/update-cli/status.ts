@@ -1,6 +1,9 @@
 // `openclaw update status`: combines install metadata, configured channel, and remote update checks.
+
+import { sanitizeTerminalText } from "../../../packages/terminal-core/src/safe-text.js";
 import { getTerminalTableWidth, renderTable } from "../../../packages/terminal-core/src/table.js";
 import { theme } from "../../../packages/terminal-core/src/theme.js";
+import { readSessionSqliteMigrationWarnings } from "../../commands/doctor-session-sqlite-warnings.js";
 import { collectNodeRuntimeFindings } from "../../commands/node-runtime-diagnostics.js";
 import {
   formatUpdateAvailableHint,
@@ -10,6 +13,11 @@ import {
 } from "../../commands/status.update.js";
 import { readSourceConfigBestEffort } from "../../config/config.js";
 import {
+  formatDeferredPluginMigration,
+  readDeferredPluginMigrations,
+} from "../../infra/deferred-plugin-migrations.js";
+import { formatErrorMessage } from "../../infra/errors.js";
+import {
   normalizeUpdateChannel,
   resolveUpdateChannelDisplay,
 } from "../../infra/update-channels.js";
@@ -17,6 +25,7 @@ import { checkUpdateStatus, formatGitInstallLabel } from "../../infra/update-che
 import { readUpdateRunReportHealth } from "../../infra/update-run-report-health.js";
 import { renderUpdateRunReport } from "../../infra/update-run-report.js";
 import { readUpdateRunStatus } from "../../infra/update-run-status.js";
+import { redactSensitiveText } from "../../logging/redact.js";
 import { defaultRuntime } from "../../runtime.js";
 import { VERSION } from "../../version.js";
 import { parseTimeoutMsOrExit, resolveUpdateRoot, type UpdateStatusOptions } from "./shared.js";
@@ -61,6 +70,21 @@ export async function updateStatusCommand(opts: UpdateStatusOptions): Promise<vo
   const updateAvailability = resolveUpdateAvailability(update);
 
   const runStatus = readUpdateRunStatus();
+  const safeMessage = (message: string) =>
+    sanitizeTerminalText(redactSensitiveText(message, { mode: "tools" }));
+  const migrationWarnings: string[] = [];
+  const migrationWarningErrors: string[] = [];
+  for (const readWarnings of [
+    () => readDeferredPluginMigrations().map(formatDeferredPluginMigration),
+    () => readSessionSqliteMigrationWarnings(),
+  ]) {
+    try {
+      migrationWarnings.push(...readWarnings().map(safeMessage));
+    } catch (error) {
+      migrationWarningErrors.push(safeMessage(formatErrorMessage(error)));
+    }
+  }
+  const migrationWarningsError = migrationWarningErrors.join("\n");
 
   if (opts.json) {
     defaultRuntime.writeJson({
@@ -73,6 +97,8 @@ export async function updateStatusCommand(opts: UpdateStatusOptions): Promise<vo
       },
       availability: updateAvailability,
       ...(runtimeFindings.length > 0 ? { runtimeFindings } : {}),
+      ...(migrationWarnings.length > 0 ? { migrationWarnings } : {}),
+      ...(migrationWarningsError ? { migrationWarningsError } : {}),
       ...runStatus,
     });
     return;
@@ -124,6 +150,18 @@ export async function updateStatusCommand(opts: UpdateStatusOptions): Promise<vo
     }).trimEnd(),
   );
   defaultRuntime.log("");
+
+  for (const warning of migrationWarnings) {
+    defaultRuntime.log(theme.warn(`Warning: ${warning}`));
+  }
+  if (migrationWarningsError) {
+    defaultRuntime.log(
+      theme.warn(`Pending migration status unavailable: ${migrationWarningsError}`),
+    );
+  }
+  if (migrationWarnings.length > 0 || migrationWarningsError) {
+    defaultRuntime.log("");
+  }
 
   if ("runReconciliationError" in runStatus) {
     defaultRuntime.log(

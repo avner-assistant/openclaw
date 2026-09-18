@@ -28,6 +28,8 @@ open the run's session.
 
 For a `current` job using `announce` (the default), the final assistant result is a first-class session completion, not a WebChat-specific outbound message. OpenClaw waits for active turns in the creation-bound conversation, verifies that the same session generation still owns the key, and commits the result through the canonical transcript writer with cron job/run provenance and a job/run idempotency key. A retry cannot append the same result twice.
 
+Current-session results use the same silent-reply handling as channel announcements. Internal control tokens stay out of conversation history, and suppressing a caption preserves its attached media.
+
 If the run is canceled while waiting for the conversation, it stops waiting without interrupting the active turn or appending a result.
 
 WebChat receives the committed `session.message` event immediately. The same assistant result comes from `chat.history` after a refresh or reconnect; no follow-up user message is required. Delivery is successful only after that transcript/event commit succeeds.
@@ -70,6 +72,19 @@ Channel announcements retry transient failures only when no payload may have rea
 When announce delivery uses `channel: "last"` or omits `channel`, a provider-prefixed target such as `telegram:123` can select the channel before the scheduler falls back to session history or a single configured channel. Only prefixes advertised by the loaded plugin are provider selectors. If `delivery.channel` is explicit, the target prefix must name the same provider; `channel: "whatsapp"` with `to: "telegram:123"` is rejected instead of letting WhatsApp interpret the Telegram ID as a phone number. Target-kind and service prefixes (`channel:<id>`, `user:<id>`, `imessage:<handle>`, `sms:<number>`) stay channel-owned target syntax, not provider selectors.
 
 For isolated jobs, chat delivery is shared: if a chat route is available, the agent can use the `message` tool even with `--no-deliver`. If the agent sends to the configured/current target, OpenClaw skips the fallback announce. Otherwise `announce`, `webhook`, and `none` only control what the runner does with the final reply after the agent turn.
+
+Scheduled `message` actions use the Gateway that owns the live run. Keep the
+job's account, channel, target, and configured delivery route, but do not supply
+per-call `gatewayUrl` or `gatewayToken` fields. Ordinary and standalone message
+calls can still use those fields. To recover an existing trusted job whose
+prompt or template supplies them, edit only that prompt or template to remove
+the two fields, then run the same job again. A Gateway action reports
+`Scheduled message actions require the active bound Gateway. Remove per-call
+gatewayUrl and gatewayToken fields and retry.` until those fields are removed;
+without a scheduler-host binding it reports `Scheduled message actions require
+an active bound Gateway.` Run the job on its owning Gateway instead of copying
+connection fields into the prompt. The next send then uses the live binding,
+including current cancellation and tool-policy withdrawal.
 
 When an agent creates an isolated reminder from an active chat, OpenClaw stores the preserved live delivery target for the fallback announce route. Internal session keys may be lowercase; provider delivery targets are not reconstructed from those keys when current chat context is available.
 

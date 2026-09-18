@@ -42,17 +42,35 @@ import type { InstalledPluginInstallRecordInfo } from "../plugins/installed-plug
 import { EMPTY_LEGACY_SESSION_SURFACES } from "../plugins/legacy-session-surfaces.types.js";
 import { writeConfigMachineState } from "../state/config-machine-state-write.js";
 import { readConfigMachineState } from "../state/config-machine-state.js";
-import { closeOpenClawAgentDatabasesForTest } from "../state/openclaw-agent-db.js";
+import {
+  closeOpenClawAgentDatabasesAsync,
+  closeOpenClawAgentDatabasesForTest,
+} from "../state/openclaw-agent-db.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../state/openclaw-state-db-contract.js";
 import {
+  closeOpenClawStateDatabaseAsync,
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { loadTaskFlowRegistryStateFromSqlite } from "../tasks/task-flow-registry.store.sqlite.js";
 import { loadTaskRegistryStateFromSqlite } from "../tasks/task-registry.store.sqlite.js";
+import { createLegacyAgentDatabaseRegistry } from "./doctor-state-migrations.agent-registry.test-support.js";
 
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
+  afterEach(async () => {
+    await closeOpenClawAgentDatabasesAsync();
+    await closeOpenClawStateDatabaseAsync();
+    resetAutoMigrateLegacyStateDirForTest();
+    resetAutoMigrateLegacyTaskStateSidecarsForTest();
+    closeOpenClawAgentDatabasesForTest();
+    closeOpenClawStateDatabaseForTest();
+    setMaxPluginStateEntriesPerPluginForTests();
+    resetPluginStateStoreForTests();
+    mockedChannelMigrationPlans.plans = [];
+    cleanup();
+  }),
+);
 
 function makeDoctorStateDir(): string {
   return tempDirs.make("openclaw-doctor-");
@@ -264,16 +282,6 @@ async function runTelegramAllowFromMigration(params: { root: string; cfg: OpenCl
   return { oauthDir, env, detected, result };
 }
 
-afterEach(() => {
-  resetAutoMigrateLegacyStateDirForTest();
-  resetAutoMigrateLegacyTaskStateSidecarsForTest();
-  closeOpenClawStateDatabaseForTest();
-  closeOpenClawAgentDatabasesForTest();
-  setMaxPluginStateEntriesPerPluginForTests();
-  resetPluginStateStoreForTests();
-  mockedChannelMigrationPlans.plans = [];
-});
-
 function writeJson5(filePath: string, value: unknown) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, JSON.stringify(value, null, 2), "utf-8");
@@ -288,40 +296,6 @@ function readPrimaryKeyColumns(db: DatabaseSync, tableName: string): string[] {
     .filter((row) => Number(row.pk ?? 0) > 0 && typeof row.name === "string")
     .toSorted((left, right) => Number(left.pk ?? 0) - Number(right.pk ?? 0))
     .map((row) => row.name as string);
-}
-
-function createLegacyAgentDatabaseRegistry(stateDir: string): string {
-  const stateDatabasePath = path.join(stateDir, "state", "openclaw.sqlite");
-  fs.mkdirSync(path.dirname(stateDatabasePath), { recursive: true });
-  const { DatabaseSync } = requireNodeSqlite();
-  const db = new DatabaseSync(stateDatabasePath);
-  try {
-    db.exec(`
-      CREATE TABLE agent_databases (
-        agent_id TEXT NOT NULL PRIMARY KEY,
-        path TEXT NOT NULL,
-        schema_version INTEGER NOT NULL,
-        last_seen_at INTEGER NOT NULL,
-        size_bytes INTEGER
-      );
-      INSERT INTO agent_databases (
-        agent_id,
-        path,
-        schema_version,
-        last_seen_at,
-        size_bytes
-      ) VALUES (
-        'worker-1',
-        '/legacy/worker-1/openclaw-agent.sqlite',
-        1,
-        10,
-        20
-      );
-    `);
-  } finally {
-    db.close();
-  }
-  return stateDatabasePath;
 }
 
 function writeLegacySessionsFixture(params: {
@@ -1103,7 +1077,7 @@ describe("doctor legacy state migrations", () => {
   it("migrates the legacy shared state agent registry primary key", async () => {
     const root = makeDoctorStateDir();
     const stateDir = path.join(root, ".openclaw");
-    const stateDatabasePath = createLegacyAgentDatabaseRegistry(stateDir);
+    const stateDatabasePath = await createLegacyAgentDatabaseRegistry(stateDir);
     const detected = await detectLegacyStateMigrations({
       cfg: {},
       env: {} as NodeJS.ProcessEnv,
@@ -1118,6 +1092,7 @@ describe("doctor legacy state migrations", () => {
     expect(result.warnings).toStrictEqual([]);
     expect(result.changes).toStrictEqual([
       "Migrated shared state agent database registry primary key → agent_id,path",
+      "Migrated shared state tables to SQLite STRICT typing (1)",
     ]);
 
     const { DatabaseSync } = requireNodeSqlite();
@@ -1144,6 +1119,28 @@ describe("doctor legacy state migrations", () => {
             size_bytes = excluded.size_bytes;
         `),
       ).not.toThrow();
+      expect(
+        db
+          .prepare(
+            "SELECT agent_id, path, schema_version, last_seen_at, size_bytes FROM agent_databases ORDER BY path",
+          )
+          .all(),
+      ).toEqual([
+        {
+          agent_id: "worker-1",
+          path: "/legacy/worker-1/openclaw-agent.sqlite",
+          schema_version: 1,
+          last_seen_at: 10,
+          size_bytes: 20,
+        },
+        {
+          agent_id: "worker-1",
+          path: "/relocated/worker-1/openclaw-agent.sqlite",
+          schema_version: 1,
+          last_seen_at: 20,
+          size_bytes: 30,
+        },
+      ]);
     } finally {
       db.close();
     }
@@ -1152,7 +1149,7 @@ describe("doctor legacy state migrations", () => {
   it("does not repair newer shared state schemas", async () => {
     const root = makeDoctorStateDir();
     const stateDir = path.join(root, ".openclaw");
-    const stateDatabasePath = createLegacyAgentDatabaseRegistry(stateDir);
+    const stateDatabasePath = await createLegacyAgentDatabaseRegistry(stateDir);
     const { DatabaseSync } = requireNodeSqlite();
     const seededDb = new DatabaseSync(stateDatabasePath);
     seededDb.exec(`PRAGMA user_version = ${OPENCLAW_STATE_SCHEMA_VERSION + 1};`);
@@ -1688,6 +1685,7 @@ describe("doctor legacy state migrations", () => {
       await store.register("scope:existing", { body: "fresh" });
       await store.register("other:keep", { body: "other" });
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -1851,6 +1849,7 @@ describe("doctor legacy state migrations", () => {
       });
       await store.register("existing", { offset: 10 });
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -1982,6 +1981,7 @@ describe("doctor legacy state migrations", () => {
       });
       await store.register("current", { body: "current" });
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -2039,6 +2039,7 @@ describe("doctor legacy state migrations", () => {
       });
       await store.register("current", { body: "current" });
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -2094,6 +2095,7 @@ describe("doctor legacy state migrations", () => {
       });
       await store.register("current", { body: "current" });
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const firstDetected = await detectLegacyStateMigrations({
@@ -2111,6 +2113,7 @@ describe("doctor legacy state migrations", () => {
       });
       await store.delete("current");
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const secondDetected = await detectLegacyStateMigrations({
@@ -2163,6 +2166,7 @@ describe("doctor legacy state migrations", () => {
       });
       await store.register("current", { body: "current" });
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -2214,6 +2218,7 @@ describe("doctor legacy state migrations", () => {
       });
       await store.register("covered", { body: "current" });
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -2264,6 +2269,7 @@ describe("doctor legacy state migrations", () => {
         })),
       );
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -3448,6 +3454,7 @@ describe("doctor legacy state migrations", () => {
       });
       await store.register("interaction:1", { ok: false });
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -3516,6 +3523,7 @@ describe("doctor legacy state migrations", () => {
         },
       ]);
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -3593,6 +3601,7 @@ describe("doctor legacy state migrations", () => {
         },
       ]);
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -3651,6 +3660,7 @@ describe("doctor legacy state migrations", () => {
         },
       ]);
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -3681,6 +3691,7 @@ describe("doctor legacy state migrations", () => {
         },
       ]);
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({
@@ -3708,6 +3719,7 @@ describe("doctor legacy state migrations", () => {
         },
       ]);
     });
+    await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
 
     const detected = await detectLegacyStateMigrations({

@@ -21,14 +21,8 @@ import {
   type EmbeddingProviderRuntime,
 } from "./embeddings.js";
 import { MemoryIndexDatabase } from "./manager-database-context.js";
-import {
-  cleanupAgedMemoryReindexTempFiles,
-  memoryDatabaseTableExists,
-  openMemoryDatabaseAtPath,
-  prepareMemoryDatabasePublication,
-  readMemoryDatabaseRevision,
-  removeMemoryDatabaseFiles,
-} from "./manager-db.js";
+import { memoryDatabaseTableExists, readMemoryDatabaseRevision } from "./manager-db-kernel.js";
+import { cleanupAgedMemoryReindexTempFiles, removeMemoryDatabaseFiles } from "./manager-db.js";
 import { isMemoryEmbeddingOperationError } from "./manager-embedding-errors.js";
 import { withMemoryIndexPublishGeneration } from "./manager-index-generation-lease.js";
 import {
@@ -45,13 +39,13 @@ import {
   type MemoryIndexMeta,
   type MemoryIndexProviderIdentity,
 } from "./manager-reindex-state.js";
+import { readMemoryShadowIdentity } from "./manager-shadow-task.js";
 import { MemoryManagerSourceSyncOps } from "./manager-source-sync-ops.js";
 import { MEMORY_INDEX_META_KEY, type MemorySyncProgressState } from "./manager-sync-base.js";
 import {
   markMemoryTargetArchiveFilesDirty,
   runMemoryTargetedSessionSync,
 } from "./manager-targeted-sync.js";
-import { markMemoryVectorIndexClean } from "./manager-vector-rebuild-state.js";
 
 export type { MemoryIndexWorkItem } from "./manager-sync-base.js";
 
@@ -572,12 +566,12 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       { reason: params.reason, force: params.force },
       true,
     );
+    let shadowCleanup: MemoryIndexDatabase | undefined;
     try {
-      cleanupAgedMemoryReindexTempFiles(dbPath);
+      await cleanupAgedMemoryReindexTempFiles(dbPath);
       const originalRevision = readMemoryDatabaseRevision(originalDb);
-      const shadow = new MemoryIndexDatabase(
-        openMemoryDatabaseAtPath(tempDbPath, this.settings.store.vector.enabled),
-      );
+      const shadow = MemoryIndexDatabase.openShadow(tempDbPath, this.settings.store.vector.enabled);
+      shadowCleanup = shadow;
       shadow.vector.enabled = this.vector.enabled;
       shadow.vector.extensionPath = this.vector.extensionPath;
       shadow.fts.enabled = this.fts.enabled;
@@ -585,7 +579,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       // status keep the published handle and its vector/FTS/metadata state.
       const rebuilt = await this.withReindexDatabase(shadow, async () => {
         try {
-          this.ensureSchema();
+          await this.withDatabaseWrite(() => this.ensureSchema());
 
           const shouldSyncMemory = shouldRetryMemoryOnFailure;
           const shouldSyncSessions = shouldRetrySessionsOnFailure;
@@ -661,21 +655,29 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
 
       await withMemoryWorkspaceLock(this.workspaceDir, async () => {
         await withMemoryIndexPublishGeneration(dbPath, async () => {
-          const publish = await prepareMemoryDatabasePublication({
-            targetDb: originalDb,
-            sourcePath: tempDbPath,
-            metaKey: MEMORY_INDEX_META_KEY,
-            expectedRevision: originalRevision,
-            sourceHasVectors: rebuilt.hasVectors,
-            vectorExtensionPath: shadow.vector.extensionPath,
-          });
-          await this.withDatabaseWrite(() => {
-            publish();
-            if (rebuilt.vectorIndexComplete) {
-              // Publish completeness only after the shadow tables committed.
-              markMemoryVectorIndexClean(originalDb);
-            }
-          });
+          await this.publishedDatabase.publishShadow(
+            {
+              sourcePath: tempDbPath,
+              sourceIdentity: readMemoryShadowIdentity(tempDbPath),
+              metaKey: MEMORY_INDEX_META_KEY,
+              expectedRevision: originalRevision,
+              sourceHasVectors: rebuilt.hasVectors,
+              vectorIndexComplete: rebuilt.vectorIndexComplete,
+              extensionPath: shadow.vector.extensionPath,
+            },
+            () => {
+              if (
+                this.closed ||
+                this.publishedDatabase.closed ||
+                this.publishedDatabase.readOnly ||
+                this.publishedDatabase.db !== originalDb ||
+                !originalDb.isOpen
+              ) {
+                throw new Error("Memory publication owner changed before reindex publication");
+              }
+              shadow.assertShadowPath();
+            },
+          );
         });
       });
 
@@ -696,7 +698,10 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
       throw err;
     } finally {
       try {
-        removeMemoryDatabaseFiles(tempDbPath);
+        if (shadowCleanup?.shadowReleased) {
+          shadowCleanup.assertShadowPath();
+          await removeMemoryDatabaseFiles(tempDbPath);
+        }
       } catch (err) {
         log.warn(`failed to remove memory reindex shadow database: ${formatErrorMessage(err)}`);
       }

@@ -13,14 +13,17 @@ import { addSessionMember } from "../../config/sessions/session-sharing-store.js
 import type { GatewayOperatorRoleDefinition } from "../../config/types.gateway.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { emitAgentEvent } from "../../infra/agent-events.js";
+import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import {
+  finalizeTaskRecordByRunId,
   getTaskById,
   markTaskTerminalById,
   recordTaskProgressByRunId,
 } from "../../tasks/runtime-internal.js";
+import { createAcpTaskBackingDetailForTest } from "../../tasks/task-backing-authority.test-support.js";
 import { updateTaskStateByRunId } from "../../tasks/task-registry-record-api.js";
-import { reloadTaskRegistryFromStore } from "../../tasks/task-registry.js";
+import { reloadTaskRegistryFromStoreAsync } from "../../tasks/task-registry-state.js";
 import { createTaskFixture } from "../../tasks/task-registry.test-support.js";
 import { seedTaskRegistryRowsForTests } from "../../test-utils/task-registry-sqlite.js";
 import {
@@ -170,7 +173,7 @@ describe("tasks gateway handlers", () => {
       endedAt: base - 3_000,
     });
     seedTaskRegistryRowsForTests([justFinished, finishedEarlier]);
-    reloadTaskRegistryFromStore();
+    await reloadTaskRegistryFromStoreAsync(captureOpenClawStateWorkerContext());
 
     const { payload } = await runTaskHandler("tasks.list", {});
 
@@ -203,7 +206,7 @@ describe("tasks gateway handlers", () => {
       endedAt: base - 500,
     });
     seedTaskRegistryRowsForTests([laterActivity, laterCompletion]);
-    reloadTaskRegistryFromStore();
+    await reloadTaskRegistryFromStoreAsync(captureOpenClawStateWorkerContext());
 
     const { payload } = await runTaskHandler("tasks.list", {});
     const byId = new Map(payload?.tasks?.map((task) => [task.taskId, task]));
@@ -331,7 +334,7 @@ describe("tasks gateway handlers", () => {
       lastEventAt: sharedActivityAt,
     });
     seedTaskRegistryRowsForTests([laterId, earlierId]);
-    reloadTaskRegistryFromStore();
+    await reloadTaskRegistryFromStoreAsync(captureOpenClawStateWorkerContext());
 
     const { payload } = await runTaskHandler("tasks.list", {});
 
@@ -674,6 +677,43 @@ describe("tasks gateway handlers", () => {
     expect(payload?.task?.error).toBeUndefined();
   });
 
+  it("refuses native subagent cancellation and preserves the harness result", async () => {
+    const task = createTaskFixture("subagent", {
+      ...mainSessionTaskScope,
+      taskKind: "codex-native",
+      runId: "codex-thread:native-child",
+      task: "Native child task",
+      notifyPolicy: "silent",
+    });
+
+    const { calls, payload } = await runTaskHandler("tasks.cancel", { taskId: task.taskId });
+
+    expect(calls[0]?.[0]).toBe(true);
+    expect(payload).toMatchObject({
+      found: true,
+      cancelled: false,
+      reason:
+        "This subagent is controlled by its native harness. Use the parent session's native collaboration tools to stop it.",
+      task: { id: task.taskId, status: "running" },
+    });
+    await reloadTaskRegistryFromStoreAsync(captureOpenClawStateWorkerContext());
+    expect(getTaskById(task.taskId)).toEqual(task);
+
+    finalizeTaskRecordByRunId({
+      runId: task.runId!,
+      runtime: "subagent",
+      sessionKey: task.ownerKey,
+      status: "succeeded",
+      endedAt: Date.now(),
+      terminalSummary: "Native child completed.",
+    });
+    const completed = await getTaskPayload(task.taskId);
+    expect(completed.payload?.task).toMatchObject({
+      status: "completed",
+      terminalSummary: "Native child completed.",
+    });
+  });
+
   it.each([
     ["succeeded", "completed"],
     ["failed", "failed"],
@@ -684,15 +724,17 @@ describe("tasks gateway handlers", () => {
     "tasks.cancel preserves ACP %s and explains refused cancellation",
     async (status, wireStatus) => {
       const runId = "run-acp-cancel-race";
+      const instanceId = "instance-acp-cancel-race";
       const task = createSnapshotTask({
         runtime: "acp",
         runId,
         notifyPolicy: "silent",
         childSessionKey: "agent:main:acp:cancel-race",
         agentId: "main",
+        detail: createAcpTaskBackingDetailForTest(instanceId),
       });
       seedTaskRegistryRowsForTests([task]);
-      reloadTaskRegistryFromStore();
+      await reloadTaskRegistryFromStoreAsync(captureOpenClawStateWorkerContext());
       cancelSessionMock.mockImplementationOnce(async () => {
         updateTaskStateByRunId({
           runId,
@@ -706,6 +748,14 @@ describe("tasks gateway handlers", () => {
       const { calls, payload } = await runTaskHandler("tasks.cancel", { taskId: task.taskId });
 
       expect(calls[0]?.[0]).toBe(true);
+      expect(cancelSessionMock).toHaveBeenCalledExactlyOnceWith({
+        cfg: {},
+        sessionKey: "agent:main:acp:cancel-race",
+        agentId: "main",
+        reason: "task-cancel",
+        expectedRunId: runId,
+        expectedInstanceId: instanceId,
+      });
       expect(payload).toMatchObject({ found: true, cancelled: status === "cancelled" });
       if (status === "cancelled") {
         expect(payload).not.toHaveProperty("reason");
@@ -720,7 +770,8 @@ describe("tasks gateway handlers", () => {
     },
   );
 
-  it("cancels ACP tasks through the live Gateway handler and control runtime", async () => {
+  it("cancels the selected ACP instance through the live Gateway handler and control runtime", async () => {
+    const instanceId = "instance-acp-primary";
     const task = createSnapshotTask({
       taskId: "task-acp-primary",
       runtime: "acp",
@@ -729,6 +780,7 @@ describe("tasks gateway handlers", () => {
       agentId: "codex",
       runId: "run-cancel-acp-gateway",
       task: "Primary ACP task",
+      detail: createAcpTaskBackingDetailForTest(instanceId),
     });
     const siblingTask = createSnapshotTask({
       taskId: "task-acp-sibling",
@@ -741,9 +793,10 @@ describe("tasks gateway handlers", () => {
       createdAt: 1_001,
       startedAt: 1_011,
       lastEventAt: 1_011,
+      detail: createAcpTaskBackingDetailForTest("instance-acp-sibling", 2),
     });
     seedTaskRegistryRowsForTests([task, siblingTask]);
-    reloadTaskRegistryFromStore();
+    await reloadTaskRegistryFromStoreAsync(captureOpenClawStateWorkerContext());
     cancelSessionMock.mockResolvedValue(undefined);
 
     const { calls, payload } = await runTaskHandler("tasks.cancel", {
@@ -752,20 +805,20 @@ describe("tasks gateway handlers", () => {
     });
 
     expect(calls[0]?.[0]).toBe(true);
-    expect(cancelSessionMock).toHaveBeenCalledWith({
+    expect(cancelSessionMock).toHaveBeenCalledExactlyOnceWith({
       cfg: {},
       sessionKey: "agent:codex:acp:child",
       agentId: "codex",
       reason: "operator requested stop",
       expectedRunId: "run-cancel-acp-gateway",
+      expectedInstanceId: instanceId,
     });
     expect(payload?.found).toBe(true);
     expect(payload?.cancelled).toBe(true);
     expect(payload?.task?.id).toBe(task.taskId);
     expect(payload?.task?.status).toBe("cancelled");
     expect(getTaskById(task.taskId)?.status).toBe("cancelled");
-    expect(getTaskById(siblingTask.taskId)?.status).toBe("cancelled");
-    expect(getTaskById(siblingTask.taskId)?.error).toBe("operator requested stop");
+    expect(getTaskById(siblingTask.taskId)).toEqual(siblingTask);
   });
 
   it.each([

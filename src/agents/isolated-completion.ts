@@ -12,6 +12,7 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { withTempWorkspace } from "../infra/private-temp-workspace.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 import type { AssistantMessage, Model } from "../llm/types.js";
+import { isTerminalAssistantError } from "../llm/utils/retry.js";
 import { withPluginRuntimeGenerationScope } from "../plugins/runtime/generation-scope.js";
 import { runWithAsyncWorkResources } from "../shared/async-work-resources.js";
 import { prepareSystemAgentRunAdmission } from "./admitted-run-context.js";
@@ -19,10 +20,11 @@ import { resolveAgentDir, resolveAgentWorkspaceDir, resolveDefaultAgentId } from
 import { reconcileAuthProfileQuotaBlocks } from "./auth-profiles/usage.js";
 import { resolveCliBackendConfig, resolveCliRuntimeCanonicalProvider } from "./cli-backends.js";
 import { normalizeCliModel } from "./cli-runner/helpers.js";
+import { buildAssistantFailoverSignal } from "./embedded-agent-helpers/assistant-message-failures.js";
 import { resolveEmbeddedCliBackendDispatchEligibility } from "./embedded-agent-runner/cli-backend-dispatch-eligibility.js";
 import { resolveModelAsync } from "./embedded-agent-runner/model.js";
-import { getRegisteredAgentHarness } from "./harness/registry.js";
 import { ensureSelectedAgentHarnessPlugin } from "./harness/runtime-plugin.js";
+import { resolveAgentHarnessSelectionDecision } from "./harness/selection-decision.js";
 import type {
   AgentHarness,
   AgentHarnessIsolatedCompletionAuthorization,
@@ -48,7 +50,6 @@ import {
 } from "./runtime-plan/prepare-auth.js";
 import { scopeAuthProfileStoreToPreparedPlan } from "./runtime-plan/resolve-auth.js";
 import { prepareSimpleCompletionModel } from "./simple-completion-runtime.js";
-import { resolveEffectiveAgentRuntime } from "./thinking-runtime.js";
 import type { UsageLike } from "./usage.js";
 
 type RunIsolatedCompletionParams = {
@@ -130,6 +131,9 @@ function requireIsolatedAssistantText(assistant: AssistantMessage): string {
     throw new IsolatedCompletionError(
       "output-rejected",
       `Isolated completion failed with stop reason ${assistant.stopReason}.`,
+      assistant.stopReason === "error" && !isTerminalAssistantError(assistant)
+        ? { cause: buildAssistantFailoverSignal(assistant) }
+        : undefined,
     );
   }
   const textParts: string[] = [];
@@ -318,21 +322,6 @@ function resolveCliOwner(params: {
   );
 }
 
-async function resolveHarness(runtime: string): Promise<AgentHarness> {
-  if (runtime === "openclaw") {
-    const { createOpenClawAgentHarness } = await import("./harness/builtin-openclaw.js");
-    return createOpenClawAgentHarness();
-  }
-  const harness = getRegisteredAgentHarness(runtime)?.harness;
-  if (!harness) {
-    throw new IsolatedCompletionError(
-      "runtime-unavailable",
-      `Agent harness ${runtime} is unavailable for isolated completion.`,
-    );
-  }
-  return harness;
-}
-
 function prepareIsolatedHostAuthorization<
   T extends Pick<AgentHarnessIsolatedCompletionParams, "model" | "auth">,
 >(harness: AgentHarness, authorization: T): T {
@@ -437,18 +426,21 @@ async function runIsolatedCompletionOwned(
         provider,
         modelId: request.model,
         ...context,
-        agentHarnessId: runtimeOverride,
         agentHarnessRuntimeOverride: runtimeOverride,
         pluginRegistry: lease.snapshot.pluginRegistry,
       });
       assertCurrent();
-      const runtime =
-        runtimeOverride ??
-        resolveEffectiveAgentRuntime({ cfg: config, provider, modelId: request.model, agentId });
+      const selection = resolveAgentHarnessSelectionDecision({
+        provider,
+        modelId: request.model,
+        config,
+        agentId,
+        agentHarnessRuntimeOverride: runtimeOverride,
+      });
       const cliOwner = resolveCliOwner({
         request,
         provider,
-        runtime,
+        runtime: runtimeOverride ?? selection.policy.runtime,
         ...context,
       });
       if (cliOwner) {
@@ -467,7 +459,10 @@ async function runIsolatedCompletionOwned(
         };
       }
 
-      const harness = await resolveHarness(runtime);
+      // Retain the validated plugin instance; load the built-in runner only when selected.
+      const harness = selection.builtIn
+        ? (await import("./harness/builtin-openclaw.js")).createOpenClawAgentHarness()
+        : selection.harness;
       assertCurrent();
       if (!harness.runIsolatedCompletionV2 && !harness.runIsolatedCompletion) {
         throw new IsolatedCompletionError(
@@ -624,7 +619,6 @@ async function runIsolatedCompletionOwned(
                     authProfileMode,
                     skipAgentDiscovery: true,
                     allowBundledStaticCatalogFallback: true,
-                    preferBundledStaticCatalogTransport: true,
                   }),
               });
               assertCurrent();

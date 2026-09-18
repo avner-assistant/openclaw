@@ -10,7 +10,6 @@ import { listBundledPluginPackArtifacts } from "../scripts/lib/bundled-plugin-bu
 import { resolveNpmJsonEntries } from "../scripts/lib/npm-json-output.mts";
 import { collectPackUnpackedSizeErrors } from "../scripts/lib/npm-pack-budget.mts";
 import { PACKAGE_DIST_INVENTORY_RELATIVE_PATH } from "../scripts/lib/package-dist-inventory-contract.mts";
-import { RUNTIME_DEPENDENCY_OWNERSHIP_RELATIVE_PATH } from "../scripts/lib/runtime-dependency-ownership-contract.mts";
 import { createWorkspaceBootstrapSmokeEnv } from "../scripts/lib/workspace-bootstrap-smoke.mts";
 import {
   collectInstalledBundledRuntimeSidecarPaths,
@@ -30,13 +29,13 @@ import {
   PACKED_BUNDLED_RUNTIME_DEPS_REPAIR_ARGS,
   PACKED_CLI_SMOKE_COMMANDS,
   PACKED_COMPLETION_SMOKE_ARGS,
-  packedPluginSdkSupportsSetupSurface,
   resolvePackedTarballPath,
   resolveReleaseNpmCommand,
   runReleaseCheckCommand,
 } from "../scripts/release-check.ts";
 import { COMPLETION_SKIP_PLUGIN_COMMANDS_ENV } from "../src/cli/completion-runtime.ts";
 import { resolveNpmJsonEntries as resolveRuntimeNpmJsonEntries } from "../src/infra/npm-registry-spec.js";
+import { RUNTIME_DEPENDENCY_OWNERSHIP_RELATIVE_PATH } from "../src/infra/runtime-dependency-ownership.js";
 import { withEnv } from "../src/test-utils/env.js";
 
 function makeItem(shortVersion: string, sparkleVersion: string, channel?: string): string {
@@ -162,6 +161,32 @@ describe("packed CLI smoke", () => {
       OPENCLAW_SUPPRESS_NOTES: "1",
       OPENCLAW_STATE_DIR: "/tmp/smoke-state",
     });
+  });
+
+  it("does not inherit provider credentials from the base environment", () => {
+    const env = createPackedCliSmokeEnv({
+      HOME: "/tmp/original-home",
+      OPENAI_API_KEY: "base-openai-secret",
+    });
+
+    expect(env).not.toHaveProperty("OPENAI_API_KEY");
+  });
+
+  it("does not admit provider credentials through smoke overrides", () => {
+    const env = createPackedCliSmokeEnv(
+      { HOME: "/tmp/original-home" },
+      {
+        HOME: "/tmp/smoke-home",
+        OPENCLAW_STATE_DIR: "/tmp/smoke-state",
+        OPENAI_API_KEY: "override-openai-secret",
+      },
+    );
+
+    expect(env).toMatchObject({
+      HOME: "/tmp/smoke-home",
+      OPENCLAW_STATE_DIR: "/tmp/smoke-state",
+    });
+    expect(env).not.toHaveProperty("OPENAI_API_KEY");
   });
 
   it("skips plugin command discovery during packed completion cache smoke", () => {
@@ -626,25 +651,6 @@ describe("createPackedPluginSdkTypescriptSmokeProject", () => {
     expect(packedPluginSdkMayOmitSetupSurface("2026.7.33")).toBe(true);
     expect(packedPluginSdkMayOmitSetupSurface("2026.9.4")).toBe(false);
     expect(packedPluginSdkMayOmitSetupSurface("2026.10.1")).toBe(false);
-  });
-
-  it("detects whether both packed setup declarations expose setupSurface", () => {
-    const root = mkdtempSync(join(tmpdir(), "release-check-plugin-sdk-setup-surface-"));
-    try {
-      for (const relativePath of [
-        "dist/plugin-sdk/setup.d.ts",
-        "dist/plugin-sdk/setup-runtime.d.ts",
-      ]) {
-        const declarationPath = join(root, relativePath);
-        mkdirSync(dirname(declarationPath), { recursive: true });
-        writeFileSync(declarationPath, "export type Options = { setupSurface?: unknown };\n");
-      }
-      expect(packedPluginSdkSupportsSetupSurface(root)).toBe(true);
-      writeFileSync(join(root, "dist/plugin-sdk/setup-runtime.d.ts"), "export {};\n");
-      expect(packedPluginSdkSupportsSetupSurface(root)).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
   });
 
   it("writes a consumer project that imports representative public SDK subpaths", () => {

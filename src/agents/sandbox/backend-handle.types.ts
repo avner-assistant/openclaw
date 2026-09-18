@@ -54,6 +54,7 @@ export type SandboxFsBridgeContext = {
   containerWorkdir: string;
   docker: {
     binds?: string[];
+    tmpfs?: string[];
   };
   backend?: {
     runShellCommand(params: SandboxBackendCommandParams): Promise<SandboxBackendCommandResult>;
@@ -83,6 +84,7 @@ export type SandboxBackendHandle = {
   workdirRoots?: readonly string[];
   capabilities?: {
     browser?: boolean;
+    readOnlyResourceMounts?: boolean;
   };
   buildExecSpec(params: {
     command: string;

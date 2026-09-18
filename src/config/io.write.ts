@@ -3,6 +3,10 @@ import path from "node:path";
 import { err, ok } from "@openclaw/normalization-core/result";
 import { resolveCronJobsStorePathFromConfig } from "../cron/store.js";
 import { isVerbose } from "../global-state.js";
+import {
+  readDeferredPluginMigrations,
+  withDeferredPluginMigrationsCurrent,
+} from "../infra/deferred-plugin-migrations.js";
 import { isVitestRuntimeEnv } from "../infra/env.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import {
@@ -25,6 +29,10 @@ import {
   resolveManagedUnsetPathsForWrite,
 } from "./config-path-mutation.js";
 import { assertConfigWriteAllowedInCurrentMode } from "./config-write-guard.js";
+import {
+  preserveDeferredPluginMigrationConfig,
+  setDeferredPluginMigrationConfigFacts,
+} from "./deferred-plugin-migration-config.js";
 import {
   EnvRefArrayMutationError,
   restoreEnvRefsFromMap,
@@ -130,6 +138,13 @@ export async function writeConfigFileFromContext(
       }
     : await readSnapshot();
   const snapshot = snapshotRead.snapshot;
+  const deferredPluginMigrations = readDeferredPluginMigrations({ env: deps.env });
+  const configForWrite = preserveDeferredPluginMigrationConfig({
+    sourceConfig: snapshot.sourceConfig,
+    nextConfig: cfg,
+    pending: deferredPluginMigrations,
+    writeOptions: options,
+  });
   if (doctorAuthority) {
     sourceGuard?.();
     assertUpdateDoctorConfigInputHash(configPath, hashConfigRaw(snapshot.raw));
@@ -152,7 +167,7 @@ export async function writeConfigFileFromContext(
     cronOwner,
   } = prepareConfigWriteTopology({
     ...snapshotRead,
-    nextConfig: cfg,
+    nextConfig: configForWrite,
     options,
     unsetPaths,
     env: deps.env,
@@ -168,6 +183,7 @@ export async function writeConfigFileFromContext(
 
   let persistCandidate: unknown = nextConfig;
   let envRefMap: Map<string, string> | null = null;
+  let authoredPreviousSource: unknown;
   const changedPaths = new Set<string>();
   collectChangedPaths(inputBasis.config, nextConfig, "", changedPaths);
   for (const changedPath of [...explicitSetPaths, ...(options.unsetPaths ?? [])]) {
@@ -225,6 +241,7 @@ export async function writeConfigFileFromContext(
       );
       const collected = new Map<string, string>();
       collectEnvRefPaths(resolvedIncludes, "", collected);
+      authoredPreviousSource = resolvedIncludes;
       if (collected.size > 0) {
         envRefMap = collected;
       }
@@ -250,6 +267,7 @@ export async function writeConfigFileFromContext(
       pluginValidation: options.skipPluginValidation ? "skip" : "full",
       semanticValidation: "strict",
       preservedLegacyRootKeys: options.preservedLegacyRootKeys,
+      deferredPluginMigrations,
     });
     if (!result.ok) {
       throw createConfigValidationFailedError(result.issues);
@@ -260,12 +278,14 @@ export async function writeConfigFileFromContext(
   validateCandidate(validationCandidate);
   // SAFETY: the original resolved input was just validated; retain raw values, not parser defaults.
   const validatedCandidate = validationCandidate as OpenClawConfig;
+  const previousSource =
+    authoredPreviousSource ?? snapshot.sourceConfigBeforeMigrations ?? snapshot.sourceConfig;
   const materialized = stampConfigVersion(
     snapshot.exists
       ? validatedCandidate
       : initializeNativeSessionCatalogPreferences(validatedCandidate),
     options.lastTouchedVersionOverride,
-    snapshot.exists ? (snapshot.sourceConfigBeforeMigrations ?? snapshot.sourceConfig) : null,
+    snapshot.exists ? previousSource : null,
   );
   // Resolve policy from included facts, but persist only its delta beside authored directives.
   persistCandidate = applyMergePatch(
@@ -323,7 +343,11 @@ export async function writeConfigFileFromContext(
     undefined,
     deps.homedir(),
   ) as OpenClawConfig;
-  const outputConfig = applyUnsetPathsForWrite(tildeRestoredOutputConfig, unsetPaths);
+  const outputConfig = preserveDeferredPluginMigrationConfig({
+    sourceConfig: snapshot.parsed,
+    nextConfig: applyUnsetPathsForWrite(tildeRestoredOutputConfig, unsetPaths),
+    pending: deferredPluginMigrations,
+  });
   const stampedOutputConfig = stampConfigVersion(outputConfig, options.lastTouchedVersionOverride);
   rejectConfigNonFiniteNumbers(stampedOutputConfig);
   const json = JSON.stringify(stampedOutputConfig, null, 2).trimEnd().concat("\n");
@@ -516,9 +540,14 @@ export async function writeConfigFileFromContext(
       assertCurrent: options.assertConfigPathForWrite,
     });
     await options.beforeCommit?.();
-    // Candidate staging, backup renames, and guarded publication share one synchronous turn.
-    const result = preparedFile.publish();
-    publication.phase = "published";
+    const result = withDeferredPluginMigrationsCurrent(
+      { env: deps.env, expectedPending: deferredPluginMigrations },
+      () => {
+        const published = preparedFile.publish();
+        publication.phase = "published";
+        return published;
+      },
+    );
     options.assertConfigPathForWrite?.();
     publication.phase = "accepted";
     recordUpdateDoctorConfigWrite(configPath, previousHash, nextHash, snapshot.parsed, json);
@@ -585,6 +614,7 @@ export async function writeConfigFileFromContext(
     if (!options.skipPluginValidation) {
       logConfigWarningsOnce({ configPath, warnings: validated.warnings, logger: deps.logger });
     }
+    setDeferredPluginMigrationConfigFacts(sourceConfigForPreflight, deferredPluginMigrations);
     return {
       persistedHash: nextHash,
       persistedConfig: stampedOutputConfig,

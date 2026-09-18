@@ -35,6 +35,7 @@ type DesktopSessionHost = ReactiveControllerHost & {
   embedded: boolean;
   requestedSource: string | null;
   sessionKey: string | null;
+  suppliedEnvironments: readonly EnvironmentSummary[] | null;
 };
 
 type NodeAvailability = {
@@ -58,7 +59,7 @@ export class DesktopSessionController {
     private readonly onTargetError: (error: unknown) => void,
   ) {
     new SubscriptionsController(host).effect(
-      () => (host.available ? host.client : null),
+      () => (host.available && host.suppliedEnvironments === null ? host.client : null),
       (client) =>
         client.addEventListener((event) => {
           if (!host.isConnected || !host.available || client !== host.client) {
@@ -96,7 +97,7 @@ export class DesktopSessionController {
             if (resolution) {
               void resolution.target
                 .then((target) => {
-                  // Session events omit placement; unchanged updates must keep live input.
+                  // Preserve live input when the exact-row refresh leaves its target unchanged.
                   if (
                     resolution.isCurrent() &&
                     target !== undefined &&

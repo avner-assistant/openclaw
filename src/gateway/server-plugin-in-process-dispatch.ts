@@ -9,6 +9,10 @@ import {
 import type { PluginSubagentRequesterContext } from "../plugins/runtime/subagent-requester-context.js";
 import type { RuntimePluginToolGrant } from "../plugins/runtime/tool-grant.js";
 import { readInProcessAgentRuntimeIdentity } from "./in-process-agent-runtime-identity.js";
+import {
+  bindInProcessSubagentResume,
+  readInProcessSubagentResume,
+} from "./in-process-subagent-resume.js";
 import { authorizeGatewaySessionCreation } from "./operator-role-policy.js";
 import { ADMIN_SCOPE, WRITE_SCOPE } from "./operator-scopes.js";
 import {
@@ -102,6 +106,7 @@ type DispatchGatewayMethodInProcessOptions = {
   nodeInvokeStream?: GatewayNodeInvokeStream;
   nodeInvokeApprovalSessionKey?: string;
   onAccepted?: (payload: unknown) => void;
+  onExecution?: (execution: Promise<void>) => void;
   onExecutionStarted?: () => void;
   onSignalAbort?: () => Promise<void> | void;
   operatorRoleActor?: GatewayOperatorRoleActor;
@@ -295,6 +300,15 @@ function resolveInProcessGatewayDispatch(
     cancelSubagentCompletionToolHandoff(delegatedToolPolicyHandoffId);
     throw new Error(`In-process gateway dispatch requires a scoped client (method: ${method}).`);
   }
+  const client =
+    options?.forceSyntheticClient === true ? syntheticClient : (scopedClient ?? syntheticClient);
+  const resume = readInProcessSubagentResume(options);
+  if (resume) {
+    if (method !== "agent" || options?.forceSyntheticClient !== true || !client.internal) {
+      throw new Error("Task resume requires a synthetic agent admission.");
+    }
+    bindInProcessSubagentResume(client.internal, resume);
+  }
   return {
     assertContextCurrent: () => {
       if ((resolveGatewayContext ? resolveGatewayContext() : scope?.context) !== context) {
@@ -303,8 +317,7 @@ function resolveInProcessGatewayDispatch(
         );
       }
     },
-    client:
-      options?.forceSyntheticClient === true ? syntheticClient : (scopedClient ?? syntheticClient),
+    client,
     context,
     delegatedToolPolicyHandoffId,
     isWebchatConnect,
@@ -403,6 +416,7 @@ export async function dispatchGatewayMethodInProcessRaw(
       isWebchatConnect: resolved.isWebchatConnect,
       methodRegistry: resolved.context.getGatewayMethodRegistry?.(),
       onAccepted: options?.onAccepted,
+      onExecution: options?.onExecution,
       onSignalAbort: options?.onSignalAbort,
       requestIdPrefix: "plugin-subagent",
       sessionMutationCommitGuard: () => {

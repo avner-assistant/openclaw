@@ -17,6 +17,7 @@ import type {
   ToolCard,
 } from "../../../lib/chat/chat-types.ts";
 import { resolveMessageDisplayMarkdown } from "../../../lib/chat/message-display.ts";
+import "../../../components/person-reference.ts";
 import { extractThinkingCached } from "../../../lib/chat/message-extract.ts";
 import {
   isStandaloneToolMessageForDisplay,
@@ -31,9 +32,9 @@ import {
 } from "../../../lib/chat/tool-cards.ts";
 import { type EmbedSandboxMode, resolveToolDisplay } from "../../../lib/chat/tool-display.ts";
 import { isPendingSendMessage } from "../chat-thread-items.ts";
+import type { PluginToolIcons } from "../chat-tool-icon-controller.ts";
 import "../../../styles/chat/reply-preview.css";
 import "./chat-clawhub-card.ts";
-import type { PluginToolIcons } from "../chat-tool-icon-controller.ts";
 import type { LinkFaviconFetcher } from "../link-favicon-loader.ts";
 import { workspaceResultConflictFromTranscript } from "../workspace-conflict.ts";
 import { readAsyncQuestions, type AsyncQuestionPresentation } from "./chat-async-question.ts";
@@ -60,6 +61,7 @@ import {
   renderMessageMarkdown,
   type AssistantMessageDisclosure,
 } from "./chat-message-text.ts";
+import { isSentCommentAttachment } from "./chat-sent-comments.ts";
 import type { SidebarContent } from "./chat-sidebar.ts";
 import {
   renderToolApprovalReviews,
@@ -226,6 +228,7 @@ export function renderGroupedMessage(
   messageKey: string,
   opts: {
     isStreaming: boolean;
+    isForwarded?: boolean;
     sessionKey?: string;
     presented?: boolean;
     transcriptVisible?: boolean;
@@ -265,7 +268,7 @@ export function renderGroupedMessage(
     avatar?: TemplateResult | typeof nothing;
     entryId?: string;
     /** Freshly submitted user turn: play the one-shot composer entry animation. */
-    entryAnimated?: boolean;
+    entryRef?: (element?: Element) => void;
     resolveReplyPreview?: (replyToId: string) => ReplyPreview | undefined;
     onResolveReply?: (replyToId: string) => void;
     onOpenReply?: (replyToId: string) => void;
@@ -274,7 +277,7 @@ export function renderGroupedMessage(
   onOpenSidebar?: (content: SidebarContent) => void,
 ) {
   const disclosure = opts.assistantMessageDisclosure;
-  const { message, normalizedMessage, displayMarkdown } =
+  const { message, normalizedMessage, displayMarkdown, humanMentions } =
     disclosure?.expanded && disclosure.message
       ? prepareChatMessageRender(disclosure.message)
       : preparation;
@@ -312,7 +315,9 @@ export function renderGroupedMessage(
   const cardAttachments = visibleAttachments.filter((item) => !videoPreviews.includes(item));
   const hasUserFiles =
     normalizedRole === "user" &&
-    cardAttachments.some((item) => item.attachment.kind === "document");
+    cardAttachments.some(
+      (item) => item.attachment.kind === "document" && !isSentCommentAttachment(item),
+    );
   const imageRenderOptions = {
     sessionKey: opts.sessionKey,
     agentId: opts.agentId,
@@ -347,6 +352,7 @@ export function renderGroupedMessage(
     codeBlockInteraction: role === "assistant" ? "interactive" : "static",
     fileLinks: true,
     githubRepo: role === "assistant" ? (opts.githubRepo ?? null) : null,
+    humanMentions: markdown === displayMarkdown ? humanMentions : undefined,
     interactiveImages: opts.onOpenImage !== undefined,
     sessionLinks: true,
     tableInteractions: "enabled",
@@ -362,7 +368,6 @@ export function renderGroupedMessage(
     hasUserFiles ? "chat-bubble--with-files" : "",
     isToolShell ? "chat-bubble--tool-shell" : "",
     opts.isStreaming ? "streaming" : "",
-    opts.entryAnimated ? "chat-bubble--user-turn-enter" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -617,6 +622,7 @@ export function renderGroupedMessage(
   return html`
     <div
       class="${bubbleClasses}"
+      ${opts.entryRef ? ref(opts.entryRef) : nothing}
       data-message-id=${messageKey}
       data-entry-id=${opts.entryId || nothing}
       data-message-text=${actionText || nothing}

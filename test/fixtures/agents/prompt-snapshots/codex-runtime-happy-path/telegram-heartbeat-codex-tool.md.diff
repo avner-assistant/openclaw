@@ -1,5 +1,5 @@
---- telegram-direct-codex-message-tool.md	sha256=1719f4baf2a122a949aa0ab43ef38f774caee9865f19cb07df08f9cbe8fa2394
-+++ telegram-heartbeat-codex-tool.md	sha256=4af2c413954c0712f22107551618926f7e6ec78fc7cf9b63f5b085bac5474edf
+--- telegram-direct-codex-message-tool.md	sha256=a00a3f592ad3903222c225201a99fec34bd47dd4e0a72420f5ba6d429cb17815
++++ telegram-heartbeat-codex-tool.md	sha256=3b6666701c372330586b3e8c4eb1c2c5a715e98b293635650a36b597f7418197
 @@ -1,1 +1,1 @@
 -# Telegram Direct Codex Message Tool Turn
 +# Telegram Direct Codex Heartbeat Tool Turn
@@ -37,25 +37,25 @@
 +    "chars": 752,
 +    "roughTokens": 188
 @@ -257,2 +254,2 @@
--    "chars": 62511,
--    "roughTokens": 15628
-+    "chars": 64004,
-+    "roughTokens": 16001
+-    "chars": 64885,
+-    "roughTokens": 16222
++    "chars": 66378,
++    "roughTokens": 16595
 @@ -269,2 +266,2 @@
--    "chars": 26463,
--    "roughTokens": 6616
-+    "chars": 26675,
-+    "roughTokens": 6669
+-    "chars": 26549,
+-    "roughTokens": 6638
++    "chars": 26886,
++    "roughTokens": 6722
 @@ -273,2 +270,2 @@
--    "chars": 88976,
--    "roughTokens": 22244
-+    "chars": 90681,
-+    "roughTokens": 22671
+-    "chars": 91436,
+-    "roughTokens": 22859
++    "chars": 93266,
++    "roughTokens": 23317
 @@ -277,2 +274,2 @@
--    "chars": 793,
--    "roughTokens": 199
-+    "chars": 1135,
-+    "roughTokens": 284
+-    "chars": 879,
+-    "roughTokens": 220
++    "chars": 1346,
++    "roughTokens": 337
 @@ -519,6 +515,0 @@
 -### User: OpenClaw Additional Context (openclaw_current_sender)
 -
@@ -63,18 +63,20 @@
 -<external_openclaw_current_sender>{"sender":{"id":"1000001","name":"Pash","username":"pash"}}</external_openclaw_current_sender>
 -```
 -
-@@ -564,1 +555,1 @@
+@@ -546,1 +536,0 @@
+-[OpenClaw conversation info: sender={"id":"1000001","name":"Pash","username":"pash"}]
+@@ -565,1 +555,1 @@
 -{"chat_id":"user:1000001","message_id":"tg-msg-0001","sender":{"id":"1000001","name":"Pash","username":"pash"}}
 +{"chat_id":"user:1000001","message_id":"heartbeat-0001","sender":{"id":"1000001","name":"Pash","username":"pash"}}
-@@ -567,1 +558,1 @@
+@@ -568,1 +558,1 @@
 -Can you check whether the nightly build finished and tell me what happened?
-+Follow the heartbeat monitor scratch context when provided. Recurring tasks are automations; create or change their schedules with the automations tool, not heartbeat scratch. Do not infer or repeat old tasks from prior chats. Use heartbeat_respond to report the wake outcome. Set notify=false when nothing needs the user's attention. Set notify=true with notificationText only when the user should be interrupted.
-@@ -572,1 +563,1 @@
++Follow the heartbeat monitor scratch context when provided. Recurring tasks are automations; create or change their schedules with the automations tool, not heartbeat scratch. Do not infer or repeat old tasks from prior chats. Use heartbeat_respond to report the wake outcome. Set notify=false when nothing needs the user's attention. Set notify=true with notificationText only when the user should be interrupted. If the heartbeat_respond tool is not available in this run, reply NO_REPLY when nothing needs the user's attention; when the user should be interrupted, reply with only the alert text instead of a prose report.
+@@ -573,1 +563,1 @@
 -Full JSON: `codex-dynamic-tools.telegram-direct.json`
 +Full tool overrides: `codex-dynamic-tools.heartbeat-turn.json` (base: `codex-dynamic-tools.telegram-direct.json`)
-@@ -592,0 +584,1 @@
+@@ -593,0 +584,1 @@
 +  "heartbeat_respond",
-@@ -743,0 +736,39 @@
+@@ -744,0 +736,39 @@
 +  },
 +  {
 +    "description": "Accept heartbeat result for post-turn handling. `notify=false` no visible send. `notify=true` needs concise notificationText. Scratch is monitor prose only.",

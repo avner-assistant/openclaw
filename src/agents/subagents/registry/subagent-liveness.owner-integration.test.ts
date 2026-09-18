@@ -231,7 +231,15 @@ it("retains an exact queued collector reservation without calling it executor-li
       ),
     )
     .toEqual([{ status: "queued", execution: "queued" }]);
+  const captured = buildSubagentRunReadIndexFromRuns({
+    runs: new Map([[projected.runId, projected]]),
+    inMemoryRuns: [entry],
+    now: olderThanCutoff,
+  });
   expect(removeQueuedSwarmRun(entry.runId)).toBe(true);
+  expect(captured.countActiveDescendantRuns(parent)).toBe(0);
+  expect(captured.countPendingDescendantRuns(parent)).toBe(0);
+  expect(captured.hasDescendantRunAwaitingSettle(parent)).toBe(false);
   expect(isSubagentRunQueued(entry)).toBe(false);
   expect(countActiveRunsForSession(parent, { collect: true })).toBe(0);
   expect(hasDescendantRunAwaitingSettle(parent)).toBe(false);

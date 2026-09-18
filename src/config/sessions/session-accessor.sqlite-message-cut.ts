@@ -70,13 +70,6 @@ type SessionTranscriptMutationResult =
 type SessionTranscriptMutationMode = "fork" | "rewind" | "switch";
 type SessionEntryExpectedState = Pick<SessionEntry, "lifecycleRevision" | "sessionId">;
 
-/** Resolves the active branch leaf from the same transcript tree used by branch listing. */
-export function resolveSessionTranscriptActiveLeafEntryId(
-  events: readonly TranscriptEvent[],
-): string | undefined {
-  return scanSessionTranscriptTree(events).leafId ?? undefined;
-}
-
 export async function rewindSessionToMessage(
   params: SessionMessageCutMutationParams,
   expectedState?: SessionEntryExpectedState,
@@ -164,6 +157,7 @@ async function mutateSqliteSessionAtMessage(
           entryId: params.entryId,
           canonicalSourceKey,
           creation: params.creation,
+          forkWorkspace: params.forkWorkspace,
           mode,
           expectedState: preparedExpectedState,
           repositoryWorkspaceId: params.repositoryWorkspaceId,
@@ -203,6 +197,7 @@ function mutateSqliteSessionAtMessageInTransaction(
   params: {
     canonicalSourceKey: string;
     creation?: SessionMessageCutMutationParams["creation"];
+    forkWorkspace?: SessionMessageCutMutationParams["forkWorkspace"];
     entryId: string;
     expectedState: SessionEntryExpectedState | undefined;
     mode: SessionTranscriptMutationMode;
@@ -306,6 +301,7 @@ function mutateSqliteSessionAtMessageInTransaction(
           : undefined,
       nextSessionId,
     }),
+    ...(params.mode === "fork" ? params.forkWorkspace : {}),
     ...(params.mode === "fork" && params.creation
       ? buildSessionCreationStamp(params.creation)
       : {}),
@@ -484,7 +480,15 @@ function extractEditorMediaRefs(
   }
   const refs = media.flatMap((entry) => {
     const record = asRecord(entry);
-    const mediaPath = typeof record?.path === "string" ? record.path.trim() : "";
+    const mediaUrl = typeof record?.url === "string" ? record.url.trim() : undefined;
+    const mediaPath =
+      mediaUrl === undefined
+        ? typeof record?.path === "string"
+          ? record.path.trim()
+          : ""
+        : /^media:\/\//i.test(mediaUrl)
+          ? mediaUrl
+          : "";
     const contentType = record?.contentType;
     return mediaPath && typeof contentType === "string" && contentType.startsWith("image/")
       ? [{ path: mediaPath, contentType }]

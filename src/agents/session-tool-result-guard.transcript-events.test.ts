@@ -12,6 +12,7 @@ import { makeTextToolResult } from "../../test/helpers/text-tool-result.js";
 import { makeUserMessage } from "../../test/helpers/user-message.js";
 import {
   appendTranscriptMessage,
+  loadSessionEntry,
   listSessionPendingInputs,
   persistCompactionBoundaryWithSessionEntrySync,
 } from "../config/sessions/session-accessor.js";
@@ -100,7 +101,18 @@ describe("guardSessionManager transcript updates", () => {
   it("persists compaction item identity under each current run across reload", async () => {
     const { sessionManager, root, target } = await openPersistedSessionManager();
     for (const runId of ["run-first", "run-second"]) {
-      const guarded = guardSessionManager(sessionManager, { runId });
+      const guarded = guardSessionManager(sessionManager, {
+        runId,
+        withCompactionPersistence: (prepared) =>
+          persistCompactionBoundaryWithSessionEntrySync(target, {
+            prepared,
+            transcriptByteCompactionLatch: {
+              activeBytes: 2048,
+              sessionId: target.sessionId,
+              maxBytes: 1024,
+            },
+          }),
+      });
       const keptId = guarded.appendMessage({ role: "user", content: runId, timestamp: 1 });
       guarded.appendCompaction("summary", keptId, 100, { source: "hook" }, true, {
         itemId: `compaction-${runId}`,
@@ -121,29 +133,26 @@ describe("guardSessionManager transcript updates", () => {
         fromHook: true,
       },
     ]);
+    expect(loadSessionEntry(target)?.compactionCount).toBe(2);
   });
 
-  it("reloads the session manager after atomic compaction persistence rolls back", async () => {
+  it("leaves the session manager unchanged when atomic compaction persistence rejects the boundary", async () => {
     const { sessionManager, root, target } = await openPersistedSessionManager();
     const keptId = sessionManager.appendMessage(makeUserMessage("keep", 1));
     const guarded = guardSessionManager(sessionManager, {
-      withCompactionPersistence: (append, validateAppend) =>
+      withCompactionPersistence: (prepared) =>
         persistCompactionBoundaryWithSessionEntrySync(target, {
-          append,
+          prepared: { ...prepared, event: { ...prepared.event, id: keptId } },
           transcriptByteCompactionLatch: {
             activeBytes: 2048,
             sessionId: target.sessionId,
             maxBytes: 1024,
           },
-          validateAppend: (entryId, appendedText) => {
-            expect(validateAppend(entryId, appendedText)).toBe(true);
-            return false;
-          },
         }),
     });
 
     expect(() => guarded.appendCompaction("summary", keptId, 100)).toThrow(
-      "Compaction boundary validation failed",
+      `Session transcript entry was not persisted: ${keptId}: transcript-event-not-appended`,
     );
     expect(sessionManager.getLeafId()).toBe(keptId);
     expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toEqual([]);
@@ -424,72 +433,6 @@ describe("guardSessionManager transcript updates", () => {
     },
   );
 
-  it("persists and broadcasts memory-maintenance messages as hidden", async () => {
-    const updates: InternalSessionTranscriptUpdate[] = [];
-    listeners.push(onInternalSessionTranscriptUpdate((update) => updates.push(update)));
-
-    const { sessionManager: sm, target } = await openPersistedSessionManager();
-
-    const guarded = guardSessionManager(sm, {
-      agentId: target.agentId,
-      sessionKey: target.sessionKey,
-      trigger: "memory",
-    });
-    const appendMessage = guarded.appendMessage.bind(guarded) as unknown as (
-      message: AgentMessage,
-    ) => void;
-
-    appendMessage({
-      role: "assistant",
-      content: [{ type: "text", text: "NO_REPLY" }],
-      timestamp: Date.now(),
-    } as AgentMessage);
-
-    const persisted = sm.getEntries().find((entry) => entry.type === "message") as
-      | { message?: AgentMessage }
-      | undefined;
-    expect(persisted?.message).toMatchObject({ display: false, role: "assistant" });
-    expect(updates[0]?.message).toMatchObject({ display: false, role: "assistant" });
-  });
-
-  it("keeps the user-turn recorder attached when hiding memory maintenance", () => {
-    const sm = SessionManager.inMemory();
-    const markRuntimePersisted = vi.fn();
-    const recorder = {
-      markBlocked: vi.fn(),
-      markRuntimePersisted,
-    } as unknown as UserTurnTranscriptRecorder;
-    const runtimeMessage = attachRuntimeUserTurnTranscriptContext(
-      {
-        role: "user",
-        content: "Pre-compaction memory flush",
-        timestamp: Date.now(),
-      },
-      {
-        message: {
-          role: "user",
-          content: "Pre-compaction memory flush",
-          timestamp: Date.now(),
-        },
-        recorder,
-      },
-    );
-    const guarded = guardSessionManager(sm, {
-      agentId: "main",
-      sessionKey: "agent:main:memory",
-      trigger: "memory",
-    });
-
-    guarded.appendMessage(runtimeMessage as Parameters<typeof guarded.appendMessage>[0]);
-
-    expect(markRuntimePersisted).toHaveBeenCalledTimes(1);
-    expect(markRuntimePersisted.mock.calls[0]?.[0]).toMatchObject({
-      display: false,
-      role: "user",
-    });
-    expect(markRuntimePersisted.mock.calls[0]?.[2]).toEqual({ appended: true });
-  });
-
   it("drops selected mentions when a write hook mutates their text in place", async () => {
     const { target, sessionManager } = await openPersistedSessionManager();
     const message = {
@@ -527,29 +470,6 @@ describe("guardSessionManager transcript updates", () => {
     } finally {
       resetGlobalHookRunner();
     }
-  });
-
-  it("does not hide ordinary messages that mention memory flushes", () => {
-    const sm = SessionManager.inMemory();
-    const guarded = guardSessionManager(sm, {
-      agentId: "main",
-      sessionKey: "agent:main:user",
-      trigger: "user",
-    });
-    const appendMessage = guarded.appendMessage.bind(guarded) as unknown as (
-      message: AgentMessage,
-    ) => void;
-
-    appendMessage({
-      role: "user",
-      content: "Why did the memory flush leak?",
-      timestamp: Date.now(),
-    } as AgentMessage);
-
-    const persisted = sm.getEntries().find((entry) => entry.type === "message") as
-      | { message?: AgentMessage }
-      | undefined;
-    expect(persisted?.message).not.toHaveProperty("display", false);
   });
 
   it("broadcasts the SQLite target for appended non-tool-result messages", async () => {

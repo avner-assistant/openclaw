@@ -32,6 +32,7 @@ import {
 import { canReadDetailedUpdateMetadata } from "../../events.js";
 import { ADMIN_SCOPE } from "../../method-scopes.js";
 import { scheduleNodeConnectionNotification } from "../../node-connection-notifications.js";
+import { resolveBrowserAuthOrigin } from "../../provider-browser-auth.js";
 import {
   MAX_BUFFERED_BYTES,
   MAX_PAYLOAD_BYTES,
@@ -74,6 +75,7 @@ export async function sendGatewayHello(
     frame,
     connectParams,
     sendFrame,
+    onHelloDelivered,
     pendingNodePairingCleanup,
     releasePendingNodePairingCleanup,
   } = context;
@@ -147,7 +149,9 @@ export async function sendGatewayHello(
       connId,
     },
     features: {
-      methods: gatewayMethods,
+      methods: resolveBrowserAuthOrigin(context.browserOrigin, new AbortController().signal)
+        ? gatewayMethods
+        : gatewayMethods.filter((method) => method !== "mcp.authLogin"),
       events,
       capabilities: [
         GATEWAY_SERVER_CAPS.BOARD_WIDGET_PUT_CANVAS_DOC,
@@ -261,6 +265,7 @@ export async function sendGatewayHello(
     }
     snapshot.suspension = { phase: getGatewaySuspendAdmissionPhase() };
     await sendFrame({ type: "res", id: frame.id, ok: true, payload: helloOk });
+    onHelloDelivered();
   } catch (err) {
     if (bootstrapHandoff) {
       if (bootstrapHandoff.completion) {

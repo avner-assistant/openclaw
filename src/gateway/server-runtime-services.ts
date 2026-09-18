@@ -1,19 +1,17 @@
 // Gateway post-ready runtime services.
 // Starts delayed maintenance, cron, heartbeat, recovery, and pricing refresh work.
 import { getRuntimeConfig } from "../config/config.js";
+import { resolveStateDir } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   resolveDeliveryQueueStateEnv,
   type DeliveryQueueStateContext,
 } from "../infra/delivery-queue-sqlite.js";
 import { computeBackoffMs } from "../infra/delivery-recovery.shared.js";
-import {
-  resolveHeartbeatAgents,
-  startHeartbeatRunner,
-  type HeartbeatRunner,
-  runHeartbeatOnce,
-} from "../infra/heartbeat-runner.js";
-import { resolveHeartbeatIntervalMs } from "../infra/heartbeat-summary.js";
+import { resolveHeartbeatAgents, resolveHeartbeatIntervalMs } from "../infra/heartbeat-config.js";
+import type { runHeartbeatOnce } from "../infra/heartbeat-runner-run.js";
+import { startHeartbeatRunner, type HeartbeatRunner } from "../infra/heartbeat-runner-scheduler.js";
+import { getHeartbeatWakeAbortSignal } from "../infra/heartbeat-wake.js";
 import type { DeliverOutboundPayloadsParams } from "../infra/outbound/deliver.js";
 import {
   schedulePendingSessionDeliveries,
@@ -24,6 +22,7 @@ import {
   runWithGatewayIndependentRootWorkAdmission,
 } from "../process/gateway-work-admission.js";
 import { startSessionUpstreamMonitor } from "../sessions/session-upstream-monitor.js";
+import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { resolveSkillWorkshopConfig } from "../skills/workshop/config.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { assertQueuedConversationDeliveryAttemptAuthorized } from "./conversation-route-ownership.js";
@@ -44,6 +43,10 @@ export {
   startGatewayChannelHealthMonitor,
   type GatewayChannelManager,
 } from "./server-runtime-startup-services.js";
+
+const loadHeartbeatExecution = createLazyRuntimeModule(
+  () => import("../infra/heartbeat-runner-run.js"),
+);
 
 type GatewayPostReadyLogger = {
   warn: (message: string) => void;
@@ -97,6 +100,7 @@ export async function clearGatewayMaintenanceHandles(
   clearInterval(maintenance.worktreeCleanup);
   maintenance.skillUsageCleanup();
   await Promise.all([
+    maintenance.stopTelemetryChecks(),
     maintenance.stopSessionColdStorageMaintenance(),
     maintenance.stopMediaCleanup(),
   ]);
@@ -166,7 +170,6 @@ function startPendingOutboundDeliveryRecovery(params: {
   log: GatewayRuntimeServiceLogger;
 }): () => Promise<void> {
   let stopped = false;
-  let migrationPending = true;
   let initialPass = true;
   let inFlight: Promise<void> | null = null;
   let stopPromise: Promise<void> | null = null;
@@ -227,18 +230,29 @@ function startPendingOutboundDeliveryRecovery(params: {
         );
       };
       logRecovery ??= params.log.child("delivery-recovery");
-      if (migrationPending) {
-        const cfg = initialPass ? params.cfg : getRuntimeConfig();
+      if (initialPass) {
+        const cfg = params.cfg;
         initialPass = false;
-        const { migrateLegacyPendingOutboundDeliveries } =
-          await import("../infra/outbound/delivery-queue-migration.js");
-        const migration = await migrateLegacyPendingOutboundDeliveries({
-          cfg,
-          log: logRecovery,
-        });
-        // A new scheduled-service lifecycle starts unchecked. Latch only after
-        // one pass neither skipped ownership nor left retired rows behind.
-        migrationPending = migration.skipped > 0 || migration.remaining > 0;
+        const { countPendingDeliveryQueueEntries } =
+          await import("../infra/delivery-queue-sqlite.js");
+        const {
+          LEGACY_OUTBOUND_DELIVERY_QUEUE_NAME,
+          OUTBOUND_LEGACY_PREPARATION_QUEUE_NAME,
+          OUTBOUND_DELIVERY_MIGRATION_QUEUE_NAME,
+        } = await import("../infra/outbound/delivery-queue-namespaces.js");
+        const remaining = countPendingDeliveryQueueEntries([
+          LEGACY_OUTBOUND_DELIVERY_QUEUE_NAME,
+          OUTBOUND_LEGACY_PREPARATION_QUEUE_NAME,
+          OUTBOUND_DELIVERY_MIGRATION_QUEUE_NAME,
+        ]);
+        const { listLegacyDeliveryQueueArtifacts } =
+          await import("../infra/delivery-queue-legacy-files.js");
+        const legacyFiles = listLegacyDeliveryQueueArtifacts(resolveStateDir());
+        if (remaining > 0 || legacyFiles.length > 0) {
+          logRecovery.warn(
+            `${remaining} legacy outbound deliveries and ${legacyFiles.length} legacy queue files need repair. Stop the Gateway and run openclaw doctor --fix.`,
+          );
+        }
         await recoverPendingDeliveries(
           {
             deliver: deliverWithCurrentConversationAuthority,
@@ -391,10 +405,7 @@ export function activateGatewayScheduledServices(params: {
   cfgAtStart: OpenClawConfig;
   deps: import("../cli/deps.types.js").CliDeps;
   sessionDeliveryRecoveryMaxEnqueuedAt: number;
-  cronState: GatewayCronState;
-  cronReconciliation: GatewayCronReconciliation;
-  startCron?: boolean;
-  logCron: { error: (message: string) => void };
+  cronEnabled: boolean;
   log: GatewayRuntimeServiceLogger;
   resolveGatewayContext?: GatewayContextResolver;
 }): { heartbeatRunner: HeartbeatRunner; stopDeliveryRecovery: () => Promise<void> } {
@@ -407,7 +418,7 @@ export function activateGatewayScheduledServices(params: {
     };
   }
   if (
-    !params.cronState.cronEnabled &&
+    !params.cronEnabled &&
     resolveHeartbeatAgents(params.cfgAtStart).some((agent) =>
       Boolean(resolveHeartbeatIntervalMs(params.cfgAtStart, undefined, agent.heartbeat)),
     )
@@ -419,7 +430,7 @@ export function activateGatewayScheduledServices(params: {
       );
   }
   if (
-    !params.cronState.cronEnabled &&
+    !params.cronEnabled &&
     resolveSkillWorkshopConfig(params.cfgAtStart).autonomous.mode === "auto"
   ) {
     params.log
@@ -433,16 +444,25 @@ export function activateGatewayScheduledServices(params: {
   const heartbeatGatewayContextResolver = fenceScheduledGatewayContextResolver(
     params.resolveGatewayContext,
   );
+  let heartbeatStopped = false;
   const heartbeatRunner = startHeartbeatRunner({
     cfg: params.cfgAtStart,
     readCurrentConfig: getRuntimeConfig,
     ...(heartbeatGatewayContextResolver
       ? {
-          runOnce: async (opts: Parameters<typeof runHeartbeatOnce>[0]) =>
-            await runWithScheduledGatewayContext({
+          runOnce: async (opts: Parameters<typeof runHeartbeatOnce>[0]) => {
+            const wakeSignal = getHeartbeatWakeAbortSignal();
+            const { runHeartbeatOnce } = await loadHeartbeatExecution();
+            // A stopped service or replaced wake must not enter execution after
+            // the import settles; the wake owner handles canceled work.
+            if (heartbeatStopped || wakeSignal?.aborted) {
+              return { status: "skipped", reason: "disabled" };
+            }
+            return await runWithScheduledGatewayContext({
               resolveGatewayContext: heartbeatGatewayContextResolver,
               run: async () => await runHeartbeatOnce(opts),
-            }),
+            });
+          },
         }
       : {}),
   });
@@ -455,15 +475,6 @@ export function activateGatewayScheduledServices(params: {
       ? { resolveGatewayContext: params.resolveGatewayContext }
       : {}),
   });
-  if (params.startCron !== false) {
-    startGatewayCronWithLogging({
-      cronState: params.cronState,
-      cronReconciliation: params.cronReconciliation,
-      reason: "startup",
-      config: params.cfgAtStart,
-      logCron: params.logCron,
-    });
-  }
   const stopOutboundDeliveryRecovery = startPendingOutboundDeliveryRecovery({
     cfg: params.cfgAtStart,
     log: params.log,
@@ -480,6 +491,7 @@ export function activateGatewayScheduledServices(params: {
   const heartbeatRunnerWithUpstreamMonitor: HeartbeatRunner = {
     updateConfig: heartbeatRunner.updateConfig,
     stop: () => {
+      heartbeatStopped = true;
       void stopDeliveryRecovery();
       sessionUpstreamMonitor.stop();
       heartbeatRunner.stop();

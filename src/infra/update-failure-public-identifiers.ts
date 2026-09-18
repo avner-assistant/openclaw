@@ -5,6 +5,10 @@ import { isServiceInspectionReason } from "../daemon/service-inspection-error.js
 import { normalizeSupportDiagnosticErrorCode } from "../logging/diagnostic-support-redaction.js";
 import { CLAWHUB_INSTALL_ERROR_CODE } from "../plugins/clawhub-error-codes.js";
 import { PLUGIN_INSTALL_ERROR_CODE } from "../plugins/install-types.js";
+import {
+  SKIPPED_UPDATE_OUTCOMES,
+  UPDATE_ENVIRONMENT_FAILURE_REASONS,
+} from "../shared/update-outcome.js";
 import type { UpdateFailureFact } from "./update-failure-facts.js";
 import { updateRecoverySchema } from "./update-recovery.js";
 
@@ -49,6 +53,7 @@ const NATIVE_CHECKS = new Set<string>([
 ]);
 
 const PUBLIC_CODES = new Set<string>([
+  ...Object.keys(SKIPPED_UPDATE_OUTCOMES),
   ...Object.values(PLUGIN_INSTALL_ERROR_CODE),
   ...Object.values(CLAWHUB_INSTALL_ERROR_CODE),
   PLUGIN_CAPABILITY_CONSENT_REQUIRED,
@@ -67,6 +72,11 @@ const PUBLIC_CODES = new Set<string>([
   "command-failed",
   "doctor-failed",
   "global-install-failed",
+  ...UPDATE_ENVIRONMENT_FAILURE_REASONS,
+  "already-current",
+  "container-image-install",
+  "unmanaged-package-install",
+  "package-update-requires-cli",
   "swap-failed",
   "verification-result-missing",
   "finalization-timeout",
@@ -76,13 +86,16 @@ const PUBLIC_CODES = new Set<string>([
   "readyz-unhealthy",
   "service-not-running",
   "restart-unhealthy",
+  "restart-health-pending",
   "managed-service-preflight",
   "service-inspection-unavailable",
   "service-ownership-unverified",
-  "node-runtime-preflight",
   "database-schema-preflight",
+  "update-ledger-busy",
   "invalid-git-directory",
+  "managed-service-handoff-started",
   "managed-service-handoff-already-running",
+  "managed-service-handoff-cancelled",
   "managed-service-handoff-failed",
   "managed-service-stop-failed",
   "rollback-state-unverified",

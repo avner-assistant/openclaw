@@ -1,4 +1,5 @@
 import { types } from "node:util";
+import { isDeeplyFrozenPlainData } from "../shared/immutable-data.js";
 
 /** Restore opaque handles only when they return to the instance that created their view. */
 function restorePluginArgumentViews(
@@ -23,6 +24,9 @@ function restorePluginArgumentViews(
         original = previous;
       }
       if (!original) {
+        if (isDeeplyFrozenPlainData(value)) {
+          return;
+        }
         if (types.isProxy(value)) {
           return;
         }
@@ -69,8 +73,7 @@ function restorePluginArgumentViews(
           }
         }
       }
-    }
-    if (parent) {
+    } else if (parent) {
       const previous = parents.get(value);
       if (!previous) {
         parents.set(value, parent);

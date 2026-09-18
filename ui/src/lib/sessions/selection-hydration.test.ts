@@ -25,12 +25,14 @@ describe("session selection hydration", () => {
     { finalAgent: "main" },
     { finalAgent: "research" },
     { finalAgent: "research", queuedExplicit: true },
+    { finalAgent: "research", remembered: "before" },
+    { finalAgent: "research", remembered: "after" },
     { finalAgent: "research", recover: true },
     { finalAgent: "research", direct: { append: true, offset: 1 } },
     { finalAgent: "research", direct: { backgroundHydrate: true } },
   ])(
-    "retires a slow intermediate agent when selection moves main to writer to $finalAgent (queued explicit: $queuedExplicit, observer recovery: $recover)",
-    async ({ finalAgent, queuedExplicit, recover, direct }) => {
+    "retires a slow intermediate agent when automatic selection moves main to writer to $finalAgent (queued explicit: $queuedExplicit, observer recovery: $recover, remembered refresh: $remembered)",
+    async ({ finalAgent, queuedExplicit, recover, direct, remembered }) => {
       vi.useFakeTimers();
       const writer = createDeferred<SessionsListResult>();
       const subscription = createDeferred<{ subscribed: boolean }>();
@@ -72,7 +74,14 @@ describe("session selection hydration", () => {
       );
       const coordinator = createConnectionBootstrapCoordinator();
       coordinator.synchronize({ client, connected: true });
-      const sessions = createSessionCapability(gateway, selection, {
+      // Roster/default reconciliation publishes selection without a new user intent.
+      const automaticSelection = {
+        get state() {
+          return selection.state;
+        },
+        subscribe: selection.subscribe,
+      };
+      const sessions = createSessionCapability(gateway, automaticSelection, {
         connectionBootstrap: coordinator,
       });
       const publishedAgents: Array<string | null> = [];
@@ -92,9 +101,15 @@ describe("session selection hydration", () => {
         if (queuedExplicit) {
           superseded = sessions.refresh({ agentId: "writer", force: true });
         }
+        if (remembered === "before") {
+          superseded = sessions.refreshReplacement().then(() => undefined);
+        }
         coordinator.setForegroundRoute(`agent:${finalAgent}:main`);
         selection.set(finalAgent);
         expect(selection.state.selectedId).toBe(finalAgent);
+        if (remembered === "after") {
+          superseded = sessions.refreshReplacement().then(() => undefined);
+        }
         emitEvent({
           type: "event",
           event: "sessions.changed",

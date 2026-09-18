@@ -9,6 +9,7 @@ import {
 import { getRuntimeConfig } from "../config/io.js";
 import { getUserProfileDisplay } from "../state/user-profiles.js";
 import { NODE_DESKTOP_SERVICE_CONTEXT } from "./desktop/node-source-context.js";
+import { invalidateGatewayDeviceRevocation } from "./device-revocation.js";
 import { ScopeUpgradeCoordinator } from "./device-scope-upgrade.js";
 import { prepareGatewayRecipientProfile } from "./expected-profile.js";
 import { WEBSOCKET_OPEN_READY_STATE } from "./server-constants.js";
@@ -26,6 +27,7 @@ import {
 } from "./server/health-state.js";
 import { broadcastPresenceSnapshot } from "./server/presence-events.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
+import { bindSessionRowProjection } from "./session-row-projection-access.js";
 
 type GatewayRequestContextClient = GatewayClient & {
   socket: { close: (code: number, reason: string) => void };
@@ -51,6 +53,7 @@ type GatewayRequestContextRuntime = Pick<
   | "loadGatewayModelCatalog"
   | "loadGatewayModelCatalogSnapshot"
   | "readPreparedGatewayModelCatalog"
+  | "readPreparedGatewayModelCatalogBatch"
   | "getRuntimeSnapshot"
   | "broadcast"
   | "broadcastToConnIds"
@@ -90,6 +93,7 @@ type GatewayRequestContextRuntime = Pick<
 > &
   Pick<
     GatewayCoreRuntime,
+    | "getSessionRowProjection"
     | "refreshGatewayHealthSnapshotWithRuntime"
     | "hasTalkNodeConnected"
     | "sharedGatewaySessionGenerationState"
@@ -289,6 +293,9 @@ export function createGatewayRequestContext(
     ...(runtime.readPreparedGatewayModelCatalog
       ? { readPreparedGatewayModelCatalog: runtime.readPreparedGatewayModelCatalog }
       : {}),
+    ...(runtime.readPreparedGatewayModelCatalogBatch
+      ? { readPreparedGatewayModelCatalogBatch: runtime.readPreparedGatewayModelCatalogBatch }
+      : {}),
     readChatMetadata: params.chatMetadataLifecycle.read,
     ...(params.chatMetadataLifecycle.readStartup
       ? { readChatStartupProjection: params.chatMetadataLifecycle.readStartup }
@@ -429,6 +436,7 @@ export function createGatewayRequestContext(
     },
     invalidateClientsForDevice: (deviceId: string, opts?: { role?: string; reason?: string }) => {
       const reason = opts?.reason ?? "device-invalidated";
+      invalidateGatewayDeviceRevocation(context, deviceId, opts?.role);
       for (const gatewayClient of clients) {
         if (gatewayClient.connect.device?.id !== deviceId) {
           continue;
@@ -447,6 +455,7 @@ export function createGatewayRequestContext(
       invalidateDeviceTransports?.(deviceId, opts);
     },
     disconnectClientsForDevice: (deviceId: string, opts?: { role?: string }) => {
+      invalidateGatewayDeviceRevocation(context, deviceId, opts?.role);
       for (const gatewayClient of clients) {
         if (gatewayClient.connect.device?.id !== deviceId) {
           continue;
@@ -555,5 +564,5 @@ export function createGatewayRequestContext(
     broadcastVoiceWakeRoutingChanged: runtime.broadcastVoiceWakeRoutingChanged,
     unavailableGatewayMethods: runtime.unavailableGatewayMethods,
   };
-  return context;
+  return bindSessionRowProjection(context, runtime.getSessionRowProjection);
 }

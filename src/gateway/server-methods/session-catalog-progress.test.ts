@@ -151,8 +151,8 @@ describe("session catalog progress ownership", () => {
       await Promise.all(publications);
       expect(leaderBroadcast).toHaveBeenCalledTimes(2);
       expect(followerBroadcast).toHaveBeenCalledTimes(2);
-      expect(settledBroadcast).not.toHaveBeenCalled();
-      expect(list).toHaveBeenCalledTimes(3);
+      expect(settledBroadcast).toHaveBeenCalledTimes(2);
+      expect(list).toHaveBeenCalledTimes(4);
       expect(warn).toHaveBeenCalledTimes(3);
     } finally {
       release();
@@ -170,6 +170,55 @@ describe("session catalog progress ownership", () => {
       setDiagnosticsEnabledForProcess(previousDiagnostics);
     }
   });
+
+  it.each([0, 128])(
+    "keeps an active list shared after %i distinct lists settle",
+    async (completedQueries) => {
+      const started = createDeferredCore();
+      const release = createDeferredCore();
+      const list = vi.fn<SessionCatalogProvider["list"]>(async ({ search }) => {
+        if (search === "held") {
+          started.resolve();
+          await release.promise;
+        }
+        return [];
+      });
+      hoisted.activeRegistry.sessionCatalogs = [{ provider: provider("fixture", { list }) }];
+      const config = {};
+      const client = { connId: "requester" };
+      const request = { catalogId: "fixture", search: "held" };
+      const leader = startCall("sessions.catalog.list", request, config, client);
+      const pending = [leader];
+      try {
+        await started.promise;
+        for (let index = 0; index < completedQueries; index += 1) {
+          const respond = await call(
+            "sessions.catalog.list",
+            { catalogId: "fixture", search: `completed-${index}` },
+            config,
+            client,
+          );
+          expect(respond).toHaveBeenCalledWith(true, {
+            catalogs: [expect.objectContaining({ id: "fixture", hosts: [] })],
+          });
+        }
+        pending.push(startCall("sessions.catalog.list", request, config, client));
+        release.resolve();
+        await Promise.all(pending.map(({ completion }) => completion));
+        for (const { respond } of pending) {
+          expect(respond).toHaveBeenCalledWith(true, {
+            catalogs: [expect.objectContaining({ id: "fixture", hosts: [] })],
+          });
+        }
+        expect(list.mock.calls.filter(([params]) => params.search === "held")).toHaveLength(1);
+        await call("sessions.catalog.list", request, config, client);
+        expect(list.mock.calls.filter(([params]) => params.search === "held")).toHaveLength(2);
+      } finally {
+        release.resolve();
+        await Promise.allSettled(pending.map(({ completion }) => completion));
+      }
+    },
+  );
 
   it.each(["settled", "in-flight"] as const)(
     "refreshes %s lists immediately after archiving a session",

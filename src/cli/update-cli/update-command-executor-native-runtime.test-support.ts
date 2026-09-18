@@ -2,6 +2,16 @@
 const currentModuleUrl = import.meta.url;
 
 export const updateExecutorNativeEntrypoints = {
+  signalExitBarrier: {
+    currentModuleUrl,
+    sourceWorkerName: "../signal-exit-barrier",
+    distWorkerPath: "cli/signal-exit-barrier.js",
+  },
+  commandRepair: {
+    currentModuleUrl,
+    sourceWorkerName: "update-command-repair",
+    distWorkerPath: "cli/update-cli/update-command-repair.js",
+  },
   commandRun: {
     currentModuleUrl,
     sourceWorkerName: "update-command-run",
@@ -61,5 +71,20 @@ export const updateExecutorNativeEntrypoints = {
     currentModuleUrl,
     sourceWorkerName: "../../config/io.factory",
     distWorkerPath: "config/io.factory.js",
+  },
+  leaseFixture: {
+    currentModuleUrl,
+    sourceWorkerName: "update-command-lease.test-support",
+    distWorkerPath: "cli/update-cli/update-command-lease.test-support.js",
+  },
+  failureOutput: {
+    currentModuleUrl,
+    sourceWorkerName: "../failure-output",
+    distWorkerPath: "cli/failure-output.js",
+  },
+  sealedRegistry: {
+    currentModuleUrl,
+    sourceWorkerName: "../../infra/sealed-runtime-registry",
+    distWorkerPath: "infra/sealed-runtime-registry.js",
   },
 } as const;

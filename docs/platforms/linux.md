@@ -46,6 +46,17 @@ When connecting to an older Gateway whose dashboard does not support this layout
 the companion keeps the system title bar. Update the Gateway to enable the unified
 window controls.
 
+The local startup, setup, recovery, Gateway manager, and Quick Chat screens share
+light and dark styling and follow system appearance changes while open. Connection
+drafts, credential visibility, and Quick Chat replies stay intact. The connected
+dashboard retains its own web UI appearance setting.
+
+Remote setup and Connection Settings use one **Authentication** choice for token
+or password. **Show credential** reveals the entered value; switching types clears
+the draft and masks the new field. Press Enter or **Connect to Gateway** to connect.
+In Connection Settings, blank credentials reuse the saved credentials for the same
+endpoint.
+
 ### Desktop compatibility
 
 Published AMD64 AppImages are built on Ubuntu 22.04 and require glibc 2.35 or
@@ -72,6 +83,41 @@ belong to the [CLI node host](/cli/node) and its
 The [native macOS app](/platforms/macos) and [Windows Hub](/platforms/windows)
 are separate applications, not this shell's opt-in macOS and Windows Tauri test
 bundles. See their platform pages for requirements and capabilities.
+
+### Gateway selection
+
+Open **Gateways → Manage Gateways…** from the native app or tray menu to save a
+direct URL or SSH connection. Choose **Add Gateway** or **Edit** to open the
+connection form; **Back to Gateways** returns to the saved list and discards
+unsaved changes. Under **Authentication**, choose token or password and enter a
+credential only if needed. Saved credentials stay hidden; leave the field blank
+to keep them for the same connection. Switching authentication types clears the
+credential you have entered. SSH certificate pins are under **Advanced connection
+settings**.
+
+The dashboard's profile menu switches only its current window; Control-click
+opens an additional window. Choosing a Gateway from the native menu focuses its
+existing window without reloading it, while **Open … in New Window** creates an
+independent one.
+
+The Primary Gateway continues to own Quick Chat and the desktop connection.
+Changing it requires the separate **Set as Primary** confirmation on a saved
+token-authenticated connection. Other Gateway windows retain their own targets.
+The companion remembers successful explicit selections, returns to Primary when
+that saved connection is removed, and keeps credentials in the operating
+system's credential store. Linux requires an unlocked Secret Service, such as
+GNOME Keyring or KWallet's Secret Service support.
+
+An unavailable credential store shows a dismissible notice without blocking the
+dashboard. Saved connections remain intact; use **Manage Gateways… → Try again**
+after resolving the reported credential-store problem.
+
+When a saved Gateway fails to load, the same window returns to its local
+connection editor. Correcting the endpoint updates the remembered selection only
+after the new dashboard loads successfully.
+
+The macOS Tauri build is named **OpenClaw-Tauri** and keeps its saved connections
+separate from the native **OpenClaw** app.
 
 ### First-run setup
 
@@ -164,6 +210,13 @@ Regular stable publication requests Linux bundles automatically after the
 Gateway release becomes visible. Linux build, signing, and publication finish
 independently. While those bundles are pending, the app updater continues to
 offer the previous published Linux version through its original signed download.
+
+Download only a release that contains the named Linux bundles and checksum
+file; a new Gateway release alone does not prove a new Linux app is available.
+The shipped updater still uses `releases/latest/download/latest.json`.
+Independent `linux-stable` publication tooling is not a client endpoint or
+download-link migration. That activation requires separate release approval and
+signed installed-client proof; see [Linux companion publication](/reference/RELEASING#linux-companion-publication).
 
 ### Media codecs
 
@@ -329,6 +382,14 @@ Canvas bridge or its A2UI push commands.
 
 ## Gateway service (systemd)
 
+On Linux hosts without a supported service manager, run the Gateway in the
+foreground or through your own supervisor, such as rc.d. `openclaw gateway status
+--deep` reports **no supported service manager detected** and identifies a
+remaining service unit as stale. That recorded unit does not select the status
+probe's configuration or port. Updates continue with a service warning; restart
+your manually launched Gateway after the update. An unavailable user session bus
+on a systemd host remains a separate service-access diagnostic.
+
 Install with one of:
 
 ```bash
@@ -346,6 +407,16 @@ openclaw doctor
 `openclaw gateway install` renders a systemd **user** unit by default. Full
 service guidance, including the **system**-level unit variant for shared or
 always-on hosts, lives in the [Gateway runbook](/gateway#supervision-and-service-lifecycle).
+
+Managed units escape literal paths automatically. In a custom unit, do not add
+shell quotes around `WorkingDirectory=` or `EnvironmentFile=` paths, even when
+they contain spaces. Use a separate `EnvironmentFile=` directive for each absolute
+path; systemd ignores relative paths. Write `%%` for a literal percent sign.
+`EnvironmentFile=` also accepts glob patterns, so escape literal glob characters
+with a backslash. Managed working-directory paths must not end in spaces or
+tabs: systemd 255 loses that trailing whitespace when starting the process.
+OpenClaw rejects those paths rather than risk using a different directory;
+choose a path without trailing whitespace.
 
 Write a unit by hand only for a custom setup. Minimal user-unit example
 (`~/.config/systemd/user/openclaw-gateway[-<profile>].service`):

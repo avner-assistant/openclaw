@@ -12,7 +12,6 @@ import { sameQueuedDeliveryVersion } from "../../lib/chat/outbox-store-codec.ts"
 import { captureChatOutboxAdmission } from "../../lib/chat/outbox-store.ts";
 import { scopedAgentIdForSession, visibleSessionMatches } from "../../lib/sessions/index.ts";
 import { resolveUiConversationIdentity } from "../../lib/sessions/session-key.ts";
-import { releaseChatAttachmentPayloads } from "./attachment-payload-store.ts";
 import { composeBrowserAnnotationContext } from "./browser-annotation-context.ts";
 import {
   dispatchChatSlashCommand,
@@ -25,7 +24,6 @@ import {
   admitQueuedMessageForSession,
   admitQueuedMessageForSessionResult,
   enqueueChatMessage,
-  excludeComposerAttachments,
   removeQueuedMessageWithoutReleasing,
   readQueuedMessageById,
 } from "./chat-queue.ts";
@@ -38,6 +36,7 @@ import {
   clearOwnedCommandComposerFallback,
   clearSubmittedComposerState,
   commandComposerFallbackRetainsAttachments,
+  releaseCommandComposerAttachments,
   restoreFailedCommandComposer,
   snapshotChatAttachments,
   submittedCommandConnectionIsCurrent,
@@ -127,7 +126,7 @@ async function sendDetachedCommandMessage(
   const ok =
     sendAck?.status === "ok" || sendAck?.status === "started" || sendAck?.status === "in_flight";
   if (!ok && !restoreFailedCommandComposer(host, opts.recovery)) {
-    releaseChatAttachmentPayloads(excludeComposerAttachments(host, opts.attachments));
+    releaseCommandComposerAttachments(host, opts.recovery, opts.attachments);
   }
   if (
     isTerminalFailureChatSendAck(sendAck) &&
@@ -140,7 +139,7 @@ async function sendDetachedCommandMessage(
       clearOwnedCommandComposerFallback(host, opts.recovery);
     }
     if (!commandComposerFallbackRetainsAttachments(host, opts.recovery)) {
-      releaseChatAttachmentPayloads(excludeComposerAttachments(host, opts.attachments));
+      releaseCommandComposerAttachments(host, opts.recovery, opts.attachments);
     }
   }
 }
@@ -231,7 +230,9 @@ export async function handleSendChat(
       : composeBrowserAnnotationContext(userMessage, attachmentsToSend);
   // Slash commands may use ordinary files, but annotations belong to the next model prompt.
   const deliveredAttachments = rawParsedCommand
-    ? attachmentsToSend.filter((attachment) => !attachment.browserAnnotation)
+    ? attachmentsToSend.filter(
+        (attachment) => !attachment.browserAnnotation && !attachment.selectionAnnotation,
+      )
     : attachmentsToSend;
 
   if (!message && !hasAttachments) {
@@ -259,9 +260,6 @@ export async function handleSendChat(
     const parsed = rawParsedCommand;
     if (/^\/(?:btw|side)(?::|\s|$)/i.test(userMessage)) {
       const question = extractCompanionCommandQuestion(userMessage);
-      if (!question) {
-        return undefined;
-      }
       const submitKey = chatSubmitKey(host, "local", message, []);
       await withChatSubmitGuard(host, submitKey, async () => {
         if (messageOverride == null) {
@@ -474,18 +472,14 @@ export async function handleSendChat(
         }
         if (dispatchResult === "failed" || dispatchResult === "cancelled") {
           if (!restoreFailedCommandComposer(host, recovery)) {
-            releaseChatAttachmentPayloads(
-              excludeComposerAttachments(host, recovery.composer?.attachments),
-            );
+            releaseCommandComposerAttachments(host, recovery, recovery.composer?.attachments);
           }
         } else if (dispatchResult === "completed") {
           if (submittedCommandConnectionIsCurrent(host, recovery)) {
             clearOwnedCommandComposerFallback(host, recovery);
           }
           if (!commandComposerFallbackRetainsAttachments(host, recovery)) {
-            releaseChatAttachmentPayloads(
-              excludeComposerAttachments(host, recovery.composer?.attachments),
-            );
+            releaseCommandComposerAttachments(host, recovery, recovery.composer?.attachments);
           }
         }
       };

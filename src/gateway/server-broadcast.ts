@@ -71,6 +71,7 @@ const EVENT_SCOPE_GUARDS: Record<string, string[]> = {
   tick: [],
   "talk.event": [READ_SCOPE],
   "talk.mode": [TALK_SCOPE],
+  "talk.voice.change": [TALK_SCOPE],
   task: [READ_SCOPE],
   "task.suggestion": [READ_SCOPE],
   "update.available": [],
@@ -266,6 +267,11 @@ export function createGatewayBroadcaster(params: {
   preparePresenceProjection?: (
     presence: SystemPresence[],
   ) => (client: GatewayWsClient) => SystemPresence[];
+  prepareSessionEventProjection?: (
+    event: string,
+    payload: unknown,
+    scope: { sessionKeys: readonly string[]; agentId?: string },
+  ) => ((client: GatewayWsClient) => unknown) | undefined;
   sessionMessageSubscribers?: SessionMessageSubscriberRegistry;
   canReceiveSessionEvent?: (
     client: GatewayWsClient,
@@ -375,6 +381,8 @@ export function createGatewayBroadcaster(params: {
       // SAFETY: Internal presence producers emit { presence: SystemPresence[] }; wire input cannot publish events.
       event === "presence" ? (payload as { presence: SystemPresence[] }) : undefined;
     let projectPresence: ((client: GatewayWsClient) => SystemPresence[]) | undefined;
+    let projectSession: ((client: GatewayWsClient) => unknown) | undefined;
+    let sessionProjectionPrepared = false;
     let outboundEventLogged = false;
     let lastFrameSequence = 0;
     let lastFrameRecipientProfileId: string | undefined;
@@ -613,11 +621,26 @@ export function createGatewayBroadcaster(params: {
             presence: projectPresence(c),
           });
         }
+        if (!sessionProjectionPrepared) {
+          projectSession = params.prepareSessionEventProjection?.(event, payload, {
+            sessionKeys,
+            agentId,
+          });
+          sessionProjectionPrepared = true;
+        }
+        if (projectSession) {
+          const projected = projectSession(c);
+          if (projected === undefined) {
+            continue;
+          }
+          payloadFragment = serializeFrameField("payload", projected);
+        }
         // A drained write can refresh the recipient; cache only the profile at this send.
         const recipientProfileId =
           (c.connect.role ?? "operator") === "operator" ? c.preparedRecipientProfileId : undefined;
         if (
           !presencePayload &&
+          !projectSession &&
           lastFrame !== undefined &&
           lastFrameSequence === nextSeq &&
           lastFrameRecipientProfileId === recipientProfileId
@@ -625,7 +648,7 @@ export function createGatewayBroadcaster(params: {
           frame = lastFrame;
         } else {
           frame = frameWithSequence(base, nextSeq, payloadFragment, recipientProfileId);
-          if (!presencePayload) {
+          if (!presencePayload && !projectSession) {
             lastFrameSequence = nextSeq;
             lastFrameRecipientProfileId = recipientProfileId;
             lastFrame = frame;

@@ -420,11 +420,10 @@ function resolveConfiguredProviders(
 
 async function refreshAfterCredentialMutation(
   context: GatewayRequestContext,
-  operation: "update" | "logout",
   agentId: string,
 ): Promise<string | undefined> {
   try {
-    await refreshModelAuthStateAfterMutation(context.getRuntimeConfig, operation, agentId);
+    await refreshModelAuthStateAfterMutation(context.getRuntimeConfig, agentId);
     return undefined;
   } catch (error) {
     log.warn(`credential change saved but auth refresh failed: ${formatForLog(error)}`);
@@ -449,13 +448,14 @@ export const modelsAuthStatusHandlers: GatewayRequestHandlers = {
         return;
       }
       const { saveModelProviderApiKey } = await import("../../commands/models/auth-api-key.js");
-      const profileId = await saveModelProviderApiKey({
+      const { profileId, warning: configWarning } = await saveModelProviderApiKey({
         config,
         provider,
         apiKey: params.apiKey,
         agentDir: scope.agentDir,
       });
-      const warning = await refreshAfterCredentialMutation(context, "update", scope.agentId);
+      const refreshWarning = await refreshAfterCredentialMutation(context, scope.agentId);
+      const warning = [configWarning, refreshWarning].filter(Boolean).join(" ");
       const result: ModelsAuthSetApiKeyResult = {
         provider,
         profileId,
@@ -537,7 +537,7 @@ export const modelsAuthStatusHandlers: GatewayRequestHandlers = {
               agentId: scope.agentId,
               stopReason: "auth-revoked",
             });
-      const refreshWarning = await refreshAfterCredentialMutation(context, "logout", scope.agentId);
+      const refreshWarning = await refreshAfterCredentialMutation(context, scope.agentId);
       const warning = [configWarning, refreshWarning].filter(Boolean).join(" ");
       const result: ModelAuthLogoutResult = {
         provider,

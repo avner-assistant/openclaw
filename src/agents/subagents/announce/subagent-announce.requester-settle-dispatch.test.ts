@@ -23,6 +23,7 @@ import { resetCommandQueueStateForTest } from "../../../process/command-queue.te
 import { beginSessionWorkAdmission } from "../../../sessions/session-lifecycle-admission.js";
 import { trackAsyncWork } from "../../../shared/async-work-scope.js";
 import { createDeferredCore } from "../../../shared/deferred.js";
+import { closeOpenClawAgentDatabasesAsync } from "../../../state/openclaw-agent-db.js";
 import { runWithAgentCommandRecoveryOwner } from "../../agent-command-recovery-owner.js";
 import type { AgentCommandOpts } from "../../command/types.js";
 import { prepareEmbeddedAttemptTimeout } from "../../embedded-agent-runner/run/attempt-timeout-prepare.js";
@@ -37,7 +38,9 @@ import { sendSubagentAnnounceDirectly } from "./subagent-announce-direct-deliver
 const startTurn = vi.hoisted(() => vi.fn());
 const deliver = vi.hoisted(() => vi.fn());
 const registryRead = vi.hoisted(() => ({
-  getLatestLiveSubagentRunByChildSessionKey: vi.fn(() => undefined),
+  getLatestLiveSubagentRunByChildSessionKey: vi.fn<() => SubagentRunRecord | undefined>(
+    () => undefined,
+  ),
   hasDescendantRunAwaitingSettle: vi.fn(() => false),
   listSubagentRunsForRequester: vi.fn<() => SubagentRunRecord[]>(() => []),
   getLatestSubagentRunByChildSessionKey: vi.fn(() => undefined),
@@ -80,7 +83,14 @@ import {
   type RequesterSettleWakeBatchState,
 } from "./subagent-announce.requester-settle-wake.js";
 
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const tempDirs = useAutoCleanupTempDirTracker((cleanup) =>
+  afterEach(async () => {
+    for (const dir of tempDirs.dirs) {
+      await closeOpenClawAgentDatabasesAsync(dir);
+    }
+    cleanup();
+  }),
+);
 
 const REQUESTER_KEY = "agent:main:main";
 const SESSION_LANE = `session:${REQUESTER_KEY}`;
@@ -140,6 +150,7 @@ describe("requester settle dispatch deadline", () => {
     startTurn.mockReset();
     deliver.mockReset();
     registryRead.hasDescendantRunAwaitingSettle.mockReset().mockReturnValue(false);
+    registryRead.getLatestLiveSubagentRunByChildSessionKey.mockReset().mockReturnValue(undefined);
     registryRead.getLatestSubagentRunByChildSessionKey.mockReset().mockReturnValue(undefined);
   });
 
@@ -149,10 +160,21 @@ describe("requester settle dispatch deadline", () => {
     vi.useRealTimers();
   });
 
-  it.each([false, true])(
-    "wakes a nested yielded requester once (child completed before yield=%s)",
-    async (afterRequesterYield) => {
+  it.each([
+    { afterRequesterYield: false, runTimeoutSeconds: 0 },
+    { afterRequesterYield: true, runTimeoutSeconds: 600 },
+    { afterRequesterYield: true, runTimeoutSeconds: undefined },
+  ])(
+    "wakes a nested yielded requester once with its $runTimeoutSeconds-second budget (child completed before yield=$afterRequesterYield)",
+    async ({ afterRequesterYield, runTimeoutSeconds }) => {
       const requesterSessionKey = "agent:main:subagent:middle";
+      registryRead.getLatestLiveSubagentRunByChildSessionKey.mockReturnValue({
+        ...settledChild(),
+        runId: "yielded-requester",
+        childSessionKey: requesterSessionKey,
+        pauseReason: "sessions_yield",
+        runTimeoutSeconds,
+      });
       const child = settledChild();
       child.requesterSessionKey = requesterSessionKey;
       child.requesterSettleWake = {
@@ -189,6 +211,7 @@ describe("requester settle dispatch deadline", () => {
         expect.objectContaining({
           targetRequesterSessionKey: requesterSessionKey,
           requesterIsSubagent: true,
+          requesterRunTimeoutSeconds: runTimeoutSeconds ?? 0,
           requireVisibleReply: true,
           sourceTool: "subagent_settle",
           triggerMessage: expect.stringContaining("child result"),
@@ -222,6 +245,68 @@ describe("requester settle dispatch deadline", () => {
     expect(transitionBatch).not.toHaveBeenCalled();
     expect(completeBatch).not.toHaveBeenCalled();
   });
+
+  it.each(["completed", "cancelled"] as const)(
+    "retains an in-flight private wake past the failure retry limit until %s",
+    async (outcome) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000);
+      const child = settledChild();
+      child.completionTarget = "parent";
+      child.completionRequesterSessionId = "requester-session";
+      registryRead.listSubagentRunsForRequester.mockReturnValue([child]);
+      deliver
+        .mockResolvedValueOnce({
+          delivered: false,
+          path: "direct",
+          disposition: "retryable",
+          error: "gateway request timeout for agent",
+        })
+        .mockResolvedValue({
+          delivered: false,
+          path: "direct",
+          disposition: "retryable",
+          reason: "requester_turn_pending",
+        });
+      const completeBatch = vi.fn((batch: readonly SubagentRunRecord[]) => {
+        for (const entry of batch) {
+          entry.requesterSettleWake = undefined;
+        }
+      });
+      const wake = () =>
+        maybeWakeRequesterAfterAllChildrenSettled({
+          requesterSessionKey: REQUESTER_KEY,
+          settledEntry: child,
+          transitionBatch: (batch, state) => {
+            for (const entry of batch) {
+              entry.requesterSettleWake = state;
+            }
+          },
+          completeBatch,
+        });
+      await expect(wake()).resolves.toBe(false);
+      for (let observation = 0; observation < 5; observation += 1) {
+        await vi.advanceTimersByTimeAsync(30_000);
+        await expect(wake()).resolves.toBe(false);
+        expect(completeBatch).not.toHaveBeenCalled();
+        expect(child.requesterSettleWake).toMatchObject({ status: "dispatching", attemptCount: 2 });
+        expect(child.suppressCompletionDelivery).not.toBe(true);
+      }
+      const requestIds = deliver.mock.calls.map(([request]) => request.directIdempotencyKey);
+      expect(requestIds).toHaveLength(6);
+      expect(new Set(requestIds).size).toBe(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      if (outcome === "cancelled") {
+        child.suppressCompletionDelivery = true;
+      } else {
+        deliver.mockResolvedValueOnce({ delivered: true, path: "direct" });
+      }
+      await expect(wake()).resolves.toBe(outcome === "completed");
+      expect(completeBatch).toHaveBeenCalledOnce();
+      expect(deliver).toHaveBeenCalledTimes(outcome === "completed" ? 7 : 6);
+      expect(child.completion?.resultText).toBe("child result");
+    },
+  );
 
   it("preserves the final attempt when its Gateway closes during runtime loading", async () => {
     const retired = settledChild();

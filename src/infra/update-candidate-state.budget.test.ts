@@ -4,6 +4,7 @@ import { setTimeout as realSetTimeout } from "node:timers";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { runtimeProcessEntrypoints } from "./runtime-process-entrypoints.js";
+import { sqliteWorkerPreloadEnv } from "./sqlite-worker-preload.test-support.js";
 import { observeUpdateCandidateIoProgress } from "./update-candidate-io.test-support.js";
 import { readUpdateStateSchemaVersions } from "./update-candidate-state.js";
 import { readUpdateStateDatabaseSizes } from "./update-candidate-state.sizes.js";
@@ -55,7 +56,7 @@ it.each([undefined, 600_000])(
     const controller = new AbortController();
     const operation = readUpdateStateDatabaseSizes([file], {
       nodeRunner: process.execPath,
-      sourceEnv: { ...process.env, NODE_OPTIONS: `--require ${JSON.stringify(preload)}` },
+      sourceEnv: { ...process.env, ...sqliteWorkerPreloadEnv(preload) },
       stagingRoot: root,
       timeoutMs,
       signal: controller.signal,
@@ -155,7 +156,9 @@ it.each([
       const copy = path.join(scratch, "database.sqlite");
       await fs.writeFile(copy, "copy");
       if (${discoveredBytes ?? 0}) await fs.truncate(copy, ${discoveredBytes ?? 0});
-      await fs.writeFile(${JSON.stringify(ready)}, scratch);
+      // Existence signals readiness, so publish the complete scratch path together.
+      await fs.writeFile(${JSON.stringify(`${ready}.tmp`)}, scratch);
+      await fs.rename(${JSON.stringify(`${ready}.tmp`)}, ${JSON.stringify(ready)});
       let last = "";
       while (!(await fs.stat(${JSON.stringify(release)}).catch(() => undefined))) {
         const next = await fs.readFile(${JSON.stringify(progress)}, "utf8").catch(() => "");

@@ -1,5 +1,6 @@
 import type { PluginUpdateOutcome } from "../plugins/update.js";
 import type { CommandOptions } from "../process/exec.js";
+import type { UpdateRecoveryStep } from "../shared/update-outcome.js";
 import type { OpenClawSchemaVersions } from "../state/openclaw-schema-versions.js";
 import type { LocalPackageOverridesResult } from "./package-local-overrides.js";
 import type { UpdateChannel } from "./update-channels.js";
@@ -32,6 +33,8 @@ export type UpdateStepResult = {
   advisory?: UpdateStepAdvisory;
   /** Complete owner-classified warnings when one step reports several outcomes. */
   warnings?: string[];
+  /** Suggested operator actions, distinct from executed update steps. */
+  recoverySteps?: readonly UpdateRecoveryStep[];
   failureFacts?: UpdateFailureFact[];
   configChanges?: UpdateDoctorConfigChange[];
   configWriteRefusal?: UpdateDoctorConfigWriteRefusal;
@@ -45,6 +48,8 @@ export type UpdateRunResult = {
   mode: "git" | "pnpm" | "bun" | "npm" | "unknown";
   root?: string;
   reason?: string;
+  /** The executing owner's terminal failure; steps also retain superseded attempts. */
+  failedStep?: UpdateStepResult;
   before?: { sha?: string | null; version?: string | null; buildId?: string | null };
   after?: {
     sha?: string | null;
@@ -63,6 +68,8 @@ export type UpdateRunResult = {
       changed: boolean;
       warnings?: Array<{
         pluginId?: string;
+        source?: string;
+        errorCode?: string;
         reason: string;
         message: string;
         guidance: string[];
@@ -118,6 +125,13 @@ export type UpdateStepProgress = {
   onStepComplete?: (step: UpdateStepCompletion) => void;
 };
 
+type GitUpdateTarget = {
+  sha?: string;
+  version?: string;
+  schemaVersions?: OpenClawSchemaVersions;
+  metadataUnreadable?: string;
+};
+
 export type UpdateRunnerOptions = {
   runId?: string;
   cwd?: string;
@@ -131,10 +145,7 @@ export type UpdateRunnerOptions = {
   /** Expose a new checkout only after target admission; subsequent work uses the published path. */
   publishGitCheckout?: () => Promise<string>;
   /** Read-only admission before executing a fetched candidate; never stops a service. */
-  inspectGitTarget?: (target: {
-    schemaVersions?: OpenClawSchemaVersions;
-    metadataUnreadable?: string;
-  }) => Promise<void>;
+  inspectGitTarget?: (target: GitUpdateTarget) => Promise<void>;
   /** Admit the built candidate after validation, before retention or activation. */
   inspectGitCandidate?: (candidateRoot: string) => Promise<void>;
   /** Admit required preparation after no-op detection, before allocating the candidate worktree. */
@@ -147,10 +158,7 @@ export type UpdateRunnerOptions = {
     candidateSha: string,
     env: NodeJS.ProcessEnv | undefined,
   ) => Promise<void>;
-  beforeGitMutation?: (target: {
-    schemaVersions?: OpenClawSchemaVersions;
-    metadataUnreadable?: string;
-  }) => Promise<{
+  beforeGitMutation?: (target: GitUpdateTarget) => Promise<{
     allowGatewayServiceRepair?: boolean;
     allowGatewayActivation?: boolean;
   } | void>;

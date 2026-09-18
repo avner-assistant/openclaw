@@ -7,6 +7,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { mockNodeBuiltinModule } from "../plugin-sdk/test-helpers/node-builtin-mocks.js";
 import { withEnvAsync } from "../test-utils/env.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
+import { SQLITE_READONLY_CHILD_ARG } from "./runtime-process-entrypoints.js";
 import {
   resolveAggregateSqliteInspectionTimeoutMs,
   resolveSqliteInspectionBudget,
@@ -120,7 +121,8 @@ describe.each(["sync", "async", "schema-header", "scoped"] as const)(
           if (mode === "sync") {
             expect(fs.readFileSync(prepared.location)).toEqual(before);
           }
-          const snapshot = new (requireNodeSqlite().DatabaseSync)(prepared.location, {
+          const { openNodeSqliteDatabase } = await import("./node-sqlite.js");
+          const snapshot = openNodeSqliteDatabase(prepared.location, {
             readOnly: true,
           });
           try {
@@ -244,7 +246,20 @@ describe("scoped SQLite read-only children", () => {
         }
       });
       expect(spawn).toHaveBeenCalledTimes(1);
-      expect(execFile).toHaveBeenCalledTimes(2);
+      const children = vi.mocked(execFile).mock.calls.flatMap(([, args], index) => {
+        const marker = args?.indexOf(SQLITE_READONLY_CHILD_ARG) ?? -1;
+        return marker < 0
+          ? []
+          : [{ mode: args?.[marker + 1], child: vi.mocked(execFile).mock.results[index]?.value }];
+      });
+      expect(children.filter(({ mode }) => mode !== "reclaim").map(({ mode }) => mode)).toEqual([
+        "async",
+        "schema-header",
+      ]);
+      for (const { child } of children) {
+        expect(child?.exitCode).toBe(0);
+        expect(child?.connected).toBe(false);
+      }
       expect(vi.mocked(spawn).mock.results[0]?.value.exitCode).toBe(0);
     } finally {
       writer.close();

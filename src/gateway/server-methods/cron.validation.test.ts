@@ -7,7 +7,13 @@ import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { createOperationalRunInstanceRef } from "../../agents/admitted-run-context.js";
+import {
+  bindCronManagementGrant,
+  runWithCronCreatorAuthorityCapability,
+} from "../../agents/cron-creator-authority-context.js";
 import { updateCronJobFromAgentTool } from "../../agents/tools/cron-tool-write.js";
+import { withGatewayToolCallerIdentity } from "../../agents/tools/gateway-caller-context.js";
+import { isConfiguredCommandOwner } from "../../auto-reply/command-auth.js";
 import type { ChannelPlugin } from "../../channels/plugins/types.public.js";
 import {
   applyLegacyCronStoreRepair,
@@ -15,7 +21,6 @@ import {
 } from "../../commands/doctor/cron/legacy-repair.js";
 import type { SessionCreatedActor } from "../../config/sessions/session-entry-provenance.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type { CronRuntimeAuthority } from "../../cron/runtime-authority.js";
 import { CronService } from "../../cron/service.js";
 import { createCronStoreHarness, createNoopLogger } from "../../cron/service.test-harness.js";
 import { loadCronStore, saveCronStore } from "../../cron/store.js";
@@ -42,7 +47,8 @@ import {
 import type { CronCreatorAuthorityGrant } from "../cron-creator-authority-grant.types.js";
 import { getGatewayProcessInstanceId } from "../process-instance.js";
 import * as cronCallerScope from "./cron-caller-scope.js";
-import type { GatewayClient, GatewayRequestContext } from "./types.js";
+import { createCronTestContext, createCronJob } from "./cron.validation.test-support.js";
+import type { GatewayClient } from "./types.js";
 
 const cronLogger = createNoopLogger();
 const { makeStorePath } = createCronStoreHarness({ prefix: "cron-gateway-validation-" });
@@ -150,6 +156,11 @@ function setCronValidationTestRegistry(): void {
   setActivePluginRegistry(
     createTestRegistry([
       {
+        pluginId: "discord",
+        plugin: createPrefixOnlyChannelPlugin("discord", ["discord"]),
+        source: "test:discord",
+      },
+      {
         pluginId: "telegram",
         plugin: createPrefixOnlyChannelPlugin("telegram", ["telegram", "tg"]),
         source: "test:telegram",
@@ -183,134 +194,7 @@ function setCronValidationTestRegistry(): void {
 }
 
 function createCronContext(currentJobs?: CronJob | CronJob[]) {
-  const jobs = currentJobs ? (Array.isArray(currentJobs) ? currentJobs : [currentJobs]) : [];
-  const committedAdds: Partial<CronJob>[] = [];
-  const committedRuntimeAuthorities: Array<CronRuntimeAuthority | undefined> = [];
-  const committedRuntimeAuthorityCaptures: boolean[] = [];
-  const committedUpdates: Array<{ id: string; patch: Partial<CronJob> }> = [];
-  const update = vi.fn(async (id: string, patch: Partial<CronJob>) => {
-    committedUpdates.push({ id, patch });
-    return createCronJob({
-      ...jobs.find((job) => job.id === id),
-      ...patch,
-      id,
-    });
-  });
-  return {
-    committedAdds,
-    committedRuntimeAuthorities,
-    committedRuntimeAuthorityCaptures,
-    committedUpdates,
-    cron: {
-      add: vi.fn(
-        async (
-          input: Partial<CronJob>,
-          opts?: {
-            commitGuard?: () => void;
-            captureRuntimeAuthority?: () => CronRuntimeAuthority | undefined;
-          },
-        ) => {
-          opts?.commitGuard?.();
-          committedRuntimeAuthorityCaptures.push(opts?.captureRuntimeAuthority !== undefined);
-          committedRuntimeAuthorities.push(opts?.captureRuntimeAuthority?.());
-          committedAdds.push(input);
-          return createCronJob({ ...input, id: "cron-1" });
-        },
-      ),
-      update,
-      updateWithPrecondition: vi.fn(
-        async (
-          id: string,
-          patch: Partial<CronJob>,
-          precondition: (job: CronJob, nowMs: number) => void | Promise<void>,
-          opts?: {
-            commitGuard?: () => void;
-            captureRuntimeAuthority?: () => CronRuntimeAuthority | undefined;
-          },
-        ) => {
-          const job = jobs.find((candidate) => candidate.id === id);
-          if (!job) {
-            throw new Error(`unknown automation id: ${id}`);
-          }
-          await precondition(job, Date.now());
-          opts?.commitGuard?.();
-          committedRuntimeAuthorityCaptures.push(opts?.captureRuntimeAuthority !== undefined);
-          committedRuntimeAuthorities.push(opts?.captureRuntimeAuthority?.());
-          return await update(id, patch);
-        },
-      ),
-      remove: vi.fn(async (_id: string, opts?: { commitGuard?: () => void }) => {
-        opts?.commitGuard?.();
-        return { ok: true, removed: true };
-      }),
-      enqueueRun: vi.fn(
-        async (_id: string, _mode?: string, opts?: { commitGuard?: () => void }) => {
-          opts?.commitGuard?.();
-          return { ok: true, enqueued: true, runId: "run-1" };
-        },
-      ),
-      getDefaultAgentId: vi.fn(() => "main"),
-      getJob: vi.fn((id: string) => jobs.find((job) => job.id === id)),
-      prepareWake: vi.fn(async () => undefined),
-      wake: vi.fn(() => ({ ok: true }) as const),
-      readJob: vi.fn(async (id: string) => jobs.find((job) => job.id === id)),
-      readScratch: vi.fn(async () => ({ content: null, revision: 0 })),
-      writeScratch: vi.fn(
-        async (_id: string, params: { content: string | null; commitGuard?: () => void }) => {
-          params.commitGuard?.();
-          return {
-            ok: true as const,
-            scratch: { content: params.content, revision: 1 },
-            currentRevision: 1,
-          };
-        },
-      ),
-      list: vi.fn(async () => jobs),
-      listPage: vi.fn(
-        async (
-          opts?: {
-            agentId?: string;
-            limit?: number;
-            offset?: number;
-            trigger?: "all" | "conditional" | "unconditional";
-          },
-          matchesJob?: (job: CronJob) => boolean,
-        ) => {
-          const requestedAgentId = opts?.agentId?.trim().toLowerCase();
-          const agentJobs = requestedAgentId
-            ? jobs.filter(
-                (job) => (job.agentId ?? "main").trim().toLowerCase() === requestedAgentId,
-              )
-            : jobs;
-          const filteredJobs = matchesJob ? agentJobs.filter(matchesJob) : agentJobs;
-          const total = filteredJobs.length;
-          const offset = Math.max(0, Math.min(total, Math.floor(opts?.offset ?? 0)));
-          const defaultLimit = total === 0 ? 50 : total;
-          const limit = Math.max(1, Math.min(200, Math.floor(opts?.limit ?? defaultLimit)));
-          const pageJobs = filteredJobs.slice(offset, offset + limit);
-          const nextOffset = offset + pageJobs.length;
-          return {
-            jobs: pageJobs,
-            snapshotRevision: `fixture:${filteredJobs.map((job) => job.id).join(",")}`,
-            total,
-            offset,
-            limit,
-            hasMore: nextOffset < total,
-            nextOffset: nextOffset < total ? nextOffset : null,
-          };
-        },
-      ),
-    },
-    logGateway: {
-      info: vi.fn(),
-      warn: vi.fn(),
-    },
-    cronStorePath: "cron-validation-test.json",
-    getRuntimeConfig: () => getRuntimeConfig(),
-    validateAgentRuntimeApprovalAuthority: undefined as
-      | GatewayRequestContext["validateAgentRuntimeApprovalAuthority"]
-      | undefined,
-  };
+  return createCronTestContext(currentJobs, getRuntimeConfig);
 }
 
 type CronMethod = keyof typeof cronHandlers;
@@ -323,6 +207,8 @@ async function invokeCron(
     context?: ReturnType<typeof createCronContext>;
     client?: GatewayClient;
     respond?: ReturnType<typeof vi.fn>;
+    sessionMutationCommitGuard?: () => void;
+    hasCurrentClientAuthority?: () => boolean;
   } = {},
 ) {
   const context = options.context ?? createCronContext(options.currentJob);
@@ -336,6 +222,8 @@ async function invokeCron(
     respond: respond as never,
     context: context as never,
     client: options.client ?? null,
+    sessionMutationCommitGuard: options.sessionMutationCommitGuard,
+    hasCurrentClientAuthority: options.hasCurrentClientAuthority,
     isWebchatConnect: () => false,
   });
   return { context, respond };
@@ -390,23 +278,6 @@ async function invokeCronRemove(
 
 async function invokeWake(params: Record<string, unknown>, client?: GatewayClient) {
   return await invokeCron("wake", params, { client });
-}
-
-function createCronJob(overrides: Partial<CronJob> = {}): CronJob {
-  return {
-    id: "cron-1",
-    name: "cron job",
-    enabled: true,
-    createdAtMs: 1,
-    updatedAtMs: 1,
-    schedule: { kind: "every", everyMs: 60_000 },
-    sessionTarget: "isolated",
-    wakeMode: "next-heartbeat",
-    payload: { kind: "agentTurn", message: "hello", toolsAllow: ["*"] },
-    delivery: { mode: "none" },
-    state: {},
-    ...overrides,
-  };
 }
 
 function callerClient(
@@ -644,29 +515,45 @@ function expectInvalidCronPatternError(respond: ReturnType<typeof vi.fn>): void 
 }
 
 describe("cron method validation", () => {
-  it.each([
-    ["cron.list", false],
-    ["cron.get", false],
-    ["cron.update", false],
-    ["cron.run", false],
-    ["cron.remove", false],
-    ["cron.remove", true],
-  ] as const)(
-    "Control UI admin grant manages a different channel's automation through %s (close after commit: %s)",
-    async (method, closeAfterCommit) => {
+  it.each(
+    (
+      [
+        ["cron.list", false],
+        ["cron.get", false],
+        ["cron.update", false],
+        ["cron.run", false],
+        ["cron.remove", false],
+        ["cron.remove", true],
+      ] as const
+    ).flatMap(([method, closeAfterCommit]) =>
+      (["control-ui-admin", "channel-owner"] as const).flatMap((source) =>
+        ([false, true] as const).map(
+          (trusted) => [method, closeAfterCommit, source, trusted] as const,
+        ),
+      ),
+    ),
+  )(
+    "%s manages a foreign automation (close after commit: %s, source: %s, trusted: %s)",
+    async (method, closeAfterCommit, source, trusted) => {
       const client = callerClient("main");
       const identity = client.internal!.agentRuntimeIdentity!;
       const authority = claimAgentRunDelegatedAuthority(identity.operationalRunInstance);
       identity.delegatedAuthority = { kind: "local", ...authority };
+      setRuntimeConfig({ commands: { ownerAllowFrom: ["discord:owner-1"] } });
       const scope = createCronCreatorAuthorityRunScope(
         identity.operationalRunInstance.runId,
-        { kind: "local" },
-        true,
+        source === "channel-owner" ? { kind: "external", channel: "discord" } : { kind: "local" },
+        source === "channel-owner"
+          ? {
+              source,
+              isCurrent: () =>
+                isConfiguredCommandOwner(getRuntimeConfig(), {
+                  channel: "discord",
+                  senderId: "owner-1",
+                }),
+            }
+          : { source },
       );
-      identity.cronManagementGrant = mintCronCreatorAuthorityGrant(scope, undefined, undefined, {
-        method,
-        authority,
-      });
       const job = createCronJob({
         agentId: "telegram-agent",
         owner: {
@@ -681,8 +568,11 @@ describe("cron method validation", () => {
           ownerAccountId: "telegram",
         },
       });
+      if (trusted) {
+        job.scheduledToolPolicy = { version: 1, mode: "trusted" };
+      }
       const context = createCronContext(job);
-      if (method === "cron.update") {
+      if (method === "cron.update" && !trusted) {
         job.payload = { kind: "agentTurn", message: "operator-created task without a cap" };
         delete job.scheduledToolPolicy;
       }
@@ -694,15 +584,20 @@ describe("cron method validation", () => {
         });
       }
       try {
-        const { respond } = await invokeCron(
-          method,
-          {
-            ...(method === "cron.list" ? { compact: true } : { id: job.id }),
-            ...(method === "cron.update"
-              ? { patch: { payload: { kind: "agentTurn", message: "updated by admin" } } }
-              : {}),
-          },
-          { client, context },
+        const { respond } = await runWithCronCreatorAuthorityCapability(scope, () =>
+          withGatewayToolCallerIdentity({ ...identity, approvalAuthority: authority }, async () => {
+            identity.cronManagementGrant = bindCronManagementGrant(scope.runId)!.mint(method);
+            return await invokeCron(
+              method,
+              {
+                ...(method === "cron.list" ? { compact: true } : { id: job.id }),
+                ...(method === "cron.update"
+                  ? { patch: { payload: { kind: "agentTurn", message: "updated by admin" } } }
+                  : {}),
+              },
+              { client, context },
+            );
+          }),
         );
         expect(respond).toHaveBeenCalledWith(true, expect.anything(), undefined);
         if (method === "cron.list") {
@@ -1977,6 +1872,54 @@ describe("cron method validation", () => {
       messageIncludes: "agent runtime authority is no longer active",
     });
     expect(context.committedAdds).toHaveLength(0);
+  });
+
+  it.each([
+    ["cron.add", agentTurnCronParams(), "add"],
+    ["cron.update", { id: "cron-1", patch: { description: "changed" } }, "updateWithPrecondition"],
+    ["cron.scratch.set", { id: "cron-1", content: "notes" }, "writeScratch"],
+    ["cron.remove", { id: "cron-1" }, "remove"],
+    ["cron.run", { id: "cron-1", mode: "force" }, "enqueueRun"],
+  ] as const)(
+    "carries the original caller fence to the %s commit owner",
+    async (method, params, owner) => {
+      const context = createCronContext(createCronJob({ agentId: "ops" }));
+      const client = callerClient("ops");
+      client.internal!.agentRuntimeIdentity!.cronToolsAllowCapture = "final-executable-surface";
+      client.internal!.agentRuntimeIdentity!.turnSourceLocal = true;
+      const sessionMutationCommitGuard = vi.fn(() => {
+        throw new TypeError("original caller was revoked");
+      });
+
+      const result = await invokeCron(method, params, {
+        context,
+        client,
+        sessionMutationCommitGuard,
+      });
+
+      expect(context.cron[owner]).toHaveBeenCalledOnce();
+      expect(sessionMutationCommitGuard).toHaveBeenCalledOnce();
+      expectResponseError(result.respond, {
+        code: "INVALID_REQUEST",
+        messageIncludes: "original caller was revoked",
+      });
+      expect(context.committedAdds).toHaveLength(0);
+      expect(context.committedUpdates).toHaveLength(0);
+    },
+  );
+
+  it("checks a direct Cron caller again at the add commit boundary", async () => {
+    const context = createCronContext();
+    const result = await invokeCron("cron.add", agentTurnCronParams(), {
+      context,
+      hasCurrentClientAuthority: () => false,
+    });
+    expect(context.cron.add).toHaveBeenCalledOnce();
+    expect(context.committedAdds).toHaveLength(0);
+    expectResponseError(result.respond, {
+      code: "INVALID_REQUEST",
+      messageIncludes: "Gateway caller authority is no longer active",
+    });
   });
 
   it.each([

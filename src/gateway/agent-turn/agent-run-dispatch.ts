@@ -15,7 +15,10 @@ import {
 } from "../../agents/cron-creator-authority-context.js";
 import { isTimeoutError } from "../../agents/failover-error.js";
 import type { MainSessionRecoveryPendingTarget } from "../../agents/main-session-recovery/main-session-recovery-store.js";
-import { isAgentRunRestartAbortReason } from "../../agents/run-termination.js";
+import {
+  isAgentRunDirectAbortReason,
+  isAgentRunRestartAbortReason,
+} from "../../agents/run-termination.js";
 import { runWithCanonicalSkillWorkspace } from "../../agents/skill-workshop-workspace-context.js";
 import {
   createExecutionStartedOwnerBinding,
@@ -37,6 +40,7 @@ import { withTimeout } from "../../infra/fs-safe.js";
 import { defaultRuntime } from "../../runtime.js";
 import { createRunningTaskRun } from "../../tasks/detached-task-runtime.js";
 import { getTaskById } from "../../tasks/runtime-internal.js";
+import { captureTaskCancellationControl } from "../../tasks/task-cancellation-context.js";
 import { bindTaskFlowExecution } from "../../tasks/task-flow-registry.store.sqlite.js";
 import { mapAgentRunTerminalOutcomeToTaskStatus } from "../../tasks/task-registry-common.js";
 import { bindTaskRunExecution } from "../../tasks/task-registry.store.sqlite.js";
@@ -79,7 +83,8 @@ function isGatewayAbortSignalReason(reason: unknown): boolean {
 
 function isGatewayAgentAbortRejection(error: unknown, signal: AbortSignal): boolean {
   if (!signal.aborted) {
-    return false;
+    // The run can cancel its own controller without aborting the Gateway observer.
+    return isAgentRunDirectAbortReason(error);
   }
   if (isAgentRunRestartAbortReason(signal.reason)) {
     return true;
@@ -111,7 +116,7 @@ const RESOLVED_GATEWAY_STATUS_BY_TERMINAL_CLASSIFICATION = {
 
 function projectRejectedGatewayStatus(outcome: AgentRunTerminalOutcome): "error" | "timeout" {
   // The shipped wire keeps raw provider/AbortError rejections as errors. Only
-  // signal-owned cancellation/timeout metadata promotes a rejection to timeout.
+  // owner-recorded cancellation/timeout metadata promotes a rejection to timeout.
   return outcome.reason === "cancelled" ||
     outcome.reason === "superseded" ||
     outcome.stopReason === "timeout"
@@ -156,13 +161,18 @@ export function dispatchAgentRunFromGateway(params: {
   }) => Promise<boolean> | boolean;
 }) {
   let trackedTask: TaskRecord | undefined;
-  if (params.taskTrackingMode === "cli") {
+  if (params.taskTrackingMode !== "none") {
+    const followup =
+      typeof params.taskTrackingMode === "object" ? params.taskTrackingMode : undefined;
     try {
       trackedTask =
         createRunningTaskRun({
           runtime: "cli",
           sourceId: params.runId,
-          ownerKey: params.ingressOpts.sessionKey,
+          ownerKey: followup?.requesterSessionKey ?? params.ingressOpts.sessionKey,
+          requesterSessionKey: followup?.requesterSessionKey,
+          label: followup?.label,
+          ...(followup ? { notifyPolicy: "silent" as const } : {}),
           scopeKind: "session",
           requesterOrigin: normalizeDeliveryContext({
             channel: params.ingressOpts.channel,
@@ -212,7 +222,7 @@ export function dispatchAgentRunFromGateway(params: {
     ? createCronCreatorAuthorityCapability(
         params.cronCreatorAuthority.runId,
         params.cronCreatorAuthority.callerOrigin,
-        params.cronCreatorAuthority.controlUiAdmin,
+        params.cronCreatorAuthority.managementEntitlement,
         params.cronCreatorAuthority.isCurrent,
       )
     : undefined;
@@ -521,6 +531,7 @@ export function dispatchAgentRunFromGateway(params: {
       ) {
         return err("Task no longer owns an active Gateway run.");
       }
+      captureTaskCancellationControl()?.assertCurrent();
       const result = abortChatRunById(createChatAbortOps(params.context), {
         runId: params.runId,
         sessionKey,

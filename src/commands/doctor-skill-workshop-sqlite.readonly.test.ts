@@ -18,7 +18,7 @@ import { appendSkillProposalEvent } from "../skills/workshop/store-sqlite-event.
 import { importLegacySkillProposal } from "../skills/workshop/store.js";
 import type { SkillProposalRecord } from "../skills/workshop/types.js";
 import {
-  closeOpenClawStateDatabaseForTest,
+  closeOpenClawStateDatabaseAsync,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
@@ -121,7 +121,7 @@ describe("read-only Skill Workshop migration inspection", () => {
       const before = await loadCronJobsStoreWithConfigJobsReadOnly(storePath, state.env);
       await migrateLegacySkillWorkshopProposals({ config, env: state.env });
       await expect(fs.access(legacy)).rejects.toMatchObject({ code: "ENOENT" });
-      closeOpenClawStateDatabaseForTest();
+      await closeOpenClawStateDatabaseAsync();
       const databasePath = resolveOpenClawStateSqlitePath(state.env);
       const databaseBefore = await snapshotDatabase(databasePath);
       const filesBefore = (await fs.readdir(state.stateDir, { recursive: true })).toSorted();
@@ -185,9 +185,20 @@ describe("read-only Skill Workshop migration inspection", () => {
         return record;
       });
       for (const record of records) {
+        await state.writeText(
+          `skill-workshop/proposals/${record.id}/${record.draftFile}`,
+          "# Saved\n",
+        );
         importLegacySkillProposal({ record, ownerAgentId: "main", store: { env: state.env } });
       }
       const [eligible, blocked] = records;
+      const inspect = () =>
+        runDoctorLintChecks(
+          { mode: "doctor", runtime: { log() {}, error() {}, exit() {} }, cfg: config },
+          { checks: createCoreHealthChecks(), onlyIds: ["core/doctor/skill-workshop-relocation"] },
+        );
+      const beforeRepair = await inspect();
+      expect(beforeRepair.findings[0]?.fixHint).toContain("`openclaw doctor --fix`");
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const migration = await migrateLegacySkillWorkshopProposals({ config, env: state.env });
         if (attempt === 0) {
@@ -198,10 +209,7 @@ describe("read-only Skill Workshop migration inspection", () => {
         expect(migration.warnings.join("\n")).toContain(
           "Legacy workspace setup state requires migration",
         );
-        const result = await runDoctorLintChecks(
-          { mode: "doctor", runtime: { log() {}, error() {}, exit() {} }, cfg: config },
-          { checks: createCoreHealthChecks(), onlyIds: ["core/doctor/skill-workshop-relocation"] },
-        );
+        const result = await inspect();
         expect(result.findings).toHaveLength(1);
         const finding = result.findings[0]!;
         expect(finding.message).toContain(blocked!.id);
@@ -270,7 +278,7 @@ describe("read-only Skill Workshop migration inspection", () => {
             store: { env: state.env },
           });
         }
-        closeOpenClawStateDatabaseForTest();
+        await closeOpenClawStateDatabaseAsync();
         const databasePath = resolveOpenClawStateSqlitePath(state.env);
         const databaseBefore = proposal ? await snapshotDatabase(databasePath) : undefined;
         const filesBefore = (await fs.readdir(state.stateDir, { recursive: true })).toSorted();
@@ -350,7 +358,7 @@ describe("read-only Skill Workshop migration inspection", () => {
         } else {
           importLegacySkillProposal({ record, ownerAgentId: "main", store: { env: state.env } });
         }
-        closeOpenClawStateDatabaseForTest();
+        await closeOpenClawStateDatabaseAsync();
         const databasePath = resolveOpenClawStateSqlitePath(state.env);
         const seed = openNodeSqliteDatabase(databasePath);
         try {
@@ -375,7 +383,7 @@ describe("read-only Skill Workshop migration inspection", () => {
           preservedLegacyBackupRootCount: 0,
         });
 
-        closeOpenClawStateDatabaseForTest();
+        await closeOpenClawStateDatabaseAsync();
         expect(await snapshotDatabase(databasePath)).toEqual(before);
         expect(await fs.readFile(skillFile, "utf8")).toBe(content);
       });
@@ -447,7 +455,7 @@ describe("read-only Skill Workshop migration inspection", () => {
           store: { env: state.env },
         });
       }
-      closeOpenClawStateDatabaseForTest();
+      await closeOpenClawStateDatabaseAsync();
       const seed = openNodeSqliteDatabase(resolveOpenClawStateSqlitePath(state.env));
       try {
         for (const sample of cases.filter((entry) => entry.owner === null)) {

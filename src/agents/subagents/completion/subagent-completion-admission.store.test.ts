@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
 import { recoverPendingSessionDeliveries } from "../../../infra/session-delivery-queue-recovery.js";
 import {
@@ -29,8 +29,10 @@ import { withEnvAsync } from "../../../test-utils/env.js";
 import { suspendPendingFinalDelivery } from "../registry/subagent-registry-lifecycle-cleanup.js";
 import { SubagentLifecycleController } from "../registry/subagent-registry-lifecycle.js";
 import { subagentRuns } from "../registry/subagent-registry-memory.js";
+import { onSubagentRegistryPersisted } from "../registry/subagent-registry-state.js";
 import { loadSubagentRegistryFromSqlite } from "../registry/subagent-registry.store.sqlite.js";
 import type { SubagentRunRecord } from "../registry/subagent-registry.types.js";
+import { resolveSubagentAttachmentDir } from "../subagent-attachment-paths.js";
 import {
   admitSubagentCompletionDelivery,
   blockSubagentCompletionDelivery,
@@ -455,6 +457,11 @@ describe("atomic subagent completion admission store", () => {
     input.subagent.requesterDisplayKey = input.task.requesterSessionKey;
     persistOwner(input);
 
+    const observed = vi.fn(() => ({
+      delivery: subagentRuns.get(input.subagent.runId)?.delivery?.status,
+      taskDelivery: getTaskById(input.task.taskId)?.deliveryStatus,
+    }));
+    onTestFinished(onSubagentRegistryPersisted(observed));
     const block = () =>
       blockSubagentCompletionDelivery({
         subagent: input.subagent,
@@ -464,6 +471,7 @@ describe("atomic subagent completion admission store", () => {
         databaseOptions: { database },
       });
     expect(block()).toBe(true);
+    expect(observed).toHaveReturnedWith({ delivery: "suspended", taskDelivery: "failed" });
     expect(block()).toBe(true);
     expect(systemEvents()).toHaveLength(1);
     expect(systemEvents()[0]?.entry).toMatchObject({
@@ -935,18 +943,17 @@ describe("atomic subagent completion admission store", () => {
       });
 
       const cappedSubagent = structuredClone(subagentRuns.get(input.subagent.runId)!);
-      const attachmentsRootDir = path.join(tempDir, "attachments");
-      const attachmentsDir = path.join(attachmentsRootDir, "completion-run");
+      const { childSessionKey } = cappedSubagent;
+      const attachmentId = "2d4a8398-4d5a-4c20-9c16-0a5f6627cf92";
+      const attachmentsDir = resolveSubagentAttachmentDir("main", childSessionKey, attachmentId);
       await fs.mkdir(attachmentsDir, { recursive: true });
       await fs.writeFile(path.join(attachmentsDir, "result.txt"), "retained result");
-      cappedSubagent.attachmentsRootDir = attachmentsRootDir;
-      cappedSubagent.attachmentsDir = attachmentsDir;
-      Object.assign(cappedSubagent.delivery!, {
-        status: "suspended",
-        generation: 10,
-        suspendedAt: now,
-        suspendedReason: "expiry",
-      });
+      cappedSubagent.attachmentId = attachmentId;
+      const delivery = cappedSubagent.delivery!;
+      delivery.status = "suspended";
+      delivery.generation = 10;
+      delivery.suspendedAt = now;
+      delivery.suspendedReason = "expiry";
       const cappedTask: TaskRecord = {
         ...result.task!,
         deliveryStatus: "failed",

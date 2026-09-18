@@ -1,3 +1,4 @@
+import "../../styles/chat/startup-layout.css";
 import {
   normalizeStringEntries,
   uniqueStrings,
@@ -55,7 +56,7 @@ import type {
   CronFieldKey,
   CronFormState,
   CronJobsLastStatusFilter,
-} from "../../lib/cron/index.ts";
+} from "../../lib/cron/types.ts";
 import { formatUiExternalText } from "../../lib/format-error.ts";
 import { formatRelativeTimestamp, formatMs } from "../../lib/format.ts";
 import { formatCronSchedule } from "../../lib/presenter.ts";
@@ -152,7 +153,7 @@ type CronProps = {
     cronRunsQuery?: string;
     cronRunsSortDir?: CronSortDir;
   }) => void | Promise<void>;
-  onNavigateToChat?: (sessionKey: string) => void;
+  onViewRunTranscript?: (entry: CronRunLogEntry) => void;
 };
 
 // ── Shared option helpers ──

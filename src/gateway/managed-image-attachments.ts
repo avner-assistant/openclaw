@@ -6,6 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { maxBytesForKind, mediaKindFromMime, type MediaKind } from "@openclaw/media-core/constants";
 import { mimeTypeFromFilePath, normalizeMimeType } from "@openclaw/media-core/mime";
+import { hasHttpUrlPrefix } from "@openclaw/net-policy/url-protocol";
 import { expectDefined } from "@openclaw/normalization-core";
 import {
   asDateTimestampMs,
@@ -65,6 +66,7 @@ import {
   claimManagedImageRecordCleanupIfCurrent,
   deleteClaimedManagedImageRecord,
   insertManagedImageRecord,
+  listManagedImageOriginalMediaIds,
   listManagedImageRecordEntries,
   MANAGED_OUTGOING_ORIGINALS_SUBDIR,
   readManagedImageRecord,
@@ -455,11 +457,7 @@ async function deleteAgedOrphanManagedImageFiles(params: {
   if (await hasUnmigratedManagedImageMetadata(params.stateDir)) {
     return 0;
   }
-  const referencedMediaIds = new Set(
-    listManagedImageRecordEntries({ stateDir: params.stateDir }).map(
-      ({ record }) => record.original.mediaId,
-    ),
-  );
+  const referencedMediaIds = new Set(await listManagedImageOriginalMediaIds(params.stateDir));
   const originalsDir = resolveManagedImageOriginalsDir(params.stateDir);
   let names: string[];
   try {
@@ -717,7 +715,7 @@ export async function cleanupManagedOutgoingMediaRecords(params?: {
       ? tryResolveSessionCompatibilityOwnerAgentId(getRuntimeConfig(), "global")
       : undefined;
   const forceDeleteSessionRecords = params?.forceDeleteSessionRecords === true;
-  const entries = listManagedImageRecordEntries({ stateDir });
+  const entries = await listManagedImageRecordEntries({ stateDir });
   let pendingPreparedAttachmentIds: Set<string> | null | undefined;
 
   let deletedRecordCount = 0;
@@ -815,10 +813,11 @@ export async function removeManagedOutgoingMediaBlocks(params: {
   stateDir?: string;
 }): Promise<void> {
   const stateDir = params.stateDir ?? resolveStateDir();
+  const messageId = params.messageId;
   await Promise.all(
     collectManagedOutgoingAttachmentRefs(params.blocks).map(async ({ attachmentId }) => {
-      const record = readManagedImageRecord(attachmentId, stateDir);
-      if (record?.messageId === params.messageId) {
+      const record = await readManagedImageRecord(attachmentId, stateDir);
+      if (record?.messageId === messageId) {
         await deleteManagedImageRecordArtifacts(record, stateDir);
       }
     }),
@@ -837,15 +836,11 @@ function resolveManagedSessionOwnerAgentId(
   return ownerAgentId ? normalizeAgentId(ownerAgentId) : undefined;
 }
 
-function resolveManagedRecordKind(record: ManagedImageRecord): ManagedMediaKind | null {
-  return resolveManagedMediaKind(record.original.contentType);
-}
-
 function buildManagedMediaBlock(
   record: ManagedImageRecord,
   playback?: "native" | "transcode",
 ): ManagedMediaBlock {
-  const kind = resolveManagedRecordKind(record);
+  const kind = resolveManagedMediaKind(record.original.contentType);
   if (!kind) {
     throw new Error("Managed media record has an unsupported content type");
   }
@@ -1199,7 +1194,7 @@ async function resolveManagedOutgoingMediaArtifactDownloadForRecord(
   ) {
     return null;
   }
-  const kind = resolveManagedRecordKind(record);
+  const kind = resolveManagedMediaKind(record.original.contentType);
   if (!kind) {
     return null;
   }
@@ -1240,28 +1235,30 @@ export async function resolveManagedOutgoingMediaArtifactDownload(params: {
   artifactId: string;
   stateDir?: string;
 }): Promise<ManagedOutgoingMediaArtifactDownload | null> {
-  const parsed = parseManagedOutgoingArtifactId(params.artifactId);
+  const { artifactId, sessionKey, agentId, defaultAgentId } = params;
+  const stateDir = params.stateDir ?? resolveStateDir();
+  const parsed = parseManagedOutgoingArtifactId(artifactId);
   if (!parsed) {
     return null;
   }
-  const record = readManagedImageRecord(parsed.attachmentId, params.stateDir);
-  if (!record || record.sessionKey !== params.sessionKey) {
+  const record = await readManagedImageRecord(parsed.attachmentId, stateDir);
+  if (!record || record.sessionKey !== sessionKey) {
     return null;
   }
-  const requestedAgentId = params.agentId ? normalizeAgentId(params.agentId) : undefined;
+  const requestedAgentId = agentId ? normalizeAgentId(agentId) : undefined;
   const recordAgentId = resolveManagedSessionOwnerAgentId(
     record.sessionKey,
     record.agentId,
-    params.defaultAgentId,
+    defaultAgentId,
   );
   if (requestedAgentId && recordAgentId !== requestedAgentId) {
     return null;
   }
-  const kind = resolveManagedRecordKind(record);
+  const kind = resolveManagedMediaKind(record.original.contentType);
   if (!kind || (parsed.family === "image") !== (kind === "image")) {
     return null;
   }
-  return await resolveManagedOutgoingMediaArtifactDownloadForRecord(record, params.stateDir);
+  return await resolveManagedOutgoingMediaArtifactDownloadForRecord(record, stateDir);
 }
 
 /** Upgrade legacy managed-image URLs that predate stable artifact ids. */
@@ -1270,15 +1267,17 @@ export async function resolveManagedOutgoingMediaUrlDownload(params: {
   url: string;
   stateDir?: string;
 }): Promise<ManagedOutgoingMediaArtifactDownload | null> {
-  const parsed = parseManagedOutgoingRoute(params.url);
-  if (!parsed || parsed.sessionKey !== params.sessionKey) {
+  const { url, sessionKey } = params;
+  const stateDir = params.stateDir ?? resolveStateDir();
+  const parsed = parseManagedOutgoingRoute(url);
+  if (!parsed || parsed.sessionKey !== sessionKey) {
     return null;
   }
-  const record = readManagedImageRecord(parsed.attachmentId, params.stateDir);
-  if (!record || record.sessionKey !== params.sessionKey) {
+  const record = await readManagedImageRecord(parsed.attachmentId, stateDir);
+  if (!record || record.sessionKey !== sessionKey) {
     return null;
   }
-  return await resolveManagedOutgoingMediaArtifactDownloadForRecord(record, params.stateDir);
+  return await resolveManagedOutgoingMediaArtifactDownloadForRecord(record, stateDir);
 }
 
 async function readManagedImageThumbnailFromFile(
@@ -1311,33 +1310,31 @@ export async function readManagedOutgoingImageThumbnail(
     signal: AbortSignal;
   },
 ): Promise<Buffer | null> {
-  params.signal.throwIfAborted();
-  const download = await resolveManagedOutgoingMediaArtifactDownload(params);
-  const parsed = parseManagedOutgoingArtifactId(params.artifactId);
+  const { artifactId, sessionKey, maxBytes, signal } = params;
+  const stateDir = params.stateDir ?? resolveStateDir();
+  signal.throwIfAborted();
+  const download = await resolveManagedOutgoingMediaArtifactDownload({ ...params, stateDir });
+  const parsed = parseManagedOutgoingArtifactId(artifactId);
   if (!download || download.type !== "image" || !parsed) {
     return null;
   }
-  params.signal.throwIfAborted();
-  const record = readManagedImageRecord(parsed.attachmentId, params.stateDir);
-  if (!record || record.sessionKey !== params.sessionKey) {
+  signal.throwIfAborted();
+  const record = await readManagedImageRecord(parsed.attachmentId, stateDir);
+  signal.throwIfAborted();
+  if (!record || record.sessionKey !== sessionKey) {
     return null;
   }
   const opened = await openLocalFileSafely({ filePath: resolveManagedImageOriginalPath(record) });
   try {
-    const thumbnail = await readManagedImageThumbnailFromFile(opened, params.maxBytes);
-    params.signal.throwIfAborted();
+    const thumbnail = await readManagedImageThumbnailFromFile(opened, maxBytes);
+    signal.throwIfAborted();
     if (
-      (await recordMatchesTranscriptMessage(
-        record,
-        undefined,
-        undefined,
-        undefined,
-        params.stateDir,
-      )) !== "match"
+      (await recordMatchesTranscriptMessage(record, undefined, undefined, undefined, stateDir)) !==
+      "match"
     ) {
       return null;
     }
-    params.signal.throwIfAborted();
+    signal.throwIfAborted();
     return thumbnail;
   } finally {
     await opened.handle.close();
@@ -1380,6 +1377,8 @@ export async function createManagedOutgoingMediaBlocks(params: {
   localRoots?: readonly string[] | "any";
   continueOnPrepareError?: boolean;
   onPrepareError?: (error: Error) => void;
+  assertCurrent?: () => void;
+  abortSignal?: AbortSignal;
 }): Promise<ManagedMediaBlock[]> {
   const sessionKey = params.sessionKey.trim();
   if (!sessionKey) {
@@ -1418,6 +1417,7 @@ export async function createManagedOutgoingMediaBlocks(params: {
 
     let savedOriginalPath: string | null = null;
     try {
+      params.assertCurrent?.();
       const parsedDataUrl = parseMediaDataUrl(mediaUrl, fallbackLabel, limits);
       if (parsedDataUrl.kind === "unsupported-data-url") {
         throw new Error("Managed media attachment has an unsupported data URL content type");
@@ -1456,18 +1456,24 @@ export async function createManagedOutgoingMediaBlocks(params: {
               // File URLs have already been normalized for display metadata and policy checks.
               // Pass that path to the store instead of treating URI syntax as a filename.
               const ingestSource = localMediaPath ?? mediaUrl;
-              return await saveMediaSource(
-                ingestSource,
-                undefined,
-                "outgoing/originals",
-                Math.max(
-                  limits.maxBytes,
-                  maxBytesForKind("audio"),
-                  maxBytesForKind("video"),
-                  maxBytesForKind("document"),
-                  MEDIA_MAX_BYTES,
-                ),
+              const maxBytes = Math.max(
+                limits.maxBytes,
+                maxBytesForKind("audio"),
+                maxBytesForKind("video"),
+                maxBytesForKind("document"),
+                MEDIA_MAX_BYTES,
               );
+              if (hasHttpUrlPrefix(ingestSource)) {
+                const { saveRemoteMediaForStore } =
+                  await import("../media/store.remote.runtime.js");
+                return await saveRemoteMediaForStore({
+                  source: ingestSource,
+                  subdir: "outgoing/originals",
+                  maxBytes,
+                  abortSignal: params.abortSignal,
+                });
+              }
+              return await saveMediaSource(ingestSource, undefined, "outgoing/originals", maxBytes);
             })();
       savedOriginalPath = savedOriginal.path;
       let savedOriginalContentType = savedOriginal.contentType ?? item.mimeType;
@@ -1604,6 +1610,7 @@ export async function createManagedOutgoingMediaBlocks(params: {
         }
       }
       const block = buildManagedMediaBlock(record, playback);
+      params.assertCurrent?.();
       insertManagedImageRecord(record, stateDir);
       const durationMs = asNonNegativeFiniteNumber(item.durationMs);
       const width = asNonNegativeFiniteNumber(item.width);
@@ -1620,6 +1627,16 @@ export async function createManagedOutgoingMediaBlocks(params: {
     } catch (error) {
       if (savedOriginalPath) {
         await fs.rm(savedOriginalPath, { force: true }).catch(() => {});
+      }
+      try {
+        params.assertCurrent?.();
+      } catch (authorityError) {
+        await removeManagedOutgoingMediaBlocks({
+          blocks,
+          messageId: params.messageId ?? null,
+          stateDir,
+        });
+        throw authorityError;
       }
       const sanitizedError = getSanitizedManagedImageAttachmentError(error, label, hintedKind);
       if (params.continueOnPrepareError) {
@@ -1744,7 +1761,7 @@ export async function handleManagedOutgoingMediaHttpRequest(
     }
   }
   const stateDir = opts.stateDir ?? resolveStateDir();
-  const record = readManagedImageRecord(attachmentId, stateDir);
+  const record = await readManagedImageRecord(attachmentId, stateDir);
   if (!record || record.sessionKey !== sessionKey) {
     sendStatus(res, 404, "not found");
     return true;
@@ -1756,7 +1773,7 @@ export async function handleManagedOutgoingMediaHttpRequest(
     sendStatus(res, 404, "not found");
     return true;
   }
-  const mediaKind = resolveManagedRecordKind(record);
+  const mediaKind = resolveManagedMediaKind(record.original.contentType);
   if (!mediaKind) {
     sendStatus(res, 404, "not found");
     return true;

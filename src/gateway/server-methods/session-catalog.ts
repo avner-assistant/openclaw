@@ -16,7 +16,6 @@ import {
   validateSessionsCatalogReadParams,
 } from "../../../packages/gateway-protocol/src/index.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { pruneMapToMaxSize } from "../../infra/map-size.js";
 import {
   capturePluginLifecycleAuthority,
   capturePluginRegistryLifecycleEpoch,
@@ -29,6 +28,7 @@ import type {
 } from "../../plugins/session-catalog.js";
 import { getGatewayRestartDrainSignal } from "../../process/gateway-work-admission.js";
 import { authorizeGatewaySessionCreation } from "../operator-role-policy.js";
+import { getSessionRowProjection } from "../session-row-projection-access.js";
 import { resolveAgentIdOrRespondError } from "./agent-id-shared.js";
 import { authorizeSessionCatalogThread } from "./session-catalog-authorization.js";
 import { continueAuthorizedSessionCatalog } from "./session-catalog-continue.js";
@@ -41,11 +41,15 @@ import {
   type CatalogListProgressSubscriber,
 } from "./session-catalog-list-lifetime.js";
 import {
+  getSessionCatalogListOperations,
+  retireSessionCatalogLists,
+  type CatalogListEnumeration,
+} from "./session-catalog-list-operations.js";
+import {
   allowProcessHomeFallback,
   createSessionCatalogRequestNodeSnapshot,
   listSessionCatalogProvider,
   catalogRegistrationSnapshot,
-  type CatalogRegistrationSnapshot,
 } from "./session-catalog-provider-access.js";
 import { readAuthorizedSessionCatalog } from "./session-catalog-read.js";
 import { catalogStartHandler } from "./session-catalog-terminal-start.js";
@@ -62,8 +66,6 @@ import type {
 import { assertValidParams } from "./validation.js";
 
 const SESSION_CATALOG_SEARCH_MAX_UTF16_UNITS = 500;
-const SESSION_CATALOG_SHARE_WINDOW_MS = 3_000;
-const SESSION_CATALOG_LIST_CACHE_MAX_ENTRIES = 128;
 
 function normalizeSessionCatalogSearch(search: string | undefined): string | undefined {
   const normalized = normalizeOptionalString(search);
@@ -103,20 +105,6 @@ const providerCreateTargetsByConfig = new WeakMap<
 >();
 
 type CatalogListResult = { catalogs: SessionCatalog[] };
-type CatalogListEnumeration = CatalogListResult & { instances: SessionCatalogInstances };
-
-type CatalogListCacheEntry = {
-  expiresAt?: number;
-  progress: SessionCatalogListLifetime;
-  result: Promise<CatalogListEnumeration>;
-};
-
-type CatalogListCacheState = {
-  registrations: CatalogRegistrationSnapshot;
-  entries: Map<string, CatalogListCacheEntry>;
-};
-
-const catalogListsByConfig = new WeakMap<OpenClawConfig, CatalogListCacheState>();
 const catalogCallerIds = new WeakMap<GatewayClient, number>();
 let nextCatalogCallerId = 0;
 
@@ -223,18 +211,6 @@ function sessionCatalogListKey(params: {
     params.client?.connect?.role ?? null,
     params.client?.connect?.device?.id ?? null,
   ]);
-}
-
-function catalogListCache(
-  config: OpenClawConfig,
-  registrationSnapshot: CatalogRegistrationSnapshot,
-): Map<string, CatalogListCacheEntry> {
-  let state = catalogListsByConfig.get(config);
-  if (!state || state.registrations !== registrationSnapshot) {
-    state = { registrations: registrationSnapshot, entries: new Map() };
-    catalogListsByConfig.set(config, state);
-  }
-  return state.entries;
 }
 
 function providerOrRespond(
@@ -358,6 +334,13 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
       selected = catalogRegistrations.providers;
     }
     const providerAudiences = new Map(selected.map((provider) => [provider.id, provider.audience]));
+    const projection = getSessionRowProjection(context);
+    if (!projection) {
+      throw new Error("Session projection is unavailable before Gateway startup completes");
+    }
+    while (projection.needsMaterialization) {
+      await projection.ensureMaterialized();
+    }
     const config = context.getRuntimeConfig();
     const resolvedAgent = resolveAgentIdOrRespondError({
       rawAgentId: request.agentId,
@@ -370,7 +353,7 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
     }
     const search = normalizeSessionCatalogSearch(request.search);
     const allowHomeFallback = allowProcessHomeFallback(context.logGateway);
-    // Cached provider enumeration is not permission. Each synchronous delivery gets current
+    // Shared provider enumeration is not permission. Each synchronous delivery gets current
     // caller facts and one canonical index, never the provider's pre-await planning snapshot.
     const projectResult = (result: CatalogListEnumeration): CatalogListResult => {
       const currentConfig = context.getRuntimeConfig();
@@ -378,6 +361,7 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
       const requestEntries = createSessionCatalogRequestEntrySnapshot({
         cfg: currentConfig,
         fallbackAgentId: resolvedAgent.agentId,
+        projection,
         sessionKeys: result.catalogs
           .flatMap((catalog) => catalog.hosts)
           .flatMap((host) => host.sessions)
@@ -432,6 +416,7 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
                 client.internal.agentRuntimeIdentity,
               ) === true),
           client?.connectionSignal ?? signal,
+          () => (projection.needsMaterialization ? projection.ensureMaterialized() : undefined),
         );
       }
     };
@@ -443,21 +428,17 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
       allowProcessHomeFallback: allowHomeFallback,
       visibilityKey: resolveSessionCatalogVisibility(client, config).cacheKey,
     });
-    const cache = catalogListCache(config, catalogRegistrations);
-    const cached = cache.get(listKey);
-    if (cached && (cached.expiresAt === undefined || cached.expiresAt > Date.now())) {
-      // progressId is connection-owned and excluded from the work key. Active followers register
-      // for the remaining host frames; settled followers receive only the authoritative result.
-      if (cached.expiresAt === undefined) {
-        subscribe(cached.progress);
+    const operations = getSessionCatalogListOperations(config, catalogRegistrations);
+    const pending = operations.pending.get(listKey);
+    if (pending) {
+      // progressId is connection-owned and excluded from the work key.
+      subscribe(pending.progress);
+      const result = await pending.result;
+      while (projection.needsMaterialization) {
+        await projection.ensureMaterialized();
       }
-      cache.delete(listKey);
-      cache.set(listKey, cached);
-      respond(true, projectResult(await cached.result));
+      respond(true, projectResult(result));
       return;
-    }
-    if (cached) {
-      cache.delete(listKey);
     }
     const registry = catalogRegistrations.registry;
     const scopedRuntime = getPluginRuntimeGatewayRequestScope()?.pluginRegistry === registry;
@@ -479,8 +460,10 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
         getGatewayRestartDrainSignal(),
         context.requestEntryLifetime?.signal,
         registrySignal,
+        operations.retirement.signal,
         signal,
       ].filter((candidate): candidate is AbortSignal => candidate !== undefined),
+      selected.map((provider) => provider.id),
     );
     subscribe(progress);
     const operation = (async () => {
@@ -488,6 +471,7 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
         ? createSessionCatalogRequestEntrySnapshot({
             cfg: config,
             fallbackAgentId: resolvedAgent.agentId,
+            projection,
           })
         : undefined;
       requestEntries?.freeze();
@@ -511,8 +495,8 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
             progress.publish(catalog, instances);
           };
           try {
-            const hosts = await progress.runProvider(onHost, (lifetime) =>
-              listSessionCatalogProvider(provider, {
+            const hosts = await progress.runProvider(onHost, (lifetime) => {
+              const providerParams = {
                 agentId: resolvedAgent.agentId,
                 allowProcessHomeFallback: allowHomeFallback,
                 search,
@@ -522,8 +506,9 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
                 sessionEntries: requestEntries?.sessionEntries,
                 listNodes,
                 ...lifetime,
-              }),
-            );
+              };
+              return listSessionCatalogProvider(provider, providerParams, progress.assertCurrent);
+            });
             for (const host of hosts) {
               requestEntries?.captureHostInstances(host, instances);
             }
@@ -535,24 +520,22 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
       );
       return { catalogs: catalogList, instances };
     })();
-    const entry: CatalogListCacheEntry = { progress, result: operation };
-    // Raw enumeration stays shareable for 3s within the caller's authority partition. Privacy
-    // and creator projection are refreshed per delivery, independently of metadata expiry.
-    cache.set(listKey, entry);
-    pruneMapToMaxSize(cache, SESSION_CATALOG_LIST_CACHE_MAX_ENTRIES);
+    const entry = { progress, result: operation };
+    // Coalesce only concurrent requests; each subsequent list sees current provider rows.
+    operations.pending.set(listKey, entry);
     try {
       const result = await operation;
-      if (cache.get(listKey) === entry) {
-        entry.expiresAt = Date.now() + SESSION_CATALOG_SHARE_WINDOW_MS;
+      while (projection.needsMaterialization) {
+        await projection.ensureMaterialized();
       }
       respond(true, projectResult(result));
     } catch (error) {
       progress.retire(error);
-      if (cache.get(listKey) === entry) {
-        cache.delete(listKey);
-      }
       throw error;
     } finally {
+      if (operations.pending.get(listKey) === entry) {
+        operations.pending.delete(listKey);
+      }
       progress.finishListing();
     }
   },
@@ -719,14 +702,7 @@ export const sessionCatalogHandlers: GatewayRequestHandlers = {
         agentId: authorization.agentId,
         allowProcessHomeFallback: authorization.allowProcessHomeFallback,
       });
-      const cache = catalogListsByConfig.get(context.getRuntimeConfig())?.entries;
-      if (cache) {
-        // Host publications can outlive the aggregate response and still contain the deleted row.
-        for (const entry of cache.values()) {
-          entry.progress.retire();
-        }
-        cache.clear();
-      }
+      retireSessionCatalogLists(context.getRuntimeConfig());
       respond(true, result);
     } catch (error) {
       const details = catalogError(error);

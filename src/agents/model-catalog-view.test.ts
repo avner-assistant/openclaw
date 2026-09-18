@@ -14,6 +14,7 @@ import {
   createModelCatalogView,
   loadPreparedModelCatalogView,
   prepareModelCatalogView,
+  selectModelCatalogRuntimeEntry,
 } from "./model-catalog-view.js";
 import type { ModelCatalogEntry, ModelCatalogSnapshot } from "./model-catalog.types.js";
 import {
@@ -153,7 +154,7 @@ describe("prepared model catalog view", () => {
     expect(view.catalog).toEqual(entries);
   });
 
-  it("includes only configured static identities and preserves committed rows", () => {
+  it("enriches permitted static choices and current metadata while preserving committed rows", () => {
     const committed = { ...row("custom", "vendor/model"), name: "Committed" };
     const cfg: OpenClawConfig = {
       agents: { defaults: { model: "custom/vendor/model", models: { "custom/extra": {} } } },
@@ -171,7 +172,15 @@ describe("prepared model catalog view", () => {
     ).toEqual([committed, row("custom", "extra")]);
     expect(
       prepareModelCatalogView({ ...facts(cfg), snapshot: captured, view: "default" }).catalog,
-    ).toEqual([committed]);
+    ).toEqual([committed, row("custom", "extra")]);
+    expect(
+      prepareModelCatalogView({
+        ...facts(cfg),
+        snapshot: captured,
+        view: "configured",
+        retainedModel: { provider: "custom", model: "model" },
+      }).catalog,
+    ).toEqual([committed, row("custom", "model"), row("custom", "extra")]);
   });
 
   it("uses authored inventory membership with canonical route metadata", () => {
@@ -448,4 +457,39 @@ describe("prepared native catalog readiness", () => {
     });
     expect(view.evaluateNative(nativeEntry, host, "native-test")).toEqual(host);
   });
+});
+
+describe("runtime capability donors", () => {
+  it.each(["empty", "unrelated", "native-without-window"])(
+    "preserves logical fallback without borrowing native windows (%s)",
+    (scenario) => {
+      const base: ModelCatalogEntry = {
+        provider: "fixture",
+        id: "model",
+        name: "Model",
+        contextWindows: [{ id: "32k", label: "32K", contextWindow: 32_000 }],
+      };
+      const routeVariants: ModelCatalogEntry[] =
+        scenario === "empty"
+          ? []
+          : scenario === "unrelated"
+            ? [{ provider: "fixture", id: "other", name: "Other" }]
+            : [
+                {
+                  provider: "fixture",
+                  id: "model",
+                  name: "Model",
+                  nativeRuntime: "native-fixture",
+                },
+              ];
+      const selected = selectModelCatalogRuntimeEntry({
+        entry: base,
+        routeVariants,
+        runtimeId: scenario === "native-without-window" ? "native-fixture" : "openclaw",
+      });
+      expect(selected.entry.contextWindows).toEqual(
+        scenario === "native-without-window" ? undefined : base.contextWindows,
+      );
+    },
+  );
 });

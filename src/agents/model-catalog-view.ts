@@ -28,11 +28,13 @@ import {
 import {
   projectModelCatalogEntryForRoute,
   createConfiguredModelCatalogOverridesResolver,
+  type ModelCatalogRoutePolicy,
   type ModelCatalogRouteProjection,
 } from "./model-catalog-route.js";
 import type { ModelCatalogEntry, ModelCatalogSnapshot } from "./model-catalog.types.js";
 import { hasAuthoredProviderRequestParams } from "./model-extra-params.js";
 import { splitTrailingAuthProfile } from "./model-ref-profile.js";
+import type { ModelRef } from "./model-ref-shared.js";
 import {
   createModelVisibilityPolicy,
   RUNTIME_MODEL_VISIBILITY_NORMALIZATION,
@@ -43,13 +45,40 @@ import {
   resolveModelCatalogIdentityKey,
 } from "./openai-model-routes.js";
 
+/** Keep capability donors bound to one model and runtime without merging sibling metadata. */
+export function selectModelCatalogRuntimeEntry(params: {
+  entry: ModelCatalogEntry;
+  routeVariants: readonly ModelCatalogEntry[];
+  runtimeId: string;
+}): { entry: ModelCatalogEntry; variants: ModelCatalogEntry[] } {
+  const keyOf = createModelCatalogIdentityKeyResolver();
+  const key = keyOf(params.entry);
+  const observed = params.routeVariants.filter((variant) => keyOf(variant) === key);
+  const variants = (observed.length ? observed : [params.entry])
+    .filter((variant) => !variant.nativeRuntime || variant.nativeRuntime === params.runtimeId)
+    .toSorted(
+      (a, b) =>
+        Number(b.nativeRuntime === params.runtimeId) - Number(a.nativeRuntime === params.runtimeId),
+    );
+  return {
+    variants,
+    entry: variants[0] ?? {
+      id: params.entry.id,
+      name: params.entry.name,
+      provider: params.entry.provider,
+    },
+  };
+}
+
 /** Indexes physical variants for paired logical catalog projection. */
 export function createModelCatalogView(params: {
   cfg: OpenClawConfig;
   catalog: ModelCatalogEntry[];
   routeVariants?: readonly ModelCatalogEntry[];
+  routePolicy?: ModelCatalogRoutePolicy;
+  keyOf?: ReturnType<typeof createModelCatalogIdentityKeyResolver>;
 }) {
-  const keyOf = createModelCatalogIdentityKeyResolver();
+  const keyOf = params.keyOf ?? createModelCatalogIdentityKeyResolver();
   const variantsByKey = new Map<string, ModelCatalogEntry[]>();
   for (const entry of params.routeVariants ?? params.catalog) {
     const key = keyOf(entry);
@@ -58,16 +87,60 @@ export function createModelCatalogView(params: {
     variantsByKey.set(key, variants);
   }
   // Deferred lookups can follow an await or owner reload; only the initial index shares policy.
-  const variantsOf = (entry: Pick<ModelCatalogEntry, "provider" | "id">) =>
-    variantsByKey.get(resolveModelCatalogIdentityKey(entry));
+  const variantsOf = (
+    entry: Pick<ModelCatalogEntry, "provider" | "id">,
+    key = resolveModelCatalogIdentityKey(entry),
+  ) => variantsByKey.get(key);
+  const routePolicy = params.routePolicy ?? openAIModelCatalogRoutePolicy;
   const resolveOverrides = createConfiguredModelCatalogOverridesResolver({
     cfg: params.cfg,
-    policy: openAIModelCatalogRoutePolicy,
+    policy: routePolicy,
   });
+  const projectRoute = (
+    entry: ModelCatalogEntry,
+    projection: ModelCatalogRouteProjection,
+    overrides: ReturnType<typeof resolveOverrides>,
+    variants: readonly ModelCatalogEntry[] | undefined,
+  ) => projectModelCatalogEntryForRoute({ entry, projection, catalog: variants, overrides });
+  const projections = new WeakMap<
+    ModelCatalogEntry,
+    {
+      overrides: ReturnType<typeof resolveOverrides>;
+      rows: Map<
+        | ModelCatalogRouteProjection["kind"]
+        | Extract<ModelCatalogRouteProjection, { kind: "selected" }>["route"],
+        ReturnType<typeof projectRoute>
+      >;
+    }
+  >();
   return {
     logicalEntries: dedupeByKey(params.catalog, keyOf),
     variantsOf,
-    project(entry: ModelCatalogEntry, evaluation: ModelAuthAvailabilityEvaluation) {
+    readProjection(
+      entry: ModelCatalogEntry,
+      projection: ModelCatalogRouteProjection,
+      identityKey?: string,
+    ) {
+      // Reuse only paired metadata from this view's donor scope. Readiness stays with callers;
+      // configured overrides are captured lazily at the entry's first publication.
+      let cached = projections.get(entry);
+      if (!cached) {
+        cached = { overrides: resolveOverrides(entry), rows: new Map() };
+        projections.set(entry, cached);
+      }
+      const key = projection.kind === "selected" ? projection.route : projection.kind;
+      let row = cached.rows.get(key);
+      if (!row) {
+        row = projectRoute(entry, projection, cached.overrides, variantsOf(entry, identityKey));
+        cached.rows.set(key, row);
+      }
+      return row;
+    },
+    project(
+      entry: ModelCatalogEntry,
+      evaluation: ModelAuthAvailabilityEvaluation,
+      routeVariants?: readonly ModelCatalogEntry[],
+    ) {
       const projection: ModelCatalogRouteProjection =
         evaluation.routeResolution === null
           ? { kind: "unmanaged" }
@@ -75,17 +148,16 @@ export function createModelCatalogView(params: {
             ? {
                 kind: "selected",
                 route: evaluation.selectedRoute,
-                policy: openAIModelCatalogRoutePolicy,
+                policy: routePolicy,
               }
-            : { kind: "unresolved", policy: openAIModelCatalogRoutePolicy };
-      const variants = variantsOf(entry);
-      const overrides = resolveOverrides(entry);
-      return projectModelCatalogEntryForRoute({
+            : { kind: "unresolved", policy: routePolicy };
+      // Runtime selection can narrow donors without rebuilding the configured-row index.
+      return projectRoute(
         entry,
         projection,
-        ...(variants ? { catalog: variants } : {}),
-        ...(overrides ? { overrides } : {}),
-      });
+        resolveOverrides(entry),
+        routeVariants ?? variantsOf(entry),
+      );
     },
   };
 }
@@ -104,6 +176,7 @@ export type ModelCatalogViewFacts = {
   pinnedProfileId?: string;
   profileProvider?: string;
   view?: ModelCatalogBrowseView;
+  retainedModel?: ModelRef;
 };
 
 /** Projects captured catalog facts while keeping native observations revocable. */
@@ -111,8 +184,11 @@ export function prepareModelCatalogView(params: ModelCatalogViewFacts) {
   const defaultModel = resolveAgentEffectiveModelPrimary(params.cfg, params.agentId);
   const agentDir = params.agentDir ?? resolveAgentDir(params.cfg, params.agentId);
   const catalog = [...params.snapshot.entries];
-  if (params.view === "configured" && params.snapshot.staticEntries?.length) {
-    const { configuredKeys } = createModelVisibilityPolicy({
+  if (
+    (params.view === "configured" || params.view === "default") &&
+    params.snapshot.staticEntries?.length
+  ) {
+    const policy = createModelVisibilityPolicy({
       cfg: params.cfg,
       catalog,
       defaultProvider: DEFAULT_PROVIDER,
@@ -123,9 +199,19 @@ export function prepareModelCatalogView(params: ModelCatalogViewFacts) {
     });
     const keyOf = createModelCatalogIdentityKeyResolver();
     const seen = new Set(catalog.map(keyOf));
+    const retainedKey = params.retainedModel
+      ? keyOf({
+          provider: params.retainedModel.provider,
+          id: params.retainedModel.model,
+        })
+      : undefined;
     for (const entry of params.snapshot.staticEntries) {
       const key = keyOf(entry);
-      if (!seen.has(key) && configuredKeys.has(key)) {
+      const include =
+        params.view === "configured"
+          ? policy.configuredKeys.has(key) || key === retainedKey
+          : policy.allows({ provider: entry.provider, model: entry.id });
+      if (!seen.has(key) && include) {
         seen.add(key);
         catalog.push(entry);
       }
@@ -447,6 +533,7 @@ export async function loadPreparedModelCatalogView(
         defaultProvider: DEFAULT_PROVIDER,
         defaultModel: resolveAgentEffectiveModelPrimary(params.cfg, params.agentId),
         snapshot,
+        includePickerRuntimes: true,
         pluginRegistry: params.pluginRegistry,
         isCurrent: params.isCurrent,
         observationConfig: params.observationConfig,

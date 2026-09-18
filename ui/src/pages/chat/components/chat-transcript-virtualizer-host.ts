@@ -1,7 +1,7 @@
 // Per-session virtualizer host: scroll anchoring, measurement, and row sync
 // for one transcript. Owned and swapped by ChatTranscriptController.
 import { VirtualizerController } from "@tanstack/lit-virtual";
-import { type Range, observeElementRect } from "@tanstack/virtual-core";
+import { elementScroll, observeElementRect } from "@tanstack/virtual-core";
 import {
   nothing,
   type ReactiveController,
@@ -10,13 +10,14 @@ import {
 } from "lit";
 import { McpAppUnmountGate } from "../../../components/mcp-app-unmount.ts";
 import { resolveScrollBehavior } from "../../../lib/scroll-behavior.ts";
-import type { AssistantMessageExpansionState } from "../chat-thread.ts";
+import type { AssistantMessageExpansionState } from "../chat-message-recovery.ts";
 import {
   CHAT_TRANSCRIPT_END_THRESHOLD_PX,
   type ChatSessionScrollPosition,
   type ChatScrollToEndOptions,
 } from "../scroll.ts";
 import { SIDEBAR_GEOMETRY_COMMIT_EVENT } from "../sidebar-layout.ts";
+import { ChatMessageEntryAnimations } from "./chat-message-entry.ts";
 import { ChatMessageReveal } from "./chat-message-reveal.ts";
 import {
   TranscriptAnnouncementState,
@@ -44,11 +45,7 @@ import {
 } from "./chat-transcript-offset-observer.ts";
 import { activeTranscriptMessageId } from "./chat-transcript-position.ts";
 import { TranscriptPrependAnchor } from "./chat-transcript-prepend-anchor.ts";
-import {
-  extractTranscriptRange,
-  previewTranscriptRowKeys,
-  focusedTranscriptRowKey,
-} from "./chat-transcript-range.ts";
+import { previewTranscriptRowKeys, focusedTranscriptRowKey } from "./chat-transcript-range.ts";
 import {
   applyPendingScrollOffset,
   type TranscriptScrollRestoreHost,
@@ -64,6 +61,7 @@ import {
 
 export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatTranscriptSession {
   private readonly offsetState = createTranscriptOffsetState();
+  readonly entryAnimations = new ChatMessageEntryAnimations();
   expandedAssistantMessages = new Map<string, AssistantMessageExpansionState>();
   private readonly controllers = new Set<ReactiveController>();
   private readonly positionRail: PositionRailGutterController;
@@ -220,7 +218,6 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
   private readonly prependAnchor = new TranscriptPrependAnchor();
   private candidateMessageRowKeysById: ReadonlyMap<string, string> = new Map();
   private candidateMessageRowsByKey: ReadonlyMap<string, string> = new Map();
-  private committedMessageRowsByKey: ReadonlyMap<string, string> = new Map();
   private renderPreviousRows: (() => TemplateResult) | null = null;
   private focusedRowKey: string | null = null;
   private readonly announcement = new TranscriptAnnouncementState();
@@ -243,6 +240,12 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
       initialOffset: initialOffset ?? Number.MAX_SAFE_INTEGER,
       anchorTo: "end",
       followOnAppend: false,
+      scrollToFn: (offset, options, instance) => {
+        const before = this.scrollElement?.scrollTop ?? 0;
+        elementScroll(offset, options, instance);
+        // The observer owns provenance for every write, including absolute compensation retries.
+        this.offsetState.recordProgrammaticScroll?.(before, this.scrollElement?.scrollTop ?? 0);
+      },
       observeElementRect: (instance, callback) =>
         observeElementRect(instance, (rect) => {
           // Hidden tabs and detached faces are not viewport resizes. Keep the
@@ -279,6 +282,7 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
             state: this.offsetState,
             getScrollElement: () => this.scrollElement,
             prependAnchor: this.prependAnchor,
+            isProgrammaticScroll: () => this.isProgrammaticScroll,
             cancelScroll: () => this.cancelScroll(),
             requestUpdate: () => this.host.requestUpdate(),
             onReaderScroll: (towardEnd) => this.callbacks.onReaderScroll?.(towardEnd),
@@ -287,7 +291,8 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
           callback,
         ),
       measureElement: measureTranscriptRow,
-      rangeExtractor: (range) => this.extractAnchoredRange(range, this.rowIndexesByKey),
+      rangeExtractor: (range) =>
+        this.prependAnchor.extractRange(range, this.rowIndexesByKey, this.focusedRowKey),
       // Virtual distance omits real padding, pinning readers ~80px up past scroll.ts's follow-lock.
       // scheduleCommittedChatScroll owns end-follow on content changes and source: "resize".
       // Disable isAtEnd()'s default too; callers must supply an explicit threshold.
@@ -353,6 +358,7 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
   }
 
   update(): void {
+    this.entryAnimations.didCommit();
     for (const controller of this.controllers) {
       controller.hostUpdated?.();
     }
@@ -397,11 +403,13 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
   }
 
   disconnect(): void {
+    this.entryAnimations.disconnect();
     // Clear retires bodies and pending loads; replacement invalidates guarded
     // rows when this presentation reconnects with the same source messages.
     this.expandedAssistantMessages.clear();
     this.expandedAssistantMessages = new Map();
     this.offsetState.scrollCommand = null;
+    this.offsetState.maintenanceScrollOffset = null;
     this.prependAnchor.clear();
     this.offsetState.touching = false;
     this.offsetState.touchScrolling = false;
@@ -474,6 +482,7 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
         header,
         messageRows: this.candidateMessageRowKeysById,
         renderKeyRows: this.candidateMessageRowsByKey,
+        entryKeys: this.entryAnimations.projectedKeys,
       },
       true,
     );
@@ -499,8 +508,12 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
       () => {
         // Rows, lookup maps, and the retained renderer commit together. A
         // teardown-pending candidate must never replace the displayed model.
+        this.entryAnimations.sync(
+          snapshot.entryKeys,
+          announce && !this.offsetState.pendingScrollOffset,
+        );
         this.messageRowKeysById = messageRows;
-        this.committedMessageRowsByKey = renderKeyRows;
+        this.prependAnchor.committedMessageRows = renderKeyRows;
         this.renderPreviousRows = () => this.renderCommittedRows(snapshot, false);
         // Capture only after the unmount gate permits the projection to commit.
         if (capturePrepend) {
@@ -557,8 +570,12 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
     const element = this.scrollElement;
     // Lit's scroll listener can precede TanStack's offset observer. Read the
     // committed viewport so the final event publishes the settled end policy.
-    const distanceFromEnd = (maxTranscriptScrollOffset(element) ?? 0) - (element?.scrollTop ?? 0);
+    const maxOffset = maxTranscriptScrollOffset(element) ?? 0;
+    const distanceFromEnd = maxOffset - (element?.scrollTop ?? 0);
     return (
+      // A shrinking viewport range can clamp the write before its native read-back arrives.
+      (this.offsetState.maintenanceScrollOffset !== null &&
+        Math.min(this.offsetState.maintenanceScrollOffset, maxOffset) === element?.scrollTop) ||
       this.offsetState.pendingScrollOffset !== null ||
       (this.offsetState.scrollCommand !== null &&
         distanceFromEnd > CHAT_TRANSCRIPT_END_THRESHOLD_PX)
@@ -575,7 +592,11 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
     if (source === "auto" && (this.offsetState.pendingScrollOffset || !this.canAutoFollow())) {
       return false;
     }
-    this.cancelScroll();
+    // Automatic follow retargets the same native end command. Cancelling first
+    // inserts an instant scroll and restarts easing on every streamed update.
+    if (source !== "auto" || this.offsetState.scrollCommand?.target !== "end") {
+      this.cancelScroll();
+    }
     this.offsetState.scrollCommand = {
       behavior,
       target: "end",
@@ -587,7 +608,7 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
     return true;
   }
 
-  private cancelScroll(): void {
+  cancelScroll(): void {
     this.endAnchor.clear();
     this.prependAnchor.clear();
     if (this.offsetState.scrollCommand === null && !this.offsetState.pendingScrollOffset) {
@@ -654,15 +675,20 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
 
   private completeMessageReveal(): void {
     const command = this.offsetState.scrollCommand;
-    if (
-      command?.target === "message" &&
-      this.messageReveal.reveal(
-        this.threadInnerElement,
-        command,
-        this.virtualizerController.getVirtualizer(),
-      )
-    ) {
+    if (command?.target !== "message") {
+      return;
+    }
+    const virtualizer = this.virtualizerController.getVirtualizer();
+    if (this.messageReveal.reveal(this.threadInnerElement, command, virtualizer)) {
       this.offsetState.scrollCommand = { behavior: command.behavior, target: "index" };
+      return;
+    }
+    // Expanding folded work can move the target beyond the initially mounted rows.
+    const rowKey = this.messageRowKeysById.get(command.messageId);
+    const rowIndex = rowKey ? this.rowIndexesByKey.get(rowKey) : undefined;
+    if (rowIndex !== undefined) {
+      virtualizer.scrollToIndex(rowIndex, { align: "center" });
+      this.host.requestUpdate();
     }
   }
 
@@ -704,19 +730,6 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
     }
   }
 
-  /** Preserve the retained bubble even when a deferred offset selects another range. */
-  private extractAnchoredRange(range: Range, indexes: ReadonlyMap<string, number>): number[] {
-    const visible = extractTranscriptRange(range, indexes, this.focusedRowKey);
-    const messageKey = this.prependAnchor.messageKey;
-    const rowKey =
-      (messageKey === null ? null : this.committedMessageRowsByKey.get(messageKey)) ??
-      this.prependAnchor.rowKey;
-    const anchorIndex = rowKey === null ? undefined : indexes.get(rowKey);
-    return anchorIndex === undefined || visible.includes(anchorIndex)
-      ? visible
-      : [...visible, anchorIndex].toSorted((left, right) => left - right);
-  }
-
   private syncRows(nextKeys: readonly string[]): void {
     const virtualizer = this.virtualizerController.getVirtualizer();
     const typingAdded =
@@ -743,7 +756,8 @@ export class ChatSessionVirtualizerHost implements ReactiveControllerHost, ChatT
       count: nextKeys.length,
       getItemKey: (index) => nextKeys[index] ?? `missing:${index}`,
       followOnAppend: false,
-      rangeExtractor: (range) => this.extractAnchoredRange(range, rowIndexesByKey),
+      rangeExtractor: (range) =>
+        this.prependAnchor.extractRange(range, rowIndexesByKey, this.focusedRowKey),
       scrollMargin: resolveTranscriptScrollMargin(this.scrollElement, this.headerHeight),
     });
     if (followTyping) {
