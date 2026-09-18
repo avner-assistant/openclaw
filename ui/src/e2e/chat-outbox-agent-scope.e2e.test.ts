@@ -130,18 +130,24 @@ suite.define(() => {
         };
         app.runtime?.context.agentSelection.set("main");
       });
+      // A cold roster must not send the canonical global route back through its alias.
+      const mainRoster = { agentId: "main", includeGlobal: true };
+      await gateway.deferNext("sessions.list", mainRoster);
       await gateway.setOnline(true);
       await page
         .locator(
           '.agent-chat__composer-underlaps[data-tone="warn"] .agent-chat__composer-status-band',
         )
         .waitFor({ state: "detached", timeout: 10_000 });
-      await page.evaluate(async () => {
-        const app = document.querySelector("openclaw-app") as HTMLElement & {
-          runtime?: { context: { sessions: { refresh: (options: unknown) => Promise<void> } } };
-        };
-        await app.runtime?.context.sessions.refresh({ agentId: "main", force: true });
-      });
+      await expect
+        .poll(() =>
+          activePane.evaluate(
+            (pane) => (pane as HTMLElement & { transcriptReady: boolean }).transcriptReady,
+          ),
+        )
+        .toBe(true);
+      await gateway.waitForRequest("sessions.list", { match: mainRoster });
+      await gateway.resolveDeferred("sessions.list", sessionsResponse(true));
 
       await expect
         .poll(async () =>

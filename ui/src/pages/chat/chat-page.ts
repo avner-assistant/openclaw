@@ -8,10 +8,15 @@ import { UI_COMMAND_EVENT, type UiCommandDetail } from "../../components/panel-t
 import type { BoardFace } from "../../lib/board/settings.ts";
 import { readSessionDragData, sessionDragActive } from "../../lib/sessions/drag.ts";
 import {
+  resolveSessionNavigationAgentId,
   resolveSessionPreferredFaceForKey,
   sessionNavigationTarget,
 } from "../../lib/sessions/route-navigation.ts";
-import { areUiSessionKeysEquivalent } from "../../lib/sessions/session-key.ts";
+import {
+  areUiSessionKeysEquivalent,
+  isUiGlobalSessionKey,
+  uiConversationMatches,
+} from "../../lib/sessions/session-key.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
 import { persistSessionBoardFace } from "./chat-board-face-persistence.ts";
@@ -428,7 +433,22 @@ export class ChatPage extends OpenClawLightDomElement implements SessionSplitHos
       return;
     }
     const data = this.data;
-    const sameSession = data && areUiSessionKeysEquivalent(data.sessionKey, sessionKey);
+    const agentId = resolveSessionNavigationAgentId(this.context, data?.agentId);
+    // Adopting a canonical global spelling is not a new conversation. Re-resolving
+    // its face before the roster arrives makes cached alias/global routes alternate.
+    const sameSession =
+      data &&
+      uiConversationMatches(
+        {
+          agentsList: this.context.agents.state.agentsList,
+          hello: this.context.gateway.snapshot.hello,
+          assistantAgentId: agentId,
+        },
+        data.sessionKey,
+        sessionKey,
+        isUiGlobalSessionKey(sessionKey) ? agentId : undefined,
+        data.agentId,
+      );
     let face = explicitFace ?? data?.face ?? "chat";
     if (explicitFace === undefined && !sameSession) {
       face = resolveSessionPreferredFaceForKey(this.context, sessionKey, data?.agentId);
