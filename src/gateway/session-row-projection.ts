@@ -318,6 +318,8 @@ export async function createSessionRowProjection(params: {
         dirty.add(records.identity(row));
         backfill.enqueue(records.identity(row), change);
       }
+    } else if (change.scope === "automation") {
+      records.markAutomation(matching({ key: change.sessionKey }), change.agentId, dirty);
     } else {
       const query = { ...change, key: change.sessionKey };
       const exact = matching(query);

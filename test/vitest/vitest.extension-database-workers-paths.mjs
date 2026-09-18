@@ -44,6 +44,8 @@ export const databaseWorkerExtensionTestFiles = [
   "extensions/codex/src/app-server/side-question.test.ts",
   "extensions/codex/src/app-server/side-question.prompt.test.ts",
   "extensions/codex/src/app-server/side-question.images.test.ts",
+  "extensions/codex/src/app-server/run-attempt.native-config.test.ts",
+  "extensions/codex/src/app-server/run-attempt.subscription.test.ts",
   "extensions/codex/src/app-server/run-attempt.test.ts",
   "extensions/codex/src/app-server/run-attempt.agent-end-context.test.ts",
   "extensions/codex/src/app-server/run-attempt.auth-context.test.ts",

@@ -2187,7 +2187,6 @@ src/cli/claws-cli.runtime.ts	2
 src/cli/command-config-resolution.ts	2
 src/cli/command-format.ts	1
 src/cli/command-options.ts	1
-src/cli/command-secret-gateway.ts	1
 src/cli/command-secret-targets.ts	2
 src/cli/completion-runtime.ts	4
 src/cli/config-cli-input.ts	2
@@ -2642,8 +2641,7 @@ src/gateway/node-pairing-ssh-verify.ts	1
 src/gateway/node-registry-private.ts	1
 src/gateway/node-registry.ts	4
 src/gateway/openai-agent-run-usage.ts	1
-src/gateway/openai-http.ts	27
-src/gateway/openresponses-http.ts	3
+src/gateway/openai-http.ts	22
 src/gateway/operator-approval-snapshot.ts	4
 src/gateway/operator-approval-store.ts	8
 src/gateway/operator-scopes.ts	1

@@ -1540,15 +1540,21 @@ private fun SettingsShellScreen(
   val appLanguage = currentAppLanguage()
 
   ClawScaffold(
-    contentPadding = PaddingValues(start = 16.dp, top = 10.dp, end = 16.dp, bottom = 4.dp),
+    contentPadding =
+      PaddingValues(
+        start = ClawTheme.spacing.sm,
+        top = ClawTheme.spacing.xxs,
+        end = ClawTheme.spacing.sm,
+        bottom = ClawTheme.spacing.xxxs,
+      ),
     contentWindowInsets = shellContentInsets,
   ) {
-    LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(9.dp), contentPadding = PaddingValues(bottom = 4.dp)) {
+    LazyColumn(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs), contentPadding = PaddingValues(bottom = ClawTheme.spacing.xxxs)) {
       item {
         Row(
           modifier = Modifier.fillMaxWidth(),
           verticalAlignment = Alignment.CenterVertically,
-          horizontalArrangement = Arrangement.spacedBy(9.dp),
+          horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
         ) {
           if (showSidebarButton) {
             ClawPlainIconButton(
@@ -1558,7 +1564,7 @@ private fun SettingsShellScreen(
               modifier = Modifier.testTag("sidebar-open-settings"),
             )
           }
-          Text(text = nativeString("Settings"), style = ClawTheme.type.display.copy(fontSize = 24.sp, lineHeight = 28.sp), color = ClawTheme.colors.text, modifier = Modifier.weight(1f))
+          Text(text = nativeString("Settings"), style = ClawTheme.type.display, color = ClawTheme.colors.text, modifier = Modifier.weight(1f))
           ClawPlainIconButton(
             icon = Icons.Default.Search,
             contentDescription = nativeString("Search settings"),
@@ -1645,7 +1651,7 @@ private fun SettingsShellScreen(
         SettingsSectionTitle(nativeText("Account"))
       }
       item {
-        ClawPanel(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+        ClawPanel(contentPadding = PaddingValues(horizontal = ClawTheme.spacing.xs, vertical = ClawTheme.spacing.xxxs)) {
           SettingsListRow(
             title = nativeText("Sign Out"),
             value = nativeText("Return to setup"),
@@ -1668,9 +1674,9 @@ private fun SettingsShellScreen(
 
       item {
         Text(
-          modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+          modifier = Modifier.fillMaxWidth().padding(top = ClawTheme.spacing.sm),
           text = nativeString("OpenClaw \${BuildConfig.VERSION_NAME} (\${BuildConfig.VERSION_CODE})", BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE),
-          style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp),
+          style = ClawTheme.type.caption,
           color = ClawTheme.colors.textMuted,
           textAlign = TextAlign.Center,
         )
@@ -1845,7 +1851,7 @@ private fun SettingsSectionTitle(title: NativeText) {
   val localizedTitle = title.resolveNativeTextResource()
   Text(
     text = localizedUppercase(localizedTitle, currentAppLanguage().languageTag),
-    style = ClawTheme.type.caption.copy(fontSize = 12.sp, lineHeight = 16.sp),
+    style = ClawTheme.type.caption,
     color = ClawTheme.colors.textMuted,
   )
 }
@@ -1855,7 +1861,7 @@ private fun ProfilePanel(
   displayName: String,
   onClick: () -> Unit,
 ) {
-  ClawPanel(contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)) {
+  ClawPanel(contentPadding = PaddingValues(horizontal = ClawTheme.spacing.xs, vertical = ClawTheme.spacing.xxs)) {
     Row(
       modifier =
         Modifier
@@ -1863,7 +1869,7 @@ private fun ProfilePanel(
           .clip(RoundedCornerShape(ClawTheme.radii.row))
           .clickable(onClick = onClick),
       verticalAlignment = Alignment.CenterVertically,
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxs),
     ) {
       Surface(
         modifier = Modifier.size(32.dp),
@@ -1875,15 +1881,15 @@ private fun ProfilePanel(
           Text(
             text =
               localizedInitial(displayName, currentAppLanguage().languageTag) ?: "O",
-            style = ClawTheme.type.title.copy(fontSize = 14.sp, lineHeight = 17.sp),
+            style = ClawTheme.type.label,
             color = ClawTheme.colors.text,
             textAlign = TextAlign.Center,
           )
         }
       }
-      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxxs)) {
         Text(text = displayName, style = ClawTheme.type.section, color = ClawTheme.colors.text, maxLines = 1)
-        Text(text = nativeString("OpenClaw mobile"), style = ClawTheme.type.caption.copy(fontSize = 12.5.sp, lineHeight = 16.sp), color = ClawTheme.colors.textMuted, maxLines = 1)
+        Text(text = nativeString("OpenClaw mobile"), style = ClawTheme.type.caption, color = ClawTheme.colors.textMuted, maxLines = 1)
       }
       Icon(
         imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
@@ -1900,7 +1906,7 @@ private fun SettingsGroup(
   rows: List<SettingsRow>,
   onOpen: (SettingsRoute) -> Unit,
 ) {
-  ClawPanel(contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+  ClawPanel(contentPadding = PaddingValues(horizontal = ClawTheme.spacing.xs, vertical = ClawTheme.spacing.xxxs)) {
     ClawSeparatedColumn(items = rows) { row ->
       SettingsListRow(
         title = row.route.title,
@@ -1930,7 +1936,7 @@ private fun SettingsListRow(
       Icon(imageVector = icon, contentDescription = null, modifier = Modifier.size(20.dp), tint = ClawTheme.colors.text)
     },
     trailing = {
-      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(ClawTheme.spacing.xxxs)) {
         status?.let { active ->
           Box(modifier = Modifier.size(4.5.dp).clip(CircleShape).background(if (active) ClawTheme.colors.success else ClawTheme.colors.textSubtle))
         }

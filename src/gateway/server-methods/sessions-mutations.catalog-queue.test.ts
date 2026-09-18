@@ -88,7 +88,7 @@ test("catalog reload releases the agent writer while preserving same-session ord
         getConfig: () => ({}),
         loadPublishedPreparedModelCatalogOwnerSnapshot: (params) => {
           const pending = loadPublishedPreparedModelCatalogOwnerSnapshot(params);
-          // Signal after the real owner has entered its replacement wait.
+          // The real owner captures the replacement gate synchronously before returning.
           entered.resolve();
           return pending;
         },
