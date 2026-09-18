@@ -2156,9 +2156,20 @@ function installControlUiMockGateway(
           );
         })
       : projectedSessions;
+    // A complete fixture becomes a complete child window after local projection.
+    // Partial pages retain their explicit server-owned pagination metadata.
+    const completeChildFixture =
+      childSessions.length !== projectedSessions.length &&
+      typeof response.totalCount === "number" &&
+      response.totalCount === response.sessions.length &&
+      (response.offset === undefined || response.offset === 0) &&
+      (!isRecord(params) || params.offset === undefined || params.offset === 0) &&
+      response.hasMore !== true &&
+      response.nextOffset == null;
     if (!scenario.sessionArchiveFiltering) {
       return {
         ...response,
+        ...(completeChildFixture ? { totalCount: childSessions.length } : {}),
         ...(childSessions.length !== projectedSessions.length || sessions.materializedCount() > 0
           ? { count: childSessions.length }
           : {}),
@@ -2172,6 +2183,7 @@ function installControlUiMockGateway(
     );
     return {
       ...response,
+      ...(completeChildFixture ? { totalCount: filteredSessions.length } : {}),
       count: filteredSessions.length,
       sessions: filteredSessions,
     };

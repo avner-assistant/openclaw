@@ -226,6 +226,39 @@ it.for(["rows", "static list"])(
   },
 );
 
+it.for([false, true])(
+  "returns a complete child total after filtering a complete fixture (materialized: %s)",
+  async (materialized, { connect }) => {
+    const parent = "agent:main:parent";
+    const { request, controls } = await connect({
+      methodResponses: {
+        "sessions.list": {
+          sessions: [{ key: parent }],
+          count: 1,
+          totalCount: 1,
+          offset: 0,
+          hasMore: false,
+          nextOffset: null,
+        },
+      },
+    });
+    const children = materialized ? ["agent:main:child-one", "agent:main:child-two"] : [];
+    for (const key of children) {
+      controls.setMethodResponse("sessions.create", { key, entry: { spawnedBy: parent } });
+      await request("sessions.create", {});
+    }
+
+    const result = (await request("sessions.list", { spawnedBy: parent })).payload;
+    expect(result).toMatchObject({
+      count: children.length,
+      totalCount: children.length,
+      hasMore: false,
+      nextOffset: null,
+    });
+    expect(result.sessions).toEqual(children.map((key) => expect.objectContaining({ key })));
+  },
+);
+
 it("preserves metadata for an already scoped child page", async ({ connect }) => {
   const child = {
     key: "agent:main:child",
