@@ -60,7 +60,7 @@ function inspectAuthProfileTable(
     "SELECT type FROM sqlite_master WHERE name = ?",
     [tableName],
     (statement) => statement.get(tableName),
-  ) as { type?: unknown } | undefined;
+  );
   if (!schemaObject) {
     // Agent databases shipped before SQLite auth storage do not have these
     // additive tables until their next writable bootstrap.
