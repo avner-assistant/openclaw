@@ -58,7 +58,6 @@ export const QWEN_MODEL_CATALOG: ReadonlyArray<ModelDefinitionConfig> = [
     maxTokens: 131_072,
     thinkingLevelMap: { minimal: "low", high: "xhigh", max: "xhigh" },
     compat: {
-      codeMode: "capable",
       supportsReasoningEffort: true,
       supportedReasoningEfforts: ["low", "medium", "xhigh"],
       reasoningEffortMap: { minimal: "low", high: "xhigh", max: "xhigh" },
