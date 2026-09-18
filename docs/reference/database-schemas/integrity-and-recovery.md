@@ -216,10 +216,20 @@ SQLite's completion result; they do not turn a completed checkpoint into a failu
 
 The warning includes observed WAL and database sizes, checkpointed and total WAL
 frames, the last observed complete checkpoint, the consecutive blocked count,
-and the observation time. SQLite can report `busy=0` for an incomplete PASSIVE
-checkpoint; fewer checkpointed frames than total frames still records a blocked
-checkpoint. These facts do not identify which reader or competing checkpoint
-prevented completion.
+the observation time, and up to eight process-local active reader owners when
+the blocking connection uses OpenClaw's tracked query helpers. Reader diagnostics
+contain only the bounded operation label, main/worker owner kind, optional worker
+actor id, age, and idle time; they never include SQL, bindings, or row contents.
+SQLite can report `busy=0` for an incomplete PASSIVE checkpoint; fewer checkpointed
+frames than total frames still records a blocked checkpoint. An absent reader list
+means that the blocker is untracked or belongs to another process, not that no
+reader exists.
+
+Shared-state SQLite worker actors retire after 60 seconds without an active
+operation. Retirement closes their native database borrow before a later request
+opens a replacement actor, bounding how long an abandoned worker-local reader can
+pin a WAL snapshot. An actor that returns from an operation with a tracked reader
+still active fails settlement and retires immediately.
 
 Observations belong to the open database handle in the Gateway process. They
 reset when that handle is replaced or the Gateway restarts. Status and Doctor

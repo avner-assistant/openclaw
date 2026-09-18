@@ -11,6 +11,7 @@ import { defaultRuntime } from "../../../runtime.js";
 import { retireSessionMcpRuntimeForSessionKey } from "../../agent-bundle-mcp-tools.js";
 import { removeInternalSessionEffectsSession } from "../../internal-session-effects.js";
 import type { SubagentAnnounceDeliveryResult } from "../announce/subagent-announce-dispatch.js";
+import { resolveRequesterSettleWakeRetryDelayMs } from "../announce/subagent-announce.requester-settle-wake.js";
 import { blockSubagentCompletionDelivery } from "../completion/subagent-completion-admission.store.js";
 import { revokeRequesterCronAuthorityBatch } from "../requester-cron-authority.js";
 import {
@@ -36,6 +37,27 @@ import { hasSubagentRunEnded } from "./subagent-run-liveness.js";
 
 type RequesterSettleWakeBatchState =
   import("../announce/subagent-announce.requester-settle-wake.js").RequesterSettleWakeBatchState;
+
+function deferRequesterSettleWakeAfterPersistenceFailure(
+  context: SubagentLifecycleWakeContext,
+  entries: readonly SubagentRunRecord[],
+  rearmGeneration: number | undefined,
+  error: string,
+): void {
+  const now = Date.now();
+  for (const entry of entries) {
+    const current = context.options.runs.get(entry.runId);
+    const wake = current?.requesterSettleWake;
+    if (current !== entry || !wake || wake.rearmGeneration !== rearmGeneration) {
+      continue;
+    }
+    current.requesterSettleWake = {
+      ...wake,
+      lastError: error,
+      nextAttemptAt: now + resolveRequesterSettleWakeRetryDelayMs(wake.attemptCount),
+    };
+  }
+}
 
 const isCurrentRequesterSettleWakeBatch = (
   context: SubagentLifecycleWakeContext,
@@ -416,8 +438,15 @@ export function scheduleRequesterSettleWake(
             error: safeError.message,
           });
         } catch (settleError) {
+          const settlementError = buildSafeLifecycleErrorMeta(settleError);
+          deferRequesterSettleWakeAfterPersistenceFailure(
+            context,
+            admittedBatch,
+            admittedWake.rearmGeneration,
+            settlementError.message ?? "requester settle persistence failed",
+          );
           params.warn("failed to persist requester settle wake rejection", {
-            error: buildSafeLifecycleErrorMeta(settleError),
+            error: settlementError,
             runId: maskLifecycleIdentifier(runId, "run"),
             requesterSessionKey: maskLifecycleIdentifier(requesterSessionKey, "session"),
           });

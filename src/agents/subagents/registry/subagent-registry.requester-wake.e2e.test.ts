@@ -70,6 +70,8 @@ let releaseAgentCallGate: (() => void) | undefined;
 let chatHistoryBySessionKey = new Map<string, Array<Record<string, unknown>>>();
 let sessionStore: Record<string, SessionStoreEntry> = {};
 let rejectNextRequesterWake = false;
+let rejectNextRequesterWakePersistence = false;
+let armRequesterWakePersistenceFailure = false;
 let emptyGatedAgentReply = false;
 
 const sendMessageMock = vi.fn<typeof import("../../../infra/outbound/message.js").sendMessage>(
@@ -166,6 +168,8 @@ describe("requester settle wake product flow", () => {
     agentCallGates = new Map();
     chatHistoryBySessionKey = new Map();
     rejectNextRequesterWake = false;
+    rejectNextRequesterWakePersistence = false;
+    armRequesterWakePersistenceFailure = false;
     emptyGatedAgentReply = false;
     sendMessageMock.mockClear();
     sessionStore = {
@@ -190,11 +194,18 @@ describe("requester settle wake product flow", () => {
         return () => {};
       }) as unknown as typeof import("../../../infra/agent-events.js").onAgentEvent,
       persistSubagentRunsToDisk: () => {},
-      persistSubagentRunsToDiskOrThrow: () => {},
+      persistSubagentRunsToDiskOrThrow: () => {
+        if (rejectNextRequesterWakePersistence) {
+          rejectNextRequesterWakePersistence = false;
+          throw new Error("database is locked");
+        }
+      },
       restoreSubagentRunsFromDisk: () => 0,
       maybeWakeRequesterAfterAllChildrenSettled: async (params) => {
         if (rejectNextRequesterWake) {
           rejectNextRequesterWake = false;
+          rejectNextRequesterWakePersistence = armRequesterWakePersistenceFailure;
+          armRequesterWakePersistenceFailure = false;
           throw new Error("requester wake rejected before attempt admission");
         }
         return await maybeWakeRequesterAfterAllChildrenSettled(params);
@@ -484,18 +495,31 @@ describe("requester settle wake product flow", () => {
   );
 
   it.each([
-    { name: "delivers the visible requester final", rejectRequesterWake: false, emptyReply: false },
+    {
+      name: "delivers the visible requester final",
+      rejectRequesterWake: false,
+      rejectPersistence: false,
+      emptyReply: false,
+    },
     {
       name: "settles the rejected delivered-row wake",
       rejectRequesterWake: true,
+      rejectPersistence: false,
+      emptyReply: false,
+    },
+    {
+      name: "backs off when rejected-wake settlement persistence fails",
+      rejectRequesterWake: true,
+      rejectPersistence: true,
       emptyReply: false,
     },
     {
       name: "retires a stale empty announce after requester delivery",
       rejectRequesterWake: false,
+      rejectPersistence: false,
       emptyReply: true,
     },
-  ])("$name", async ({ rejectRequesterWake, emptyReply }) => {
+  ])("$name", async ({ rejectRequesterWake, rejectPersistence, emptyReply }) => {
     emptyGatedAgentReply = emptyReply;
     const requesterTurnRunId = "run-requester-yield";
     const alpha = {
@@ -552,6 +576,8 @@ describe("requester settle wake product flow", () => {
     ).resolves.toMatchObject({ details: { status: "yielded" } });
 
     rejectNextRequesterWake = rejectRequesterWake;
+    armRequesterWakePersistenceFailure = rejectPersistence;
+    const retryDeadline = Date.now() + 30_000;
     const { withLocalSessionPlacementTurnSettlement } =
       await import("../../session-placement-admission.js");
     await withLocalSessionPlacementTurnSettlement(
@@ -571,8 +597,23 @@ describe("requester settle wake product flow", () => {
       }),
     );
     await waitForAgentCallCount(rejectRequesterWake ? 2 : 3);
-    await waitForDeliveredCleanup(alpha.runId);
+    await waitForDeliveredCleanup(alpha.runId, {
+      allowPendingRequesterSettleWake: rejectPersistence,
+    });
     expect(getRequesterWakeCalls()).toHaveLength(rejectRequesterWake ? 0 : 1);
+    if (rejectPersistence) {
+      expect(registry.getSubagentRunByRunId(alpha.runId)?.requesterSettleWake).toMatchObject({
+        status: "pending",
+        attemptCount: 0,
+        nextAttemptAt: retryDeadline,
+        lastError: "database is locked",
+      });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(getRequesterWakeCalls()).toHaveLength(0);
+      await vi.advanceTimersByTimeAsync(1);
+      await waitForAgentCallCount(3);
+      expect(getRequesterWakeCalls()).toHaveLength(1);
+    }
     if (!rejectRequesterWake) {
       const wakeMessage = getRequesterWakeCalls()[0]?.params?.message;
       expect(wakeMessage).toContain(modelRouteChange);
@@ -592,7 +633,7 @@ describe("requester settle wake product flow", () => {
     await waitForDeliveredCleanup(alpha.runId);
     await waitForDeliveredCleanup(beta.runId);
     await registry.testing.sweepOnceForTests();
-    expect(getRequesterWakeCalls()).toHaveLength(rejectRequesterWake ? 0 : 1);
+    expect(getRequesterWakeCalls()).toHaveLength(rejectRequesterWake && !rejectPersistence ? 0 : 1);
     expect(sendMessageMock).not.toHaveBeenCalled();
     expect(registry.getSubagentRunByRunId(beta.runId)?.delivery).toMatchObject({
       status: "delivered",

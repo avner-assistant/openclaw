@@ -26,6 +26,8 @@ import {
   readStableSqliteFileGeneration,
   sameSqliteFileGeneration,
 } from "../infra/sqlite-file-generation.js";
+import { assertNoActiveSqliteReaders } from "../infra/sqlite-reader-lifecycle.js";
+import { assertTransactionUsable } from "../infra/sqlite-transaction.js";
 import type { SqliteWorkerBackend } from "../infra/sqlite-worker-contract.js";
 import { getSqliteWorkerStateContext } from "../infra/sqlite-worker-state-context.js";
 import {
@@ -137,6 +139,17 @@ function createSharedStateWorkerBackend(
     });
   };
   return {
+    assertSettled() {
+      const database = nativeDatabase?.db;
+      if (!database?.isOpen) {
+        return;
+      }
+      assertTransactionUsable(database);
+      if (database.isTransaction) {
+        throw new Error("Shared-state worker returned with an active transaction");
+      }
+      assertNoActiveSqliteReaders(database, "Shared-state worker");
+    },
     execute(command) {
       if (closed) {
         throw new Error("Shared-state worker is closed");

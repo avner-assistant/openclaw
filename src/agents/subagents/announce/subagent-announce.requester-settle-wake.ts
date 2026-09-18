@@ -71,6 +71,14 @@ const REQUESTER_SETTLE_WAKE_MAX_DEFERRALS = 10;
 const REQUESTER_SETTLE_WAKE_RETRY_DELAYS_MS = [30_000, 120_000] as const;
 const activeRequesterSettleWakeBatches = new Map<string, () => boolean>();
 
+export function resolveRequesterSettleWakeRetryDelayMs(attemptCount: number): number {
+  const index = Math.max(
+    0,
+    Math.min(REQUESTER_SETTLE_WAKE_RETRY_DELAYS_MS.length - 1, attemptCount),
+  );
+  return REQUESTER_SETTLE_WAKE_RETRY_DELAYS_MS[index]!;
+}
+
 function buildConnectedSettledWave(
   candidates: readonly SubagentRunRecord[],
   settledEntry: SubagentRunRecord,
