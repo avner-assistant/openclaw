@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { createDeferredCore } from "../shared/deferred.ts";
 import { createWindowsJobBindings } from "./supervisor/service-child-windows-job-native.ts";
 import { resolveWindowsJobEntrypointUrl } from "./windows-job-entrypoint.ts";
 
@@ -56,7 +57,7 @@ export function spawnWindowsJobChild(
   const api = bindings();
   const name = `Local\\OpenClawChild-${randomUUID()}`;
   const handle = api.requireHandle(api.CreateJobObjectW(null, name), "CreateJobObjectW(child)");
-  const ready = Promise.withResolvers<void>();
+  const ready = createDeferredCore();
   void ready.promise.catch(() => {});
   let child: ChildProcess | undefined;
   let admitted = false;

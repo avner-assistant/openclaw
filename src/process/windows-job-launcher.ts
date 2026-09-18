@@ -62,7 +62,7 @@ try {
       });
       if (launch.stdio.includes("ipc")) {
         process.on("message", (message) => {
-          if (child.connected) {
+          if (message !== null && child.connected) {
             child.send(message, (error) => error && fail(error));
           }
         });

@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import { closeOwnedStdioProcess, createOwnedStdioProcess } from "./owned-stdio.js";
 import { createChildAdapter } from "./supervisor/adapters/child.js";
 
@@ -55,8 +56,8 @@ process.stdin.once("data", () => {
       ],
     });
     let output = "";
-    const outputReady = Promise.withResolvers<void>();
-    const rootExit = Promise.withResolvers<void>();
+    const outputReady = createDeferred();
+    const rootExit = createDeferred();
     child.onExit(() => rootExit.resolve());
     child.onStdout((chunk) => {
       output += chunk;
@@ -97,7 +98,7 @@ process.once("message", (message) => {
       stdinMode: "pipe-open",
     });
     let output = "";
-    const gate = Promise.withResolvers<void>();
+    const gate = createDeferred();
     adapter.onStdout((chunk) => {
       output += chunk;
       if (output.includes("\n")) {

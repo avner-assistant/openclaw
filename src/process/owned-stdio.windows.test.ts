@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
 import { closeOwnedStdioProcess, createOwnedStdioProcess } from "./owned-stdio.js";
 import { createStubChild } from "./supervisor/adapters/child.test-support.js";
 
@@ -82,7 +83,7 @@ it("joins the retained Windows Job after the root exits with descendants still h
   try {
     expect(child.waitForExtinction).toBeTypeOf("function");
     expect(child.pid).toBe(5678);
-    const observed = Promise.withResolvers<void>();
+    const observed = createDeferred();
     native.inspect.mockImplementation(() => {
       observed.resolve();
       return [9876];
