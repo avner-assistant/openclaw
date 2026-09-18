@@ -324,6 +324,11 @@ describe("verified package rollback", () => {
         });
         expect(enabled).toBe(true);
         expect(outcome.rolledBack).toBe(healthy);
+        expect(outcome.result.recovery).toMatchObject({
+          packageRollbackVerified: true,
+          version: "2026.9.1",
+          service: healthy ? "healthy" : "failed",
+        });
         const retained = outcome.stoppedForRollback?.windowsTaskAutoStartRecovery;
         expect(retained).toBe(activated ? fresh : original);
         await retained?.complete(healthy);

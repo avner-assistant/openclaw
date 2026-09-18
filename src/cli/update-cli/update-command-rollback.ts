@@ -436,6 +436,7 @@ export async function rollbackFailedUpdate(params: {
       );
     }
     failureReason = "restart-unhealthy";
+    result.recovery.service = "failed";
     let verifiedAtMs: number | undefined;
     const restartOutcome = await maybeRestartService({
       shouldRestart: true,
@@ -462,7 +463,14 @@ export async function rollbackFailedUpdate(params: {
     return {
       result: {
         ...result,
-        recovery: healthy ? { ...result.recovery, service: "healthy" } : result.recovery,
+        recovery: {
+          ...result.recovery,
+          service: healthy
+            ? "healthy"
+            : restartOutcome === "readiness-pending"
+              ? undefined
+              : "failed",
+        },
       },
       rolledBack: healthy,
       stoppedForRollback,

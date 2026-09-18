@@ -547,6 +547,14 @@ describe("post-activation repair after rollback refusal or failure", () => {
       );
       expect(mocks.repair).toHaveBeenCalledOnce();
       if (rollback === "restored") {
+        expect(mocks.print.mock.calls.at(-1)?.[0]).toMatchObject({
+          recovery: {
+            serviceRestartSafe: true,
+            packageRollbackVerified: true,
+            version: "2026.9.1",
+            service: repaired ? "healthy" : "failed",
+          },
+        });
         expect(completeRecovery).toHaveBeenCalled();
         if (repaired) {
           expect(completeRecovery).not.toHaveBeenCalledWith(false);

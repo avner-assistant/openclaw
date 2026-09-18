@@ -163,6 +163,22 @@ export async function repairUpdateService(params: {
     (repair.status === "unrepaired" &&
       repair.reason === "gateway-readiness-pending" &&
       repair.finalValidation.stopReason === "gateway-readiness-pending")
-    ? { ...result, status: "ok", reason: undefined, recovery: undefined }
+    ? {
+        ...result,
+        status: "ok",
+        reason: undefined,
+        recovery:
+          repair.status === "repaired" &&
+          result.recovery?.packageRollbackVerified &&
+          result.after?.version
+            ? {
+                serviceRestartSafe: true,
+                packageRollbackVerified: true,
+                version: result.after.version,
+                ...(result.after.buildId ? { buildId: result.after.buildId } : {}),
+                service: "healthy",
+              }
+            : undefined,
+      }
     : result;
 }

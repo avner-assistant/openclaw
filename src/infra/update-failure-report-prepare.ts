@@ -214,6 +214,14 @@ function resolveRecoveryOutcome(
 ): string {
   const { result } = input;
   if (result.recovery?.serviceRestartSafe === true) {
+    const version = redactPublicSupportVersion(result.recovery.version);
+    const restored = result.recovery.packageRollbackVerified === true;
+    if (result.recovery.service === "healthy") {
+      return `${restored ? "package rollback verified; " : ""}Gateway serving ${version}; health verified`;
+    }
+    if (restored) {
+      return `package rollback verified (${version}); Gateway health unverified. Run \`openclaw gateway status --deep\` to check the serving version and readiness.`;
+    }
     if (result.recovery.service === "failed") {
       return "runtime files verified; Gateway restart failed. Run `openclaw gateway status --deep` before restarting manually.";
     }
