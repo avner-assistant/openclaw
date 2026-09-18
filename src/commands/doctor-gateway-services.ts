@@ -589,7 +589,10 @@ export async function maybeRepairGatewayServiceConfig(
         })
       : expectedPlan;
   if (installationDrift && expectedRoot) {
-    note(formatGatewayServiceInstallationDrift(installationDrift), "Gateway service installation");
+    note(
+      formatGatewayServiceInstallationDrift(installationDrift, undefined, serviceInstallEnv),
+      "Gateway service installation",
+    );
     try {
       await assertGatewayServiceInstallationRepairAllowed({
         service,
