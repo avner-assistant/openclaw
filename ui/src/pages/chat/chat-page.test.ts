@@ -829,7 +829,7 @@ describe("chat page split layout host", () => {
     expect(paneTitles()).toEqual(["Main Session", "Main Session"]);
     expect(frames).toHaveLength(1);
     insideFrame = true;
-    frames[0](0);
+    expectDefined(frames[0], "scheduled render frame")(0);
     insideFrame = false;
     await page.updateComplete;
 

@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { expectDefined } from "@openclaw/normalization-core";
 import type { ReactiveController, ReactiveControllerHost } from "lit";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SubscriptionsController } from "./subscriptions-controller.ts";
@@ -96,7 +97,7 @@ describe("SubscriptionsController", () => {
       host.disconnect();
     }
     expect(cancelFrame).toHaveBeenCalledWith(1);
-    frames[0](0);
+    expectDefined(frames[0], "retired render frame")(0);
     expect(host.requestUpdate).not.toHaveBeenCalled();
     expect(commit).not.toHaveBeenCalled();
   });
