@@ -70,14 +70,10 @@ function walkSourceFiles(dir: string): string[] {
   return files;
 }
 
-const OWNED_FS_SAFE_IMPORTS: Record<
+const PLUGIN_OWNED_FS_SAFE_IMPORTS: Record<
   string,
   { module: string; values: readonly string[]; types?: readonly string[] }
 > = {
-  "src/test-utils/symlink-rebind-race.ts": {
-    module: "@openclaw/fs-safe/config",
-    values: ["configureFsSafeNative", "getFsSafeNativeConfig"],
-  },
   "extensions/openshell/src/backend.ts": {
     module: "@openclaw/fs-safe/atomic",
     values: ["movePathWithCopyFallback"],
@@ -89,8 +85,8 @@ const OWNED_FS_SAFE_IMPORTS: Record<
   },
 };
 
-function sourceWithoutOwnedImports(filePath: string, source: string): string {
-  const allowed = OWNED_FS_SAFE_IMPORTS[filePath];
+function sourceWithoutPluginOwnedImports(filePath: string, source: string): string {
+  const allowed = PLUGIN_OWNED_FS_SAFE_IMPORTS[filePath];
   if (!allowed) {
     return source;
   }
@@ -122,7 +118,7 @@ function sourceWithoutOwnedImports(filePath: string, source: string): string {
     ) {
       continue;
     }
-    // These files own their narrow dependency; path admission still uses OpenClaw policy.
+    // These plugins own their dependency; path admission still uses OpenClaw policy.
     const specifier = statement.moduleSpecifier;
     checkedSource =
       checkedSource.slice(0, specifier.getStart(parsed)) + checkedSource.slice(specifier.end);
@@ -134,7 +130,7 @@ function hasDisallowedFsSafeImport(filePath: string, source: string): boolean {
   if (ALLOWED_PREFIXES.some((prefix) => filePath.startsWith(prefix))) {
     return false;
   }
-  const checked = sourceWithoutOwnedImports(filePath, source);
+  const checked = sourceWithoutPluginOwnedImports(filePath, source);
   return checked.includes('"@openclaw/fs-safe') || checked.includes("'@openclaw/fs-safe");
 }
 
