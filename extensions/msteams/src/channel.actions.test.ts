@@ -1164,6 +1164,96 @@ describe("msteamsPlugin message actions", () => {
     },
   );
 
+  it("reacts to the current inbound message when messageId is omitted", async () => {
+    await expectSuccessfulAction({
+      mockFn: reactMessageMSTeamsMock,
+      mockResult: { ok: true },
+      action: "react",
+      cfg: unrestrictedReadCfg,
+      accountId: "default",
+      requesterAccountId: "default",
+      actionParams: { emoji: reactionType },
+      toolContext: {
+        currentChannelProvider: "msteams",
+        currentChannelId,
+        currentChatType: "group",
+        currentMessageId: 1751234567890,
+      },
+      runtimeParams: {
+        to: currentChannelId,
+        messageId: "1751234567890",
+        reactionType,
+      },
+      details: okMSTeamsActionDetails("react", { reactionType }),
+      contentDetails: {
+        channel: "msteams",
+        action: "react",
+        reactionType,
+        ok: true,
+      },
+    });
+  });
+
+  it("lists reactions on the current inbound message when messageId is omitted", async () => {
+    await expectSuccessfulAction({
+      mockFn: listReactionsMSTeamsMock,
+      mockResult: { reactions: [] },
+      action: "reactions",
+      cfg: unrestrictedReadCfg,
+      accountId: "default",
+      requesterAccountId: "default",
+      toolContext: {
+        currentChannelProvider: "msteams",
+        currentChannelId,
+        currentChatType: "group",
+        currentMessageId: "msg-current",
+      },
+      runtimeParams: {
+        to: currentChannelId,
+        messageId: "msg-current",
+      },
+      details: okMSTeamsActionDetails("reactions", { reactions: [] }),
+      contentDetails: {
+        ok: true,
+        channel: "msteams",
+        action: "reactions",
+        reactions: [],
+      },
+    });
+  });
+
+  it("requires an explicit messageId for a different conversation", async () => {
+    await expectActionError(
+      {
+        action: "react",
+        params: { to: targetChannelId, emoji: reactionType },
+        toolContext: {
+          currentChannelId,
+          currentChatType: "group",
+          currentMessageId: "msg-current",
+        },
+      },
+      "React requires a target (to) and messageId.",
+    );
+    expect(reactMessageMSTeamsMock).not.toHaveBeenCalled();
+  });
+
+  it("does not apply the reaction fallback to destructive actions", async () => {
+    await expectActionError(
+      {
+        action: "delete",
+        params: { to: currentChannelId },
+        toolContext: {
+          currentChannelId,
+          currentChatType: "group",
+          currentMessageId: "msg-current",
+        },
+      },
+      deleteMissingTargetError,
+    );
+    expect(deleteMessageMSTeamsMock).not.toHaveBeenCalled();
+  });
+
   it("shares the missing target and messageId validation across actions", async () => {
     await expectActionParamError("delete", {}, deleteMissingTargetError);
 

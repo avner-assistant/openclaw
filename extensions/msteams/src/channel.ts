@@ -1,6 +1,9 @@
 // Msteams plugin module implements channel behavior.
 import { CHANNEL_APPROVAL_NATIVE_RUNTIME_CONTEXT_CAPABILITY } from "openclaw/plugin-sdk/approval-handler-adapter-runtime";
-import { readPositiveIntegerParam } from "openclaw/plugin-sdk/channel-actions";
+import {
+  readPositiveIntegerParam,
+  resolveReactionMessageId,
+} from "openclaw/plugin-sdk/channel-actions";
 import type {
   ChannelMessageActionAdapter,
   ChannelMessageToolDiscovery,
@@ -276,7 +279,9 @@ type MSTeamsActionTargetParams = {
   currentChannelId?: string | null;
   currentGraphChannelId?: string | null;
   currentChatType?: "direct" | "group" | "channel" | null;
+  currentMessageId?: string | number | null;
   graphOnly?: boolean;
+  allowCurrentMessageIdFallback?: boolean;
 };
 
 function resolveMSTeamsActionTarget(params: MSTeamsActionTargetParams): string {
@@ -306,7 +311,19 @@ async function runWithRequiredActionMessageTarget<T>(
   },
 ): Promise<T | ReturnType<typeof actionError>> {
   const to = resolveMSTeamsActionTarget(params);
-  const messageId = resolveActionMessageId(params.toolParams);
+  const canUseCurrentMessageId =
+    params.allowCurrentMessageIdFallback === true &&
+    msteamsContextTargetsMatch(to, {
+      currentChannelId: params.currentChannelId ?? undefined,
+      currentMessagingTarget: params.currentGraphChannelId ?? undefined,
+    });
+  const messageIdRaw = canUseCurrentMessageId
+    ? resolveReactionMessageId({
+        args: params.toolParams,
+        toolContext: { currentMessageId: params.currentMessageId ?? undefined },
+      })
+    : resolveActionMessageId(params.toolParams);
+  const messageId = messageIdRaw == null ? "" : String(messageIdRaw).trim();
   if (!to || !messageId) {
     return actionError(`${params.actionLabel} requires a target (to) and messageId.`);
   }
@@ -746,6 +763,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
             currentChannelId: ctx.toolContext?.currentChannelId,
             currentGraphChannelId: resolveCurrentGraphActionTarget(ctx.toolContext),
             currentChatType: ctx.toolContext?.currentChatType,
+            currentMessageId: ctx.toolContext?.currentMessageId,
             graphOnly: true,
           };
 
@@ -817,6 +835,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
             return await runWithRequiredActionMessageTarget({
               actionLabel: "React",
               ...graphActionTarget,
+              allowCurrentMessageIdFallback: true,
               run: async (target) => {
                 const emoji = typeof ctx.params.emoji === "string" ? ctx.params.emoji.trim() : "";
                 const remove = typeof ctx.params.remove === "boolean" ? ctx.params.remove : false;
@@ -869,6 +888,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount, ProbeMSTeamsRe
             return await runWithRequiredActionMessageTarget({
               actionLabel: "Reactions",
               ...graphActionTarget,
+              allowCurrentMessageIdFallback: true,
               run: async (target) => {
                 const to = await authorizeActionTarget(target.to);
                 const { listReactionsMSTeams } = await loadMSTeamsChannelRuntime();
