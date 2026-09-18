@@ -193,7 +193,8 @@ function runSession(): void {
           keepAlive: auth.coordinatorRuntime.keepAlive,
         };
         // Domain code stays child-only; importing it from the host would reverse storage ownership.
-        const { readAuthProfileRowsReadOnly } = await import("../agents/auth-profiles/sqlite.js");
+        const { readAuthProfileRowsReadOnly } =
+          await import("../agents/auth-profiles/sqlite-json.js");
         const rows = withStateDatabaseCoordinatorRuntimeDirectory(runtime, () => {
           const lease = acquireStateDatabaseHandleLease({
             databasePath: pathname,

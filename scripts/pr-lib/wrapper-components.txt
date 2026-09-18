@@ -152,6 +152,8 @@ src/agents/agent-run-terminal-reply.ts
 src/agents/agent-runtime-id.ts
 src/agents/agent-scope-config.ts
 src/agents/agent-scope.ts
+src/agents/auth-profiles/sqlite-json.ts
+src/agents/auth-profiles/sqlite-read-pool.ts
 src/agents/configured-provider-fallback.ts
 src/agents/configured-provider-model.ts
 src/agents/defaults.ts
@@ -648,10 +650,12 @@ src/infra/sqlite-integrity.ts
 src/infra/sqlite-number.ts
 src/infra/sqlite-post-commit.ts
 src/infra/sqlite-private-directory.ts
+src/infra/sqlite-readonly-auth-transfer.ts
 src/infra/sqlite-readonly-location-cleanup.ts
 src/infra/sqlite-readonly-location.ts
 src/infra/sqlite-readonly-location.worker.ts
 src/infra/sqlite-readonly-worker-protocol.ts
+src/infra/sqlite-readonly-worker-session.ts
 src/infra/sqlite-readonly-worker.ts
 src/infra/sqlite-runtime-version.ts
 src/infra/sqlite-schema-contract-assembly.ts
@@ -1037,6 +1041,7 @@ src/skills/discovery/agent-filter.ts
 src/skills/discovery/filter.ts
 src/state/config-machine-state-write.ts
 src/state/config-machine-state.ts
+src/state/openclaw-agent-db-contract.ts
 src/state/openclaw-agent-db-metadata.ts
 src/state/openclaw-agent-db-migration-required.ts
 src/state/openclaw-agent-db.paths.ts
