@@ -149,6 +149,7 @@ export class AcpSessionManager {
     runtime: AcpRuntime;
     handle: AcpRuntimeHandle;
     meta: SessionAcpMeta;
+    entry: SessionEntry;
   }> {
     const sessionKey = canonicalizeAcpSessionKey({
       cfg: input.cfg,

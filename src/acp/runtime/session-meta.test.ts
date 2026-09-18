@@ -55,6 +55,20 @@ describe("ACP session metadata SQLite store", () => {
       });
 
       expect(result?.acp?.runtimeSessionName).toBe("codex-discord");
+      expect(
+        readAcpSessionMetaForEntry({
+          databasePath,
+          sessionKey,
+          entry: { sessionId: "sess-acp" },
+        })?.runtimeSessionName,
+      ).toBe("codex-discord");
+      expect(
+        readAcpSessionMetaForEntry({
+          databasePath,
+          sessionKey,
+          entry: { sessionId: "sess-rebound" },
+        }),
+      ).toBeUndefined();
       expect(loadSessionStore(storePath)[sessionKey]?.acp).toBeUndefined();
       expect(
         readAcpSessionEntry({

@@ -17,7 +17,7 @@ import {
   type AcpSpawnRuntimeCloseHandle,
 } from "../acp/control-plane/spawn.js";
 import { isAcpEnabledByPolicy, resolveAcpAgentPolicyError } from "../acp/policy.js";
-import { readAcpSessionMeta } from "../acp/runtime/session-meta.js";
+import { readAcpSessionMeta, readAcpSessionMetaForEntry } from "../acp/runtime/session-meta.js";
 import { DEFAULT_HEARTBEAT_EVERY } from "../auto-reply/heartbeat.js";
 import { formatThinkingLevels } from "../auto-reply/thinking.js";
 import {
@@ -1107,7 +1107,7 @@ async function initializeAcpSpawnRuntime(params: {
     cwd: params.cwd,
     backendId: params.cfg.acp?.backend,
   });
-
+  sessionEntry = initialized.entry;
   return {
     initialized,
     runtimeCloseHandle: {
@@ -1508,9 +1508,10 @@ export async function spawnAcpDirect(
       cwd: runtimeCwd,
     });
     initializedRuntime = initializedSession.runtimeCloseHandle;
+    let sessionEntry = initializedSession.sessionEntry;
 
     if (preparedBinding) {
-      ({ binding } = await bindPreparedAcpThread({
+      ({ binding, sessionEntry } = await bindPreparedAcpThread({
         cfg,
         sessionKey,
         targetAgentId,
@@ -1518,6 +1519,11 @@ export async function spawnAcpDirect(
         preparedBinding,
         initializedRuntime: initializedSession,
       }));
+    }
+    // Acceptance requires the canonical SQLite row to match the exact session
+    // entry persisted during initialization, not only the process-local handle.
+    if (!readAcpSessionMetaForEntry({ sessionKey, entry: sessionEntry })) {
+      throw new Error(`ACP metadata for ${sessionKey} is not readable for follow-up routing.`);
     }
   } catch (err) {
     await cleanupFailedAcpSpawn({

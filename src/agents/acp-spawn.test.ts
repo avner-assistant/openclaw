@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AcpInitializeSessionInput } from "../acp/control-plane/manager.types.js";
-import type { SessionEntry } from "../config/sessions/types.js";
+import type { SessionAcpMeta, SessionEntry } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   testing as sessionBindingServiceTesting,
@@ -57,6 +57,7 @@ const hoisted = vi.hoisted(() => {
   const resolveAcpSpawnStreamLogPathMock = vi.fn();
   const loadSessionStoreMock = vi.fn();
   const readAcpSessionMetaMock = vi.fn();
+  const readAcpSessionMetaForEntryMock = vi.fn();
   const resolveStorePathMock = vi.fn();
   const resolveSessionTranscriptFileMock = vi.fn();
   const areHeartbeatsEnabledMock = vi.fn();
@@ -135,6 +136,7 @@ const hoisted = vi.hoisted(() => {
   };
   const state = {
     cfg: createDefaultSpawnConfig(),
+    acpMetaBySessionKey: new Map<string, SessionAcpMeta>(),
   };
   return {
     callGatewayMock,
@@ -149,6 +151,7 @@ const hoisted = vi.hoisted(() => {
     resolveAcpSpawnStreamLogPathMock,
     loadSessionStoreMock,
     readAcpSessionMetaMock,
+    readAcpSessionMetaForEntryMock,
     resolveStorePathMock,
     resolveSessionTranscriptFileMock,
     areHeartbeatsEnabledMock,
@@ -175,6 +178,7 @@ vi.mock("../acp/control-plane/spawn.js", () => ({
 
 vi.mock("../acp/runtime/session-meta.js", () => ({
   readAcpSessionMeta: (params: unknown) => hoisted.readAcpSessionMetaMock(params),
+  readAcpSessionMetaForEntry: (params: unknown) => hoisted.readAcpSessionMetaForEntryMock(params),
 }));
 
 vi.mock("../channels/plugins/index.js", () => ({
@@ -725,7 +729,23 @@ describe("spawnAcpDirect", () => {
       const args = argsUnknown as AcpInitializeSessionInput;
       const runtimeSessionName = `${args.sessionKey}:runtime`;
       const cwd = typeof args.cwd === "string" ? args.cwd : undefined;
-      return {
+      const meta: SessionAcpMeta = {
+        backend: "acpx",
+        agent: args.agent,
+        runtimeSessionName,
+        ...(cwd ? { runtimeOptions: { cwd }, cwd } : {}),
+        identity: {
+          state: "pending",
+          source: "ensure",
+          acpxSessionId: "acpx-1",
+          agentSessionId: "codex-inner-1",
+          lastUpdatedAt: Date.now(),
+        },
+        mode: args.mode,
+        state: "idle",
+        lastActivityAt: Date.now(),
+      };
+      const initialized = {
         runtime: {
           close: vi.fn().mockResolvedValue(undefined),
         },
@@ -737,23 +757,14 @@ describe("spawnAcpDirect", () => {
           agentSessionId: "codex-inner-1",
           backendSessionId: "acpx-1",
         },
-        meta: {
-          backend: "acpx",
-          agent: args.agent,
-          runtimeSessionName,
-          ...(cwd ? { runtimeOptions: { cwd }, cwd } : {}),
-          identity: {
-            state: "pending",
-            source: "ensure",
-            acpxSessionId: "acpx-1",
-            agentSessionId: "codex-inner-1",
-            lastUpdatedAt: Date.now(),
-          },
-          mode: args.mode,
-          state: "idle",
-          lastActivityAt: Date.now(),
+        meta,
+        entry: {
+          sessionId: "sess-123",
+          updatedAt: Date.now(),
         },
       };
+      hoisted.state.acpMetaBySessionKey.set(args.sessionKey, initialized.meta);
+      return initialized;
     });
 
     hoisted.sessionBindingBindMock
@@ -801,7 +812,17 @@ describe("spawnAcpDirect", () => {
       .mockReset()
       .mockReturnValue("/tmp/sess-main.acp-stream.jsonl");
     hoisted.resolveStorePathMock.mockReset().mockReturnValue("/tmp/codex-sessions.json");
-    hoisted.readAcpSessionMetaMock.mockReset().mockReturnValue(undefined);
+    hoisted.state.acpMetaBySessionKey.clear();
+    hoisted.readAcpSessionMetaMock
+      .mockReset()
+      .mockImplementation(({ sessionKey }: { sessionKey: string }) =>
+        hoisted.state.acpMetaBySessionKey.get(sessionKey),
+      );
+    hoisted.readAcpSessionMetaForEntryMock
+      .mockReset()
+      .mockImplementation(({ sessionKey }: { sessionKey: string }) =>
+        hoisted.state.acpMetaBySessionKey.get(sessionKey),
+      );
     hoisted.loadSessionStoreMock.mockReset().mockImplementation(() => {
       const store: Record<string, { sessionId: string; updatedAt: number }> = {};
       return new Proxy(store, {
@@ -899,6 +920,92 @@ describe("spawnAcpDirect", () => {
     expect(transcriptCalls).toHaveLength(2);
     expect(transcriptCalls[0]?.threadId).toBeUndefined();
     expect(transcriptCalls[1]?.threadId).toBe("child-thread");
+    expect(hoisted.readAcpSessionMetaForEntryMock).toHaveBeenCalledWith({
+      sessionKey: accepted.childSessionKey,
+      entry: expect.objectContaining({ sessionId: "sess-123" }),
+    });
+  });
+
+  it("fails before dispatch when initialized ACP metadata is unavailable to follow-ups", async () => {
+    hoisted.initializeSessionMock.mockImplementationOnce(async (argsUnknown: unknown) => {
+      const args = argsUnknown as AcpInitializeSessionInput;
+      const runtimeSessionName = `${args.sessionKey}:runtime`;
+      return {
+        runtime: { close: vi.fn().mockResolvedValue(undefined) },
+        handle: {
+          sessionKey: args.sessionKey,
+          backend: "acpx",
+          runtimeSessionName,
+        },
+        meta: {
+          backend: "acpx",
+          agent: args.agent,
+          runtimeSessionName,
+          mode: args.mode,
+          state: "idle",
+          lastActivityAt: Date.now(),
+        },
+        entry: {
+          sessionId: "sess-123",
+          updatedAt: Date.now(),
+        },
+      };
+    });
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "session",
+        thread: true,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "discord",
+        agentAccountId: "default",
+        agentTo: "channel:parent-channel",
+      },
+    );
+
+    const failed = expectFailedSpawn(result, "error");
+    expect(failed.error).toMatch(
+      /^ACP metadata for agent:codex:acp:.+ is not readable for follow-up routing\.$/,
+    );
+    expect(gatewayRequests().some((request) => request.method === "agent")).toBe(false);
+    expect(hoisted.cleanupFailedAcpSpawnMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionKey: expect.stringMatching(/^agent:codex:acp:/),
+        runtimeCloseHandle: expect.any(Object),
+      }),
+    );
+  });
+
+  it("preserves ACP authentication errors before metadata read-back", async () => {
+    hoisted.initializeSessionMock.mockRejectedValueOnce(
+      new Error("ACP authentication failed: adapter credential is missing"),
+    );
+
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "session",
+        thread: true,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "discord",
+        agentAccountId: "default",
+        agentTo: "channel:parent-channel",
+      },
+    );
+
+    const failed = expectFailedSpawn(result, "error");
+    expect(failed.error).toBe("ACP authentication failed: adapter credential is missing");
+    expect(failed.error).not.toContain("ACP metadata");
+    expect(hoisted.readAcpSessionMetaMock).not.toHaveBeenCalled();
+    expect(hoisted.readAcpSessionMetaForEntryMock).not.toHaveBeenCalled();
+    expect(gatewayRequests().some((request) => request.method === "agent")).toBe(false);
   });
 
   it("allows ACP resume IDs recorded for the requester session", async () => {
@@ -929,7 +1036,9 @@ describe("spawnAcpDirect", () => {
             state: "idle",
             lastActivityAt: Date.now(),
           }
-        : undefined;
+        : params.sessionKey
+          ? hoisted.state.acpMetaBySessionKey.get(params.sessionKey)
+          : undefined;
     });
 
     const result = await spawnAcpDirect(
@@ -974,7 +1083,9 @@ describe("spawnAcpDirect", () => {
             state: "idle",
             lastActivityAt: Date.now(),
           }
-        : undefined;
+        : params.sessionKey
+          ? hoisted.state.acpMetaBySessionKey.get(params.sessionKey)
+          : undefined;
     });
 
     const result = await spawnAcpDirect(
@@ -3288,6 +3399,10 @@ describe("spawnAcpDirect", () => {
       .find((request) => request.method === "agent");
     expect(agentCall?.params?.deliver).toBe(true);
     expect(agentCall?.params?.channel).toBe("telegram");
+    expect(hoisted.readAcpSessionMetaForEntryMock).toHaveBeenCalledWith({
+      sessionKey: accepted.childSessionKey,
+      entry: expect.objectContaining({ sessionId: "sess-123" }),
+    });
   });
 
   it("drops self-parent Telegram current-conversation refs before binding", async () => {

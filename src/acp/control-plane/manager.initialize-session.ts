@@ -35,6 +35,7 @@ export async function runManagerInitializeSession(params: {
   runtime: AcpRuntime;
   handle: AcpRuntimeHandle;
   meta: SessionAcpMeta;
+  entry: SessionEntry;
 }> {
   const { input, sessionKey } = params;
   const backend = params.deps.requireRuntimeBackend(input.backendId || input.cfg.acp?.backend);
@@ -127,6 +128,7 @@ export async function runManagerInitializeSession(params: {
     runtime,
     handle,
     meta,
+    entry: persisted,
   };
 }
 
