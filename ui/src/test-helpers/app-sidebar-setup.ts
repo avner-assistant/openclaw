@@ -33,7 +33,7 @@ export function setupSidebarTest() {
     }
 
     for (const name of ["ResizeObserver", "IntersectionObserver"] as const) {
-      if (typeof globalThis[name] !== "undefined") {
+      if (globalThis[name] !== undefined) {
         continue;
       }
       Object.defineProperty(globalThis, name, {

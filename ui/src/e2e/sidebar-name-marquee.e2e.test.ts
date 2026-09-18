@@ -30,19 +30,19 @@ const names: Array<{
 
 async function openNames(page: Page, name: string, workspace = false) {
   await page.addInitScript(
-    ({ key, name, workspace }) => {
+    ({ key, name: displayName, workspace: workspaceMode }) => {
       localStorage.setItem(
         key,
-        JSON.stringify({ sidebarAgentsMode: workspace ? "roster" : "chip" }),
+        JSON.stringify({ sidebarAgentsMode: workspaceMode ? "roster" : "chip" }),
       );
-      if (workspace) {
+      if (workspaceMode) {
         Object.assign(window, {
           __OPENCLAW_NATIVE_GATEWAYS__: {
             currentId: "marquee-fixture",
             gateways: [
               {
                 id: "marquee-fixture",
-                name,
+                name: displayName,
                 kind: "local",
                 isPrimary: false,
                 canPromote: false,
