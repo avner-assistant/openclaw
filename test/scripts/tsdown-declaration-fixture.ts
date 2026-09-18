@@ -167,7 +167,9 @@ export function createFixture(
   // Keep the generator's source owners and import.meta.url lookups inside the fixture.
   const runtimeEntryOwners = new Set([
     ...Object.values(runtimeProcessDeclarationEntries),
-    "scripts/lib/managed-windows-job-launcher.mts",
+    "src/process/windows-job-launcher.ts",
+    "src/process/windows-job-entrypoint.ts",
+    "src/process/windows-job.ts",
     "src/process/supervisor/service-child-windows-job-native.ts",
     "src/infra/update-managed-service-handoff-runtime-assets.ts",
     "src/infra/update-managed-service-handoff-native-loader.ts",

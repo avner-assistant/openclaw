@@ -100,9 +100,6 @@ scripts/lib/failed-trailer.mts
 scripts/lib/gateway-server-test-plan.mts
 scripts/lib/local-check-runtime.mts
 scripts/lib/managed-child-process.mts
-scripts/lib/managed-windows-job-entrypoint.mts
-scripts/lib/managed-windows-job-launcher.mts
-scripts/lib/managed-windows-job.mts
 scripts/lib/merge-head-diff-base.mjs
 scripts/lib/native-session-catalogs.json
 scripts/lib/numeric-options.mjs
@@ -967,6 +964,9 @@ src/process/spawn-broker/execa-protocol.ts
 src/process/spawn-broker/pipe.ts
 src/process/spawn-broker/protocol.ts
 src/process/supervisor/service-child-windows-job-native.ts
+src/process/windows-job-entrypoint.ts
+src/process/windows-job-launcher.ts
+src/process/windows-job.ts
 src/process/windows-command.ts
 src/proxy-capture/env.ts
 src/proxy-capture/header-redaction.ts

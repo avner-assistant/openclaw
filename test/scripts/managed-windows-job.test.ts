@@ -1,6 +1,6 @@
 import { ChildProcess } from "node:child_process";
 import { afterEach, expect, it, vi } from "vitest";
-import { spawnWindowsJobChild } from "../../scripts/lib/managed-windows-job.mts";
+import { spawnWindowsJobChild } from "../../src/process/windows-job.ts";
 
 const mocks = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock("node:child_process", async (original) => ({
@@ -37,7 +37,7 @@ it("snapshots command inputs before admission and excludes every NODE_OPTIONS ca
     const owned = spawnWindowsJobChild("fixture", args, { env, stdio: "pipe" });
     args[0] = "mutated";
     env.VALUE = "mutated";
-    child.emit("message", "job-ready");
+    child.emit("message", { job: mocks.spawn.mock.calls[0]?.[1][1], type: "ready" });
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({
         command: "fixture",

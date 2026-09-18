@@ -6,7 +6,7 @@ import { loadManagedChildSpawner } from "../../scripts/lib/managed-child-process
 import { testing } from "./openclaw-test-instance.js";
 
 const mocks = vi.hoisted(() => ({ spawnWindowsJobChild: vi.fn() }));
-vi.mock("../../scripts/lib/managed-windows-job.mts", () => ({
+vi.mock("../../src/process/windows-job.ts", () => ({
   spawnWindowsJobChild: mocks.spawnWindowsJobChild,
 }));
 afterEach(() => vi.restoreAllMocks());

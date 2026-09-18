@@ -7,9 +7,9 @@ import {
   loadManagedChildSpawner,
   runManagedCommand,
 } from "../../scripts/lib/managed-child-process.mts";
-import type { ManagedWindowsJob } from "../../scripts/lib/managed-windows-job.mts";
 import { createVitestResourceOwner } from "../../scripts/lib/vitest-resource-ownership.mts";
 import { createWindowsJobBindings } from "../../src/process/supervisor/service-child-windows-job-native.js";
+import type { ManagedWindowsJob } from "../../src/process/windows-job.ts";
 import { testing } from "../helpers/openclaw-test-instance.js";
 import { waitForFile } from "../helpers/process-wait.js";
 import { createDeferred } from "../helpers/promise.js";
@@ -19,8 +19,8 @@ const fault = vi.hoisted(() => {
   const state: { child?: ChildProcess; job?: ManagedWindowsJob; stop?: () => void } = {};
   return state;
 });
-vi.mock("../../scripts/lib/managed-windows-job.mts", async (original) => {
-  const actual = await original<typeof import("../../scripts/lib/managed-windows-job.mts")>();
+vi.mock("../../src/process/windows-job.ts", async (original) => {
+  const actual = await original<typeof import("../../src/process/windows-job.ts")>();
   return {
     ...actual,
     spawnWindowsJobChild: (...args: Parameters<typeof actual.spawnWindowsJobChild>) => {

@@ -9,8 +9,8 @@ import type {
 } from "node:child_process";
 import { constants as osConstants, tmpdir } from "node:os";
 import { Writable, type Readable } from "node:stream";
+import type { ManagedWindowsJob } from "../../src/process/windows-job.ts";
 import { buildCmdExeCommandLine, resolveWindowsCmdExePath } from "../windows-cmd-helpers.mjs";
-import type { ManagedWindowsJob } from "./managed-windows-job.mts";
 import { findVitestResourceOwner } from "./vitest-resource-ownership.mts";
 import { resolveWindowsTaskkillPath } from "./windows-taskkill.mjs";
 
@@ -105,7 +105,7 @@ export function loadManagedChildSpawner(platform = process.platform) {
   if (platform !== "win32") {
     return spawn;
   }
-  return import("./managed-windows-job.mts").then(({ spawnWindowsJobChild }) => {
+  return import("../../src/process/windows-job.ts").then(({ spawnWindowsJobChild }) => {
     function spawnManagedChild(
       command: string,
       args: string[],

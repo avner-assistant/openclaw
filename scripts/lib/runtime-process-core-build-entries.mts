@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { runtimeProcessEntrypoints } from "../../src/infra/runtime-process-entrypoints.ts";
-import { managedWindowsJobEntrypoint } from "./managed-windows-job-entrypoint.mts";
+import { windowsJobEntrypoint } from "../../src/process/windows-job-entrypoint.ts";
 
 export function createRuntimeProcessBuildEntries(
   entries: readonly {
@@ -25,7 +25,7 @@ export function createRuntimeProcessBuildEntries(
 
 export const runtimeProcessCoreEntrypoints = [
   ...Object.values(runtimeProcessEntrypoints),
-  managedWindowsJobEntrypoint,
+  windowsJobEntrypoint,
 ];
 export const runtimeProcessCoreBuildEntries = createRuntimeProcessBuildEntries(
   runtimeProcessCoreEntrypoints,
