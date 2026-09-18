@@ -481,6 +481,14 @@ function sessionStoreUpdateOptions(params: {
   };
 }
 
+/**
+ * Controls whether a persisted ACP row is tied to the session entry's current
+ * `sessionId`. Pinned rows go stale as soon as the entry rotates; `"none"`
+ * keeps the metadata addressed by session key alone, which is what a freshly
+ * initialized session needs because its first turn still rotates the entry.
+ */
+export type AcpSessionIdPin = "entry" | "none";
+
 export async function upsertAcpSessionMeta(params: {
   sessionKey: string;
   cfg?: OpenClawConfig;
@@ -489,6 +497,7 @@ export async function upsertAcpSessionMeta(params: {
   now?: () => number;
   skipMaintenance?: boolean;
   takeCacheOwnership?: boolean;
+  sessionIdPin?: AcpSessionIdPin;
   mutate: (
     current: SessionAcpMeta | undefined,
     entry: SessionEntry | undefined,
@@ -587,7 +596,7 @@ export async function upsertAcpSessionMeta(params: {
         database.db,
         bindAcpSessionMeta({
           sessionKey: persisted.sessionKey,
-          sessionId: persisted.entry.sessionId,
+          ...(params.sessionIdPin === "none" ? {} : { sessionId: persisted.entry.sessionId }),
           meta: metaToPersist,
           updatedAt,
         }),

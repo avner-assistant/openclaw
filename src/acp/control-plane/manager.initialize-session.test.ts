@@ -58,6 +58,37 @@ describe("AcpSessionManager initializeSession", () => {
     expect(runtimeState.ensureSession).toHaveBeenCalledTimes(1);
   });
 
+  it("persists initialization metadata unpinned and returns the persisted entry", async () => {
+    const runtimeState = createRuntime();
+    hoisted.requireAcpRuntimeBackendMock.mockReturnValue({
+      id: "acpx",
+      runtime: runtimeState.runtime,
+    });
+    const persistedEntry = {
+      sessionKey: "agent:codex:acp:session-a",
+      storeSessionKey: "agent:codex:acp:session-a",
+      sessionId: "provisional-session-id",
+      acp: readySessionMeta(),
+    };
+    hoisted.upsertAcpSessionMetaMock.mockResolvedValue(persistedEntry);
+
+    const manager = new AcpSessionManager();
+    const initialized = await manager.initializeSession({
+      cfg: baseCfg,
+      sessionKey: "agent:codex:acp:session-a",
+      agent: "codex",
+      mode: "persistent",
+    });
+
+    // The entry created here is provisional: the session's first turn rotates
+    // its sessionId, so the row must not be pinned to it.
+    expectRecordFields(mockCallArg(hoisted.upsertAcpSessionMetaMock), {
+      sessionKey: "agent:codex:acp:session-a",
+      sessionIdPin: "none",
+    });
+    expect(initialized.entry).toBe(persistedEntry);
+  });
+
   it("persists runtime options provided during initializeSession", async () => {
     const runtimeState = createRuntime();
     hoisted.requireAcpRuntimeBackendMock.mockReturnValue({

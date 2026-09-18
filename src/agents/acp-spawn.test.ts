@@ -926,6 +926,87 @@ describe("spawnAcpDirect", () => {
     });
   });
 
+  it("binds a channel requester to a new ACP thread and keeps follow-up routing resolvable", async () => {
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "session",
+        thread: true,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "discord",
+        agentAccountId: "default",
+        agentTo: "channel:parent-channel",
+      },
+    );
+
+    const accepted = expectAcceptedSpawn(result);
+    expect(accepted.mode).toBe("session");
+    expectBindingCallFields({
+      targetKind: "session",
+      placement: "child",
+      conversation: { channel: "discord", conversationId: "channel:parent-channel" },
+    });
+
+    // Initial leg: the spawn dispatches the first turn into the bound thread.
+    const agentCall = gatewayRequest("agent");
+    expect(agentCall.params?.sessionKey).toBe(accepted.childSessionKey);
+
+    // Acceptance must imply durable metadata for the exact persisted entry.
+    expect(hoisted.readAcpSessionMetaForEntryMock).toHaveBeenCalledWith({
+      sessionKey: accepted.childSessionKey,
+      entry: expect.objectContaining({ sessionId: "sess-123" }),
+    });
+
+    // Follow-up leg: the session key handed back resolves to ACP metadata, which
+    // is the lookup that raised "ACP metadata is missing" before this fix.
+    // Durability of that metadata across the first turn's sessionId rotation and
+    // across a restart is covered in
+    // src/acp/control-plane/manager.session-metadata-durability.test.ts.
+    const followUpMeta = hoisted.readAcpSessionMetaMock({
+      sessionKey: accepted.childSessionKey,
+    });
+    expect(followUpMeta).toMatchObject({ agent: "codex", mode: "persistent" });
+  });
+
+  it("creates an ACP child from a requester already inside a thread and keeps follow-up routing", async () => {
+    const result = await spawnAcpDirect(
+      {
+        task: "Investigate flaky tests",
+        agentId: "codex",
+        mode: "session",
+        thread: true,
+      },
+      {
+        agentSessionKey: "agent:main:main",
+        agentChannel: "discord",
+        agentAccountId: "default",
+        agentTo: "channel:parent-channel",
+        agentThreadId: "requester-thread",
+      },
+    );
+
+    const accepted = expectAcceptedSpawn(result);
+    expectBindingCallFields({
+      targetKind: "session",
+      placement: "child",
+      conversation: { channel: "discord", conversationId: "requester-thread" },
+    });
+
+    const agentCall = gatewayRequest("agent");
+    expect(agentCall.params?.sessionKey).toBe(accepted.childSessionKey);
+    expect(hoisted.readAcpSessionMetaForEntryMock).toHaveBeenCalledWith({
+      sessionKey: accepted.childSessionKey,
+      entry: expect.objectContaining({ sessionId: "sess-123" }),
+    });
+    expect(hoisted.readAcpSessionMetaMock({ sessionKey: accepted.childSessionKey })).toMatchObject({
+      agent: "codex",
+      mode: "persistent",
+    });
+  });
+
   it("fails before dispatch when initialized ACP metadata is unavailable to follow-ups", async () => {
     hoisted.initializeSessionMock.mockImplementationOnce(async (argsUnknown: unknown) => {
       const args = argsUnknown as AcpInitializeSessionInput;

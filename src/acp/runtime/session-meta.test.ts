@@ -4,12 +4,14 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../../config/config.js";
 import { loadSessionStore } from "../../config/sessions/store-load.js";
+import { clearSessionStoreCacheForTest } from "../../config/sessions/store-writer-state.js";
 import { writeSessionStoreForTestAsync } from "../../config/sessions/test-helpers.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { withTempDir } from "../../test-helpers/temp-dir.js";
 import {
   listAcpSessionEntries,
   readAcpSessionEntry,
+  readAcpSessionMeta,
   readAcpSessionMetaForEntry,
   repairAcpSessionMetaKeyForMigration,
   upsertAcpSessionMeta,
@@ -82,6 +84,160 @@ describe("ACP session metadata SQLite store", () => {
         runtimeSessionName: "codex-discord",
         mode: "persistent",
         state: "idle",
+        cwd: "/repo",
+      });
+    });
+  });
+
+  it("keeps unpinned initialization metadata resolvable after the first turn rotates sessionId", async () => {
+    await withTempDir({ prefix: "openclaw-acp-meta-" }, async (dir) => {
+      const storePath = path.join(dir, "sessions.json");
+      const databasePath = path.join(dir, "state", "openclaw.sqlite");
+      const cfg = { session: { store: storePath } } as OpenClawConfig;
+      const sessionKey = "agent:claude:acp:3cb981ee-d203-4469-801b-1f95c8e92aa9";
+
+      // Spawn-time initialization: the manager persists metadata before the
+      // caller is handed an accepted receipt.
+      const initialized = await upsertAcpSessionMeta({
+        cfg,
+        databasePath,
+        sessionKey,
+        sessionIdPin: "none",
+        now: () => 200,
+        mutate: () => ({
+          backend: "acpx",
+          agent: "claude",
+          runtimeSessionName: "claude-discord",
+          mode: "persistent",
+          state: "idle",
+          lastActivityAt: 200,
+        }),
+      });
+      const provisionalSessionId = initialized?.sessionId;
+      expect(provisionalSessionId).toEqual(expect.any(String));
+
+      // The session's own first turn rewrites the entry with the runtime's
+      // session id, which is what orphaned the row before this fix.
+      await writeSessionStoreForTestAsync(storePath, {
+        [sessionKey]: {
+          sessionId: "80e81c39-3756-4c79-ad0f-104fc4584ae7",
+          updatedAt: 300,
+        },
+      });
+      expect(loadSessionStore(storePath)[sessionKey]?.sessionId).not.toBe(provisionalSessionId);
+
+      // Follow-up routing resolves metadata exactly this way.
+      expect(
+        readAcpSessionEntry({
+          cfg,
+          databasePath,
+          sessionKey,
+        })?.acp?.runtimeSessionName,
+      ).toBe("claude-discord");
+      expect(readAcpSessionMeta({ cfg, databasePath, sessionKey })?.mode).toBe("persistent");
+    });
+  });
+
+  it("re-pins ACP metadata to the rotated entry once a turn persists it", async () => {
+    await withTempDir({ prefix: "openclaw-acp-meta-" }, async (dir) => {
+      const storePath = path.join(dir, "sessions.json");
+      const databasePath = path.join(dir, "state", "openclaw.sqlite");
+      const cfg = { session: { store: storePath } } as OpenClawConfig;
+      const sessionKey = "agent:claude:acp:pin-after-turn";
+
+      await upsertAcpSessionMeta({
+        cfg,
+        databasePath,
+        sessionKey,
+        sessionIdPin: "none",
+        mutate: () => ({
+          backend: "acpx",
+          agent: "claude",
+          runtimeSessionName: "claude-discord",
+          mode: "persistent",
+          state: "idle",
+          lastActivityAt: 200,
+        }),
+      });
+      await writeSessionStoreForTestAsync(storePath, {
+        [sessionKey]: { sessionId: "turn-session-id", updatedAt: 300 },
+      });
+
+      // A turn-time write uses the default pin and adopts the live entry id.
+      await upsertAcpSessionMeta({
+        cfg,
+        databasePath,
+        sessionKey,
+        mutate: (current) => ({
+          ...(current ?? {
+            backend: "acpx",
+            agent: "claude",
+            runtimeSessionName: "claude-discord",
+            mode: "persistent",
+            lastActivityAt: 300,
+          }),
+          state: "running",
+          lastActivityAt: 300,
+        }),
+      });
+
+      expect(
+        readAcpSessionMetaForEntry({
+          databasePath,
+          sessionKey,
+          entry: { sessionId: "turn-session-id" },
+        })?.state,
+      ).toBe("running");
+      // Staleness detection is preserved for entries replaced after that write.
+      expect(
+        readAcpSessionMetaForEntry({
+          databasePath,
+          sessionKey,
+          entry: { sessionId: "reset-session-id" },
+        }),
+      ).toBeUndefined();
+    });
+  });
+
+  it("keeps ACP metadata readable after the state database is reopened", async () => {
+    await withTempDir({ prefix: "openclaw-acp-meta-" }, async (dir) => {
+      const storePath = path.join(dir, "sessions.json");
+      const databasePath = path.join(dir, "state", "openclaw.sqlite");
+      const cfg = { session: { store: storePath } } as OpenClawConfig;
+      const sessionKey = "agent:claude:acp:restart-survivor";
+
+      await upsertAcpSessionMeta({
+        cfg,
+        databasePath,
+        sessionKey,
+        sessionIdPin: "none",
+        mutate: () => ({
+          backend: "acpx",
+          agent: "claude",
+          runtimeSessionName: "claude-discord",
+          mode: "persistent",
+          state: "idle",
+          lastActivityAt: 200,
+          cwd: "/repo",
+        }),
+      });
+
+      // Stand-in for a gateway restart: drop every process-local handle and
+      // re-open the on-disk state database from scratch.
+      closeOpenClawStateDatabaseForTest();
+      clearSessionStoreCacheForTest();
+
+      expect(
+        readAcpSessionEntry({
+          cfg,
+          databasePath,
+          sessionKey,
+        })?.acp,
+      ).toMatchObject({
+        backend: "acpx",
+        agent: "claude",
+        runtimeSessionName: "claude-discord",
+        mode: "persistent",
         cwd: "/repo",
       });
     });

@@ -36,6 +36,7 @@ import {
   type AcpInitializeSessionInput,
   type AcpManagerObservabilitySnapshot,
   type AcpRunTurnInput,
+  type AcpSessionIdPin,
   type AcpSessionManagerDeps,
   type AcpSessionResolution,
   type AcpSessionRuntimeOptions,
@@ -529,6 +530,7 @@ export class AcpSessionManager {
     failOnError?: boolean;
     skipMaintenance?: boolean;
     takeCacheOwnership?: boolean;
+    sessionIdPin?: AcpSessionIdPin;
   }): Promise<SessionEntry | null> {
     try {
       return await this.deps.upsertSessionMeta({
@@ -537,6 +539,7 @@ export class AcpSessionManager {
         mutate: params.mutate,
         ...(params.skipMaintenance === true ? { skipMaintenance: true } : {}),
         ...(params.takeCacheOwnership === true ? { takeCacheOwnership: true } : {}),
+        ...(params.sessionIdPin ? { sessionIdPin: params.sessionIdPin } : {}),
       });
     } catch (error) {
       if (params.failOnError) {

@@ -146,6 +146,11 @@ async function persistInitializedSessionMeta(params: {
       sessionKey: params.sessionKey,
       mutate: () => params.meta,
       failOnError: true,
+      // The session entry we just created is provisional: the session's own
+      // first turn rewrites its sessionId. Pinning the row to that id would
+      // orphan the metadata the moment the initial turn lands, so the row stays
+      // addressed by session key until a turn re-persists it.
+      sessionIdPin: "none",
     });
     if (persisted?.acp) {
       return persisted;

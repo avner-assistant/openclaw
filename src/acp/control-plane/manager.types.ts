@@ -21,6 +21,7 @@ import {
   listAcpSessionEntries,
   readAcpSessionEntry,
   upsertAcpSessionMeta,
+  type AcpSessionIdPin,
 } from "../runtime/session-meta.js";
 
 /** Result of resolving persisted ACP metadata for a session key. */
@@ -164,6 +165,7 @@ export type WriteManagerSessionMeta = (params: {
   failOnError?: boolean;
   skipMaintenance?: boolean;
   takeCacheOwnership?: boolean;
+  sessionIdPin?: AcpSessionIdPin;
 }) => Promise<SessionEntry | null>;
 
 export type ResolveManagerSession = (params: {
@@ -209,4 +211,4 @@ export const DEFAULT_DEPS: AcpSessionManagerDeps = {
   requireRuntimeBackend: requireAcpRuntimeBackend,
 };
 
-export type { AcpSessionRuntimeOptions, SessionAcpMeta, SessionEntry };
+export type { AcpSessionIdPin, AcpSessionRuntimeOptions, SessionAcpMeta, SessionEntry };
