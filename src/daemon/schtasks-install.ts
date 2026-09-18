@@ -41,7 +41,10 @@ import {
   waitForFallbackTakeoverRuntime,
   waitForScheduledTaskRunningEvidence,
 } from "./schtasks-runtime.js";
-import { probeScheduledTaskExists } from "./schtasks-state-probe.js";
+import {
+  probeScheduledTaskExists,
+  readScheduledTaskBatterySettingsUpgrade,
+} from "./schtasks-state-probe.js";
 import type {
   GatewayServiceEnv,
   GatewayServiceInstallArgs,
@@ -179,32 +182,43 @@ async function updateExistingScheduledTask(params: {
   taskLaunchPath: string;
   description?: string;
 }): Promise<ScheduledTaskActivation | null> {
-  if (!(await isRegisteredScheduledTask(params.env))) {
+  const updateOwned = isUpdateOwnedGatewayServiceCommand();
+  const change = (await isRegisteredScheduledTask(params.env))
+    ? await execSchtasks(["/Change", "/TN", params.taskName, "/TR", params.quotedLaunchPath])
+    : undefined;
+  if (change?.code !== 0) {
+    if (updateOwned) {
+      throw new Error(
+        "UPDATE_NATIVE_AUTHORITY: existing Scheduled Task refresh could not be verified; refusing to recreate it.",
+      );
+    }
     return null;
   }
-  const change = await execSchtasks([
-    "/Change",
-    "/TN",
-    params.taskName,
-    "/TR",
-    params.quotedLaunchPath,
-  ]);
-  if (change.code !== 0) {
-    return null;
-  }
-  // Re-apply the full XML so older tasks inherit both false battery flags (#59299).
-  // Best effort: failure keeps the prior settings rather than losing the task.
-  const upgradeXmlPath = await writeTaskXmlTempFile(
-    buildScheduledTaskXml({
-      taskDescription: params.description ?? "OpenClaw Gateway",
-      taskUser: resolveTaskUser(params.env),
-      launchPath: params.taskLaunchPath,
-    }),
-  );
-  try {
-    await execSchtasks(["/Create", "/F", "/TN", params.taskName, "/XML", upgradeXmlPath]);
-  } finally {
-    await fs.rm(path.dirname(upgradeXmlPath), { recursive: true, force: true }).catch(() => {});
+  // Battery migration is best effort (#59299); update refresh preserves native policy.
+  const definition = updateOwned
+    ? readScheduledTaskBatterySettingsUpgrade(params.taskName)
+    : undefined;
+  const xml = updateOwned
+    ? definition?.updatedXml
+    : buildScheduledTaskXml({
+        taskDescription: params.description ?? "OpenClaw Gateway",
+        taskUser: resolveTaskUser(params.env),
+        launchPath: params.taskLaunchPath,
+      });
+  if (xml) {
+    const upgradeXmlPath = await writeTaskXmlTempFile(xml);
+    try {
+      if (
+        !updateOwned ||
+        (definition &&
+          readScheduledTaskBatterySettingsUpgrade(params.taskName)?.originalXml ===
+            definition.originalXml)
+      ) {
+        await execSchtasks(["/Create", "/F", "/TN", params.taskName, "/XML", upgradeXmlPath]);
+      }
+    } finally {
+      await fs.rm(path.dirname(upgradeXmlPath), { recursive: true, force: true }).catch(() => {});
+    }
   }
   const activation = await runScheduledTaskOrThrow({
     taskName: params.taskName,

@@ -698,15 +698,16 @@ describe("Windows startup fallback", () => {
     });
   });
 
-  it("refuses update-owned Startup fallback before publishing a login item or detached launcher", async () => {
+  it("refuses update-owned task recreation before publishing a login item or detached launcher", async () => {
     await withWindowsEnv("openclaw-win-update-startup-", async ({ env }) => {
-      addMissingTaskInstallResponses([{ code: 5, stdout: "", stderr: "ERROR: Access is denied." }]);
+      addMissingTaskInstallResponses([]);
       await expect(
         withGatewayServiceUpdateAuthority(
           () => {},
           () => installGatewayScheduledTask(env),
         ),
-      ).rejects.toThrow("startup fallback is unsupported");
+      ).rejects.toThrow("UPDATE_NATIVE_AUTHORITY:");
+      expect(schtasksCalls.map(([operation]) => operation)).toEqual(["/Query"]);
       await expect(fs.stat(resolveStartupEntryPath(env))).rejects.toMatchObject({ code: "ENOENT" });
       expect(spawn).not.toHaveBeenCalled();
     });
@@ -2122,9 +2123,7 @@ describe("Windows startup fallback", () => {
             "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress",
           )
         ) {
-          return {
-            pid: 0,
-            output: [null, "", ""],
+          return makeSpawnSyncResult({
             stdout: JSON.stringify([
               {
                 ProcessId: 4242,
@@ -2135,19 +2134,9 @@ describe("Windows startup fallback", () => {
                 CommandLine: "C:\\bin\\openclaw.cmd node run --host 127.0.0.1 --port 18789",
               },
             ]),
-            stderr: "",
-            status: 0,
-            signal: null,
-          };
+          });
         }
-        return {
-          pid: 0,
-          output: [null, "", ""],
-          stdout: "",
-          stderr: "",
-          status: 0,
-          signal: null,
-        };
+        return makeSpawnSyncResult();
       });
 
       const runtime = await readScheduledTaskRuntime(nodeEnv);

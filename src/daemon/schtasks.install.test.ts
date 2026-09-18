@@ -1,4 +1,5 @@
 // Windows schtasks install tests cover scheduled task installation behavior.
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +15,7 @@ import {
 } from "./schtasks.js";
 import { auditGatewayServiceConfig, SERVICE_AUDIT_CODES } from "./service-audit.js";
 import { buildServiceEnvironment } from "./service-env.js";
+import { withGatewayServiceUpdateAuthority } from "./service-update-authority.js";
 
 // Install tests control registration separately; runtime probes never inspect host tasks.
 vi.mock("node:child_process", async () => ({
@@ -64,6 +66,16 @@ vi.mock("./schtasks-exec.js", () => ({
 }));
 
 beforeEach(() => {
+  vi.mocked(spawnSync)
+    .mockReset()
+    .mockReturnValue({
+      pid: 0,
+      output: [null, null, null],
+      status: 0,
+      stdout: '{"state":4}',
+      stderr: "",
+      signal: null,
+    });
   schtasksCalls.length = 0;
   schtasksResponses.length = 0;
   xmlPayloadCaptures.length = 0;
@@ -578,6 +590,110 @@ describe("installScheduledTask", () => {
       expect(schtasksCalls[1]?.[0]).toBe("/Change");
       expect(schtasksCalls[2]?.[0]).toBe("/Create");
       expectTaskRunCall(3);
+    });
+  });
+
+  const nativeTaskXml = `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Gateway 任务</Description></RegistrationInfo>
+  <Triggers><CalendarTrigger><StartBoundary>2026-09-15T10:00:00</StartBoundary><ScheduleByDay><DaysInterval>3</DaysInterval></ScheduleByDay></CalendarTrigger></Triggers>
+  <Principals><Principal id="Owner"><UserId>S-1-5-18</UserId><LogonType>ServiceAccount</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
+  <Settings><Enabled>false</Enabled><DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>true</StopIfGoingOnBatteries></Settings>
+  <Actions Context="Owner"><Exec><Command>C:\\服务\\gateway.vbs</Command><WorkingDirectory>C:\\服务</WorkingDirectory></Exec></Actions>
+</Task>`;
+  const upgradedNativeTaskXml = nativeTaskXml
+    .replace("<DisallowStartIfOnBatteries>true", "<DisallowStartIfOnBatteries>false")
+    .replace("<StopIfGoingOnBatteries>true", "<StopIfGoingOnBatteries>false");
+
+  function taskDefinitionResponse(value: unknown) {
+    return {
+      pid: 0,
+      output: [null, null, null],
+      status: 0,
+      stdout: JSON.stringify(value),
+      stderr: "",
+      signal: null,
+    };
+  }
+
+  it("preserves the native task Principal and policy during update-owned refresh", async () => {
+    await withUserProfileDir(async (_tmpDir, env) => {
+      const definition = {
+        originalXml: nativeTaskXml,
+        updatedXml: upgradedNativeTaskXml,
+        logonType: 5,
+        registrationTrigger: false,
+      };
+      vi.mocked(spawnSync)
+        .mockReturnValueOnce(taskDefinitionResponse(definition))
+        .mockReturnValueOnce(taskDefinitionResponse(definition));
+      await withGatewayServiceUpdateAuthority(
+        () => {},
+        () => installDefaultGatewayTask({ ...env, USERDOMAIN: "WORKSTATION", USERNAME: "alice" }),
+      );
+      expect(schtasksCalls.map((call) => call[0])).toEqual([
+        "/Query",
+        "/Change",
+        "/Create",
+        "/Run",
+      ]);
+      expect(xmlPayloadCaptures.map(({ xml }) => xml)).toEqual([upgradedNativeTaskXml]);
+    });
+  });
+
+  it.each([
+    { kind: "password logon", logonType: 1 },
+    { kind: "interactive-or-password logon", logonType: 6 },
+    { kind: "unknown logon", logonType: 0 },
+    { kind: "registration trigger", registrationTrigger: true },
+    { kind: "unreadable definition" },
+    { kind: "already migrated battery settings" },
+    { kind: "native definition changed before publication" },
+  ])("keeps the safe action update when $kind prevents XML maintenance", async (scenario) => {
+    await withUserProfileDir(async (_tmpDir, env) => {
+      const definition = {
+        originalXml:
+          scenario.kind === "already migrated battery settings"
+            ? upgradedNativeTaskXml
+            : nativeTaskXml,
+        updatedXml: upgradedNativeTaskXml,
+        logonType: scenario.logonType ?? 3,
+        registrationTrigger: scenario.registrationTrigger ?? false,
+      };
+      vi.mocked(spawnSync).mockReturnValueOnce(
+        taskDefinitionResponse(scenario.kind === "unreadable definition" ? null : definition),
+      );
+      if (scenario.kind === "native definition changed before publication") {
+        vi.mocked(spawnSync).mockReturnValueOnce(
+          taskDefinitionResponse({ ...definition, originalXml: `${nativeTaskXml}\r\n` }),
+        );
+      }
+      await withGatewayServiceUpdateAuthority(
+        () => {},
+        () => installDefaultGatewayTask(env),
+      );
+      expect(schtasksCalls.map((call) => call[0])).toEqual(["/Query", "/Change", "/Run"]);
+      expect(xmlPayloadCaptures).toEqual([]);
+    });
+  });
+
+  it.each([
+    {
+      kind: "existing task action update fails",
+      responses: [okSchtasksResponse, accessDeniedResponse],
+    },
+    { kind: "refresh target disappeared", responses: [missingTaskResponse] },
+    { kind: "refresh target cannot be inspected", responses: [accessDeniedResponse] },
+  ])("never recreates a caller-owned task when $kind", async ({ responses }) => {
+    await withUserProfileDir(async (_tmpDir, env) => {
+      schtasksResponses.push(...responses);
+      await expect(
+        withGatewayServiceUpdateAuthority(
+          () => {},
+          () => installDefaultGatewayTask(env),
+        ),
+      ).rejects.toThrow("UPDATE_NATIVE_AUTHORITY:");
+      expect(schtasksCalls.some((call) => call[0] === "/Create" || call[0] === "/Run")).toBe(false);
     });
   });
 

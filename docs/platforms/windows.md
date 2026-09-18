@@ -169,6 +169,12 @@ regenerate the launcher if the update did not refresh it.
 
 Gateway status and Doctor read the Scheduled Task's numeric current state, independently of the Windows display language or console code page. A previous task exit result does not prove whether it is running now. Queued or unknown tasks do not count as safely stopped for Doctor maintenance. Stop a queued task through its service owner; if inspection is inaccessible, restore Task Scheduler inspection permissions before retrying.
 
+Update inspection follows the task's registered launcher, including generated
+launchers from older releases. If that launcher changes during inspection or
+contains an ambiguous command, repair it before retrying. Update refreshes retain
+the existing task principal, triggers, and settings instead of recreating the task
+with the invoking user's defaults.
+
 The task probe allows Windows PowerShell to inherit or create a console because
 some PowerShell 5.1 hosts fail inspection when console creation is disabled.
 Invoking it from an app without a console can briefly display a console window.

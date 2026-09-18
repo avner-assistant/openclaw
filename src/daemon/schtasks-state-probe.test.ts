@@ -6,6 +6,31 @@ vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
 
 beforeEach(() => vi.mocked(spawnSync).mockReset());
 
+it("reads nested native action metadata without localized field names", () => {
+  const snapshot = {
+    taskPath: "\\Ops\\Backup 任务",
+    state: 1,
+    enabled: false,
+    actions: [
+      {
+        type: 0,
+        path: "C:\\Services\\Backup\\gateway.cmd",
+        arguments: "literal argument",
+        workingDirectory: "C:\\Services\\Backup",
+      },
+    ],
+  };
+  vi.mocked(spawnSync).mockReturnValue({
+    pid: 0,
+    output: [null, "", ""],
+    status: 0,
+    stdout: JSON.stringify(snapshot),
+    stderr: "",
+    signal: null,
+  });
+  expect(probeScheduledTaskState(snapshot.taskPath)).toEqual({ status: "found", ...snapshot });
+});
+
 it("reads task state when PowerShell rejects a no-console launch", () => {
   vi.mocked(spawnSync).mockImplementation((_command, _args, options) => {
     const hidden = options?.windowsHide === true;

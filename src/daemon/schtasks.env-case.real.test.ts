@@ -165,10 +165,13 @@ server.listen(port, "127.0.0.1", () => {
       });
       expect(observed.pid).not.toBe(child.pid);
       expect(readWindowsProcessArgsSync(observed.pid)).toEqual(observed.argv);
-      const installed = await readScheduledTaskCommand(env, { requireEffective: true });
+      const installed = await readScheduledTaskCommand(env);
       expect(installed?.workingDirectory).toBe(dir);
       expect(installed?.environment?.OPENCLAW_TEST_LAUNCHER_VALUE).toBe("retained");
       if (normalized) {
+        await expect(readScheduledTaskCommand(env, { requireEffective: true })).resolves.toEqual(
+          installed,
+        );
         expect(installed?.programArguments).toEqual(programArguments);
         await expect(resolveScheduledTaskOwnedGatewayPids(env, { port })).resolves.toEqual([
           observed.pid,
@@ -186,6 +189,9 @@ server.listen(port, "127.0.0.1", () => {
       } else {
         // Ambiguous quoting and filename delimiters must not manufacture a
         // shortened installed command that could authorize another process.
+        await expect(readScheduledTaskCommand(env, { requireEffective: true })).rejects.toThrow(
+          "Effective Scheduled Task service command could not be inspected.",
+        );
         expect(installed?.programArguments).toEqual([
           ...programArguments,
           "<",
@@ -195,6 +201,7 @@ server.listen(port, "127.0.0.1", () => {
           "2>&1",
         ]);
         await expect(resolveScheduledTaskOwnedGatewayPids(env, { port })).resolves.toEqual([]);
+        expect(() => process.kill(observed.pid, 0)).not.toThrow();
       }
       expect(await fs.readFile(scriptPath)).toEqual(originalBytes);
       if (normalized) {

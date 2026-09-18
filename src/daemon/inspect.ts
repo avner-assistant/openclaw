@@ -6,6 +6,7 @@ import {
   GATEWAY_SERVICE_KIND,
   GATEWAY_SERVICE_MARKER,
   LEGACY_GATEWAY_SYSTEMD_SERVICE_NAMES,
+  normalizeWindowsTaskIdentity,
   resolveGatewayLaunchAgentLabel,
   resolveGatewaySystemdServiceName,
   resolveGatewayWindowsTaskName,
@@ -163,17 +164,9 @@ function isOpenClawGatewaySystemdService(name: string, contents: string): boolea
 }
 
 function isOpenClawGatewayTaskName(name: string): boolean {
-  const normalized = normalizeLowercaseStringOrEmpty(name);
-  if (!normalized) {
-    return false;
-  }
-  // Windows schtasks /Query returns task names prefixed with \ (e.g.
-  // \OpenClaw Gateway for root-folder tasks). Strip the leading
-  // backslash so the configured name matches correctly and the live
-  // gateway task is not misidentified as an extra gateway service.
-  const stripped = normalized.replace(/^\\+/, "");
-  const defaultName = normalizeLowercaseStringOrEmpty(resolveGatewayWindowsTaskName());
-  return stripped === defaultName || /^openclaw gateway \(.+\)$/.test(stripped);
+  const normalized = normalizeWindowsTaskIdentity(name.trim());
+  const defaultName = normalizeWindowsTaskIdentity(resolveGatewayWindowsTaskName());
+  return normalized === defaultName || /^openclaw gateway \(.+\)$/.test(normalized);
 }
 
 function isIgnoredLaunchdLabel(label: string): boolean {
