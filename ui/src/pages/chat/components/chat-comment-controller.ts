@@ -133,6 +133,18 @@ class ChatCommentController extends OpenClawLightDomContentsElement {
     if (!(event instanceof CustomEvent) || !this.canChange(this.props.readSignal)) {
       return;
     }
+    if (event.detail?.action === "delete-all") {
+      event.stopPropagation();
+      this.retireEditor();
+      const ids = new Set(currentChatComments(this.props, this.sessionKey).map((item) => item.id));
+      const current = this.currentAttachments();
+      this.changeAttachments(
+        current,
+        current.filter((item) => !ids.has(item.id)),
+      );
+      this.focusComposer();
+      return;
+    }
     const attachment = currentChatComments(this.props, this.sessionKey).find(
       (item) => item.id === event.detail?.id,
     );
@@ -141,7 +153,11 @@ class ChatCommentController extends OpenClawLightDomContentsElement {
     }
     event.stopPropagation();
     if (event.detail.action === "delete") {
-      this.deleteComment(attachment.id);
+      const preview =
+        event.target instanceof HTMLElement
+          ? event.target.closest<HTMLElement>(".chat-comment-preview--editable")
+          : null;
+      this.deleteComment(attachment.id, preview);
     } else if (event.detail.action === "edit" && event.target instanceof HTMLElement) {
       // Opening must not queue a transcript scroll that would dismiss the editor.
       const trigger = event.target
@@ -159,14 +175,37 @@ class ChatCommentController extends OpenClawLightDomContentsElement {
       ?.focus({ preventScroll: true });
   }
 
-  private deleteComment(id: string) {
+  private deleteComment(id: string, preview: HTMLElement | null = null) {
     this.retireEditor();
+    const signal = this.props.readSignal;
+    const sessionKey = this.sessionKey;
+    const comments = currentChatComments(this.props, sessionKey);
+    const index = comments.findIndex((item) => item.id === id);
+    const next = comments[index + 1] ?? comments[index - 1];
     const current = this.currentAttachments();
     this.changeAttachments(
       current,
       current.filter((item) => item.id !== id),
     );
-    this.focusComposer();
+    if (!preview || !next) {
+      this.focusComposer();
+      return;
+    }
+    // Wait for the attachment owner to render the renumbered list before moving focus.
+    this.focusFrame = requestAnimationFrame(() => {
+      this.focusFrame = undefined;
+      if (
+        !this.canChange(signal) ||
+        this.sessionKey !== sessionKey ||
+        !preview.isConnected ||
+        !preview.hasAttribute("open")
+      ) {
+        return;
+      }
+      preview
+        .querySelector<HTMLElement>(`[data-comment-delete="${CSS.escape(next.id)}"]`)
+        ?.focus({ preventScroll: true });
+    });
   }
 
   private readonly syncEditorAnchor = () => {

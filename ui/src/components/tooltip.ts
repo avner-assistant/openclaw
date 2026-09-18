@@ -124,6 +124,9 @@ class Tooltip extends OpenClawLitElement {
 
   @property({ type: Number }) closeDelay = RICH_CONTENT_CLOSE_DELAY;
 
+  /** Interactive hover previews can dismiss on pointer exit even after an action took focus. */
+  @property({ type: Number }) hoverDismissDelay?: number;
+
   @property({ type: Number }) delay?: number;
 
   @property({ type: Boolean }) describe = true;
@@ -146,6 +149,7 @@ class Tooltip extends OpenClawLitElement {
   #closeTimer: number | null = null;
   #triggerHovered = false;
   #contentHovered = false;
+  #hoverExitPending = false;
   #describedBy: string | null = null;
   #descriptionCaptured = false;
   #suppressNextFocusOpen = false;
@@ -353,6 +357,7 @@ class Tooltip extends OpenClawLitElement {
   private readonly handlePointerEnter = (event: Event) => {
     if (!("pointerType" in event) || event.pointerType !== "touch") {
       this.#triggerHovered = true;
+      this.#hoverExitPending = false;
       this.clearCloseTimer();
       this.scheduleOpen();
     }
@@ -361,6 +366,7 @@ class Tooltip extends OpenClawLitElement {
   private readonly handlePointerLeave = (event: Event) => {
     if (!("pointerType" in event) || event.pointerType !== "touch") {
       this.#triggerHovered = false;
+      this.#hoverExitPending = true;
       this.#clearTimers(false);
       this.maybeClose();
     }
@@ -369,6 +375,7 @@ class Tooltip extends OpenClawLitElement {
   private readonly handleContentPointerEnter = (event: PointerEvent) => {
     if (event.pointerType !== "touch") {
       this.#contentHovered = true;
+      this.#hoverExitPending = false;
       this.clearCloseTimer();
       this.show();
     }
@@ -377,6 +384,7 @@ class Tooltip extends OpenClawLitElement {
   private readonly handleContentPointerLeave = (event: PointerEvent) => {
     if (event.pointerType !== "touch") {
       this.#contentHovered = false;
+      this.#hoverExitPending = true;
       this.maybeClose();
     }
   };
@@ -470,6 +478,9 @@ class Tooltip extends OpenClawLitElement {
     this.setAttribute("open", "");
     this.ownerDocument.addEventListener("pointerdown", this.handleDocumentDismiss, true);
     this.ownerDocument.addEventListener("focusin", this.handleDocumentDismiss, true);
+    if (this.hoverDismissDelay !== undefined) {
+      this.ownerDocument.addEventListener("pointermove", this.handleDocumentPointerMove, true);
+    }
     this.ownerDocument.defaultView?.addEventListener("keydown", this.handleWindowKeyDown, true);
   }
 
@@ -487,6 +498,19 @@ class Tooltip extends OpenClawLitElement {
     }
   };
 
+  private readonly handleDocumentPointerMove = (event: PointerEvent) => {
+    if (
+      event.pointerType !== "touch" &&
+      this.#hoverExitPending &&
+      this.#closeTimer === null &&
+      !event.composedPath().includes(this)
+    ) {
+      // A shrinking preview can leave a stationary pointer after deletion.
+      // Only an actual pointer move dismisses an action that retained focus.
+      this.maybeClose(true);
+    }
+  };
+
   private containsInteractionTarget(target: Node) {
     return this.contains(target) || this.#triggerElement?.contains(target) === true;
   }
@@ -496,6 +520,7 @@ class Tooltip extends OpenClawLitElement {
     this.removeAttribute("open");
     this.ownerDocument.removeEventListener("pointerdown", this.handleDocumentDismiss, true);
     this.ownerDocument.removeEventListener("focusin", this.handleDocumentDismiss, true);
+    this.ownerDocument.removeEventListener("pointermove", this.handleDocumentPointerMove, true);
     this.ownerDocument.defaultView?.removeEventListener("keydown", this.handleWindowKeyDown, true);
     this.#clearTimers();
     if (this.webAwesomeTooltip?.open) {
@@ -582,7 +607,10 @@ class Tooltip extends OpenClawLitElement {
     }
   }
 
-  private shouldRemainOpen() {
+  private shouldRemainOpen(pointerExit = false) {
+    if (pointerExit) {
+      return this.#triggerHovered || this.#contentHovered;
+    }
     const root = this.#triggerElement?.getRootNode();
     const activeElement =
       root instanceof ShadowRoot ? root.activeElement : this.ownerDocument.activeElement;
@@ -594,9 +622,9 @@ class Tooltip extends OpenClawLitElement {
     );
   }
 
-  private maybeClose() {
+  private maybeClose(pointerExit = false) {
     this.clearCloseTimer();
-    if (this.shouldRemainOpen()) {
+    if (this.shouldRemainOpen(pointerExit)) {
       return;
     }
     if (!this.richContentText) {
@@ -605,10 +633,10 @@ class Tooltip extends OpenClawLitElement {
     }
     this.#closeTimer = window.setTimeout(() => {
       this.#closeTimer = null;
-      if (!this.shouldRemainOpen()) {
+      if (!this.shouldRemainOpen(pointerExit)) {
         this.close();
       }
-    }, this.closeDelay);
+    }, this.hoverDismissDelay ?? this.closeDelay);
   }
 
   #clearTimers(resetHover = true) {
@@ -620,6 +648,7 @@ class Tooltip extends OpenClawLitElement {
     if (resetHover) {
       this.#triggerHovered = false;
       this.#contentHovered = false;
+      this.#hoverExitPending = false;
     }
   }
 

@@ -77,25 +77,52 @@ export function renderCommentPreviewChip(
   content: TemplateResult,
   onReveal?: () => void,
   openOnClick = false,
+  removal?: { onRemove: (event: Event) => void; disabled: boolean },
 ) {
+  const label = html`
+    <span aria-hidden="true">${icons.messageSquare}</span>
+    <span class="chat-selection-annotations__label"
+      >${t(count === 1 ? "chat.messages.annotationCount" : "chat.messages.annotationsCount", { count: String(count) })}</span
+    >
+  `;
   return html`<openclaw-tooltip
-    class="chat-comment-preview"
+    class=${removal ? "chat-comment-preview chat-comment-preview--editable" : "chat-comment-preview"}
     placement="top-start"
     auto-size
     .describe=${false}
     .openOnClick=${openOnClick}
+    .hoverDismissDelay=${removal ? 200 : undefined}
   >
     <span
       class="chat-attachment-thumb chat-attachment-thumb--file chat-selection-annotations__chip"
-      tabindex="0"
+      tabindex=${removal ? nothing : "0"}
       @pointerenter=${onReveal}
       @focusin=${onReveal}
       @click=${openOnClick ? onReveal : undefined}
     >
-      <span class="chat-attachment-file">
-        <span aria-hidden="true">${icons.messageSquare}</span>
-        ${t(count === 1 ? "chat.messages.annotationCount" : "chat.messages.annotationsCount", { count: String(count) })}
-      </span>
+      ${
+        removal
+          ? html`<button
+              type="button"
+              class="chat-attachment-file chat-selection-annotations__trigger"
+            >
+              ${label}
+            </button>`
+          : html`<span class="chat-attachment-file">${label}</span>`
+      }
+      ${
+        removal
+          ? html`<button
+              type="button"
+              class="chat-selection-annotations__remove"
+              aria-label=${t("chat.messages.removeAnnotations")}
+              ?disabled=${removal.disabled}
+              @click=${removal.onRemove}
+            >
+              ${icons.x}
+            </button>`
+          : nothing
+      }
     </span>
     <div
       slot="content"

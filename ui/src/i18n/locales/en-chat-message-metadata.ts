@@ -35,7 +35,7 @@ const enChatMessageMetadata = {
       annotationsCount: "{count} comments",
       annotations: "Comments",
       editAnnotation: "Edit comment {number}",
-      removeAnnotations: "Remove comments",
+      removeAnnotations: "Remove all comments",
       annotationSelectedText: "Highlighted passage:",
       annotationUserComment: "Your comment:",
       rewind: "Rewind",

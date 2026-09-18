@@ -30,7 +30,7 @@ async function selectText(text: Locator) {
 }
 
 suite.define(() => {
-  it("reveals sent comments by touch after reload while draft counts stay passive", async () => {
+  it("reveals draft and sent comments by touch before and after reload", async () => {
     await suite.withPage(
       { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, locale: "en-US" },
       async ({ page }) => {
@@ -47,7 +47,11 @@ suite.define(() => {
         await editor.getByRole("button", { name: "Save comment", exact: true }).tap();
         const preview = page.getByRole("region", { name: "Comments", exact: true });
         await page.locator(".chat-attachments-preview .chat-selection-annotations__chip").tap();
-        expect(await preview.isVisible()).toBe(false);
+        await expect.poll(() => preview.isVisible()).toBe(true);
+        const clear = page.getByRole("button", { name: "Remove all comments", exact: true });
+        expect(await clear.evaluate((element) => getComputedStyle(element).opacity)).toBe("1");
+        await page.locator(".agent-chat__composer-shell textarea").tap();
+        await expect.poll(() => preview.isVisible()).toBe(false);
         await page.getByRole("button", { name: "Send message", exact: true }).tap();
         const request = await gateway.waitForRequest("chat.send");
         await gateway.emitChatFinal({
