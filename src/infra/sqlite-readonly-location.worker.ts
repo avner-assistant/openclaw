@@ -7,6 +7,7 @@ import { releaseSnapshotTempDirectory } from "./sqlite-readonly-location-cleanup
 import {
   inspectSqliteSchemaHeaderInProcess,
   prepareSqliteReadOnlyLocationInProcess,
+  prepareSqliteReadOnlyLocationSyncFallbackInProcess,
   prepareSqliteReadOnlyLocationSyncInProcess,
 } from "./sqlite-readonly-location.js";
 import {
@@ -24,7 +25,11 @@ async function inspect(args: string[]): Promise<SqliteReadOnlyWorkerResult> {
   const stagingRoot = args[2];
   const agentSchemaVersionForOwnership = args[3] === undefined ? undefined : Number(args[3]);
   if (
-    (mode !== "sync" && mode !== "async" && mode !== "schema-header" && mode !== "reclaim") ||
+    (mode !== "sync" &&
+      mode !== "sync-fallback" &&
+      mode !== "async" &&
+      mode !== "schema-header" &&
+      mode !== "reclaim") ||
     !pathname
   ) {
     return {
@@ -83,7 +88,9 @@ async function inspect(args: string[]): Promise<SqliteReadOnlyWorkerResult> {
     const prepared =
       mode === "sync"
         ? prepareSqliteReadOnlyLocationSyncInProcess(pathname, stagingRoot)
-        : await prepareSqliteReadOnlyLocationInProcess(pathname, stagingRoot);
+        : mode === "sync-fallback"
+          ? await prepareSqliteReadOnlyLocationSyncFallbackInProcess(pathname, stagingRoot)
+          : await prepareSqliteReadOnlyLocationInProcess(pathname, stagingRoot);
     releaseSnapshotTempDirectory(prepared.cleanupRoot ?? path.dirname(prepared.location));
     return { ok: true, location: prepared.location };
   } catch (error) {
@@ -94,14 +101,19 @@ async function inspect(args: string[]): Promise<SqliteReadOnlyWorkerResult> {
 
 function runSession(): void {
   let busy = false;
+  let closeRequested = false;
   process.once("disconnect", () => {
     if (busy) {
       process.exit(1);
     }
   });
   process.on("message", (message: unknown) => {
-    if (message === "close" && !busy) {
-      process.disconnect?.();
+    if (message === "close") {
+      if (busy) {
+        closeRequested = true;
+      } else {
+        process.disconnect?.();
+      }
       return;
     }
     if (
@@ -114,7 +126,7 @@ function runSession(): void {
       !Number.isSafeInteger(message.id) ||
       !("args" in message) ||
       !Array.isArray(message.args) ||
-      message.args[0] !== "sync" ||
+      (message.args[0] !== "sync" && message.args[0] !== "sync-fallback") ||
       !message.args.every((arg): arg is string => typeof arg === "string")
     ) {
       process.exit(1);
@@ -126,13 +138,15 @@ function runSession(): void {
         Buffer.byteLength(JSON.stringify(inspected)) > SQLITE_READONLY_WORKER_MAX_BUFFER
           ? { ok: false, message: "exceeded its output buffer" }
           : inspected;
-      if (result.ok) {
-        busy = false;
-      }
       process.send?.({ id, result }, (error) => {
         if (error || !result.ok) {
           // A failed inspection may still own a native handle and admission.
           process.exit(1);
+          return;
+        }
+        busy = false;
+        if (closeRequested) {
+          process.disconnect?.();
         }
       });
     });

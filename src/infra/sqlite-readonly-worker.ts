@@ -256,7 +256,7 @@ function readSqliteReadOnlyWorkerValue(
 ): SqliteSchemaHeader;
 function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
-  mode: "sync" | "async",
+  mode: "sync" | "sync-fallback" | "async",
 ): string;
 function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
@@ -288,7 +288,7 @@ function readSqliteReadOnlyWorkerValue(
   if (mode === "schema-header" && "header" in result) {
     return result.header;
   }
-  if ((mode === "sync" || mode === "async") && "location" in result) {
+  if ((mode === "sync" || mode === "sync-fallback" || mode === "async") && "location" in result) {
     return result.location;
   }
   if (mode === "reclaim" && "warnings" in result) {
@@ -670,11 +670,15 @@ function runSqliteReadOnlyWorkerOnce(
   });
 }
 
-export function runSqliteReadOnlyWorkerSync(pathname: string, stagingRoot: string): string {
+export function runSqliteReadOnlyWorkerSync(
+  pathname: string,
+  stagingRoot: string,
+  mode: "sync" | "sync-fallback" = "sync",
+): string {
   const { timeoutMs, size } = readSqliteInspectionBudget("read-only snapshot", pathname);
   const result = spawnSync(
     process.execPath,
-    sqliteReadOnlyWorkerArgv(pathname, { mode: "sync", stagingRoot }),
+    sqliteReadOnlyWorkerArgv(pathname, { mode, stagingRoot }),
     {
       encoding: "utf8",
       env: sqliteReadOnlyWorkerEnv(),
@@ -696,6 +700,6 @@ export function runSqliteReadOnlyWorkerSync(pathname: string, stagingRoot: strin
       stderr: result.stderr,
       stdout: result.stdout,
     },
-    "sync",
+    mode,
   );
 }

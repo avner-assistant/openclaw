@@ -26,6 +26,7 @@ import {
 } from "../config/sessions/types.js";
 import type { OpenClawConfig } from "../config/types.js";
 import { listGatewayAgentsBasic } from "../gateway/agent-list.js";
+import type { SessionRowProjection } from "../gateway/session-row-projection.js";
 import { resolveHeartbeatSessionKey } from "../infra/heartbeat-runner-session.js";
 import { resolveHeartbeatSummariesForAgents } from "../infra/heartbeat-summary-projection.js";
 import { hasResolvableHeartbeatOwnerRoute } from "../infra/outbound/targets.js";
@@ -360,6 +361,7 @@ export async function getStatusSummary(
     sourceConfig?: OpenClawConfig;
     hostDesktopStatus?: import("../gateway/desktop/host-source.js").HostDesktopStatus;
     sessionStores?: StatusSessionStores;
+    sessionRowProjection?: SessionRowProjection;
   } = {},
 ) {
   const { includeSensitive = true, includeChannelSummary = true } = options;
@@ -480,6 +482,7 @@ export async function getStatusSummary(
       cfg,
       agentList.agents,
       includeSensitive ? STATUS_RECENT_SESSION_LIMIT : 0,
+      options.sessionRowProjection,
     ));
   const byAgent = await Promise.all(
     sessionStores.byAgent.map(async ({ agent, path, count, recent }) => ({

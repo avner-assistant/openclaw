@@ -14,6 +14,7 @@ import {
   tryAcquireSharedSqliteCoordinator,
 } from "./sqlite-coordinator.js";
 import type { PreparedSqliteReadOnlyLocation } from "./sqlite-readonly-location.types.js";
+import { prepareSingleFlightSqliteSnapshot } from "./sqlite-snapshot-single-flight.js";
 import {
   attachCoordinatorDelegate,
   attachLifecycleCoordinatorDelegate,
@@ -525,6 +526,9 @@ export function acquireStateDatabaseHandleLease(params: CoordinatorOptions) {
     sourceScope.assertCurrent();
     return sourceScope.pin();
   }
+  if (heldCoordinators.has(pathname)) {
+    throw new StateDatabaseCoordinatorContentionError("state-handles");
+  }
   ensurePrivateSqliteCoordinatorDirectory(path.dirname(pathname), "state-handles coordinator");
   const coordinator = tryAcquireSharedSqliteCoordinator(pathname, {
     busyTimeoutMs: params.busyTimeoutMs,
@@ -739,7 +743,12 @@ export function prepareStateDatabaseMutationSnapshot(databasePath: string, signa
     throw new SqliteCoordinatorError("SQLite mutation inspection scope is closed");
   }
   scope.assertCurrent();
-  const pending = scope.snapshot(signal);
+  const pending = prepareSingleFlightSqliteSnapshot(
+    databasePath,
+    "canonical-mutation",
+    (flightSignal) => scope.snapshot!(flightSignal),
+    signal,
+  );
   scope.snapshots.push(pending);
   void pending.catch(() => undefined);
   return pending;

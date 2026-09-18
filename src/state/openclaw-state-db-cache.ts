@@ -51,6 +51,7 @@ import {
 } from "./openclaw-state-db-contract.js";
 import { closeTrackedStateDatabase } from "./openclaw-state-db-handle.js";
 import { createOpenClawStateDatabaseRuntimeFailureOwner } from "./openclaw-state-db-runtime-failure.js";
+import { openClawStateSnapshotOwners } from "./openclaw-state-db-snapshot-owner.js";
 import { resolveOpenClawStateSqlitePath } from "./openclaw-state-db.paths.js";
 import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
 
@@ -226,6 +227,7 @@ function closeOpenClawStateDatabaseHandle(
     return [error];
   }
   const errors: unknown[] = [];
+  openClawStateSnapshotOwners.release(database.db);
   try {
     database.walMaintenance?.close(options);
   } catch (error) {
@@ -296,6 +298,7 @@ function publishOpenClawStateDatabase(database: OpenClawStateDatabase): OpenClaw
   databaseIdentities.set(db, identity);
   runtimeFailures.recordPublishedVersion(database);
   cachedDatabases.set(pathname, database);
+  openClawStateSnapshotOwners.register(database, () => cachedDatabases.get(pathname));
   ownMaintenanceStateDatabaseHandle(database);
   notifyOpenClawStateDatabaseLifecycle({ kind: "opened", database, identity });
   registerNodeSqliteKyselyQueryErrorHandler(db, (error) => {

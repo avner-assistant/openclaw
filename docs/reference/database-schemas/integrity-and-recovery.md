@@ -36,6 +36,20 @@ Schema compatibility preflight can read agent schema headers without a full inte
 
 Private snapshots remain necessary inside owner-held source-exclusion or canonical-mutation scopes, for incomplete WAL families whose inspection would create source sidecars, and for rollback journals requiring private recovery. Those cases use the existing snapshot owner and deadline; ordinary inspection errors do not trigger a full-copy fallback. Shared-state preflight is unchanged. `openclaw database preflight` performs the release-local shape comparison for an explicit copied file. The background verifier also scans already-open databases about once daily.
 
+Concurrent asynchronous requests for the same physical live database share one
+snapshot operation. When the canonical runtime already owns an open SQLite
+connection, that owner supplies SQLite's online backup instead of reopening or
+copying the live database family. Each caller retains an independent cleanup
+lease, and cancellation detaches only that caller while the shared operation and
+remaining leases keep their original owner and cleanup authority.
+
+Unavoidable raw copies first sample the main database and WAL for a short stable
+interval. A hard admission deadline then allows copying to proceed under sustained
+write load instead of waiting indefinitely. Source-change retries use bounded
+cancellable backoff without restarting that quiescence deadline. Snapshot debug
+telemetry contains only bounded operational metadata: operation and owner labels,
+main and WAL sizes, copied bytes, attempt, wait and duration, and outcome.
+
 Private snapshot files remain temporary artifacts: the creator registers cleanup
 before copying and publishes the finished copy by rename. Graceful shutdown
 drains existing shutdown owners and joins snapshot workers before cleanup. Cleanup
@@ -46,7 +60,10 @@ tokens for the parent and every nested worker before inspecting or removing the
 copy, independent of PID namespaces. Worker admission checks the parent's token;
 retirement is committed before handles close so a late worker cannot restart it.
 The first snapshot operation in a process reclaims abandoned copies and logs the
-copied-data byte count. Asynchronous callers run that same reclamation pass in the
+copied-data byte count. Reclamation requires verifiable inactive owner and worker
+tokens, applies a grace period to current staging directories, and stops at a
+bounded copied-byte budget. Active, recent, over-budget, or structurally unknown
+directories remain untouched. Asynchronous callers run that same reclamation pass in the
 SQLite worker, keeping directory traversal and removal off their event loop.
 Concurrent callers share the pass but can cancel their own waits independently.
 The last departing caller requests a stop after the current directory is fully
