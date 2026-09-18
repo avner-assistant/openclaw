@@ -39,6 +39,13 @@ const manifest = JSON.parse(
 ) as AnthropicManifest;
 
 describe("Anthropic plugin manifest", () => {
+  it("publishes Opus 5 and Fable 5.1", () => {
+    const models = manifest.modelCatalog?.providers?.anthropic?.models ?? [];
+    expect(models.map((model) => model.id)).toEqual(
+      expect.arrayContaining(["claude-opus-5", "claude-fable-5-1"]),
+    );
+  });
+
   it("publishes the exact Claude Sonnet 5 API contract", () => {
     const models = manifest.modelCatalog?.providers?.anthropic?.models ?? [];
     expect(models.find((model) => model.id === "claude-sonnet-5")).toEqual({

@@ -71,6 +71,25 @@ const GOOGLE_GEMINI_TEXT_MODELS: ModelDefinitionConfig[] = [
     contextWindow: 1_048_576,
     maxTokens: 65_536,
   },
+  {
+    id: "gemini-3.6-flash",
+    name: "Gemini 3.6 Flash",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: GOOGLE_GEMINI_COST,
+    contextWindow: 1_048_576,
+    maxTokens: 65_536,
+  },
+  {
+    id: "gemini-3.7-flash",
+    name: "Gemini 3.7 Flash",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: GOOGLE_GEMINI_COST,
+    contextWindow: 1_048_576,
+    maxTokens: 65_536,
+    thinkingLevelMap: { minimal: null },
+  },
 ];
 
 export function buildGoogleStaticCatalogProvider(): ModelProviderConfig {

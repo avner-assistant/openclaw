@@ -70,9 +70,12 @@ const MOCK_OPENAI_PROVIDER_ID = "mock-openai";
 const OPENAI_OUTPUT_FORMATS = ["png", "jpeg", "webp"] as const;
 const OPENAI_BACKGROUNDS = ["transparent", "opaque", "auto"] as const;
 const OPENAI_QUALITIES = ["low", "medium", "high", "auto"] as const;
+const OPENAI_IMAGE_25_MODELS = ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst"] as const;
+const OPENAI_IMAGE_25_QUALITIES = ["low", "medium", "high", "xhigh", "max", "auto"] as const;
 const MB = 1024 * 1024;
 const OPENAI_IMAGE_MODELS = [
   DEFAULT_OPENAI_IMAGE_MODEL,
+  ...OPENAI_IMAGE_25_MODELS,
   OPENAI_TRANSPARENT_BACKGROUND_IMAGE_MODEL,
   "gpt-image-1",
   "gpt-image-1-mini",
@@ -282,6 +285,12 @@ function resolveOpenAIImageRequestSize(params: {
 } {
   const requestedSize = params.requestedSize ?? DEFAULT_SIZE;
   if (!params.applyNativeLimits) {
+    return { size: requestedSize };
+  }
+  if (
+    requestedSize === "auto" &&
+    OPENAI_IMAGE_25_MODELS.some((candidate) => candidate === params.model)
+  ) {
     return { size: requestedSize };
   }
   const supportedSizes = resolveNativeOpenAIImageSizesForModel(params.model);
@@ -678,10 +687,14 @@ function createOpenAIImageGenerationProviderBase(params: {
       },
       geometry: {
         sizes: [...OPENAI_SUPPORTED_SIZES],
+        sizesByModel: Object.fromEntries(OPENAI_IMAGE_25_MODELS.map((model) => [model, []])),
       },
       output: {
         formats: [...OPENAI_OUTPUT_FORMATS],
         qualities: [...OPENAI_QUALITIES],
+        qualitiesByModel: Object.fromEntries(
+          OPENAI_IMAGE_25_MODELS.map((model) => [model, [...OPENAI_IMAGE_25_QUALITIES]]),
+        ),
         backgrounds: [...OPENAI_BACKGROUNDS],
       },
     },

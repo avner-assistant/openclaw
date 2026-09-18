@@ -12,12 +12,23 @@ describe("google provider catalog", () => {
     expect(provider.api).toBe("google-vertex");
     expect(provider.baseUrl).toBe("https://{location}-aiplatform.googleapis.com");
     expect(provider.models.map((model) => model.id)).toEqual(
-      expect.arrayContaining(["gemini-2.5-pro", "gemini-3.1-pro-preview", "gemini-3.1-flash-lite"]),
+      expect.arrayContaining([
+        "gemini-2.5-pro",
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.7-flash",
+      ]),
     );
     expect(provider.models.find((model) => model.id === "gemini-3.1-flash-lite")).toMatchObject({
       contextWindow: 1_048_576,
       maxTokens: 65_536,
       reasoning: true,
+    });
+    expect(provider.models.find((model) => model.id === "gemini-3.7-flash")).toMatchObject({
+      contextWindow: 1_048_576,
+      maxTokens: 65_536,
+      thinkingLevelMap: { minimal: null },
     });
   });
 

@@ -174,7 +174,12 @@ export default defineSingleProviderPluginEntry({
       if (!isQwenCodingPlanBaseUrl(providerConfig.baseUrl)) {
         return undefined;
       }
-      const models = providerConfig.models?.filter((model) => model.id !== QWEN_36_PLUS_MODEL_ID);
+      const models = providerConfig.models?.filter(
+        (model) =>
+          model.id !== QWEN_36_PLUS_MODEL_ID &&
+          model.id !== "qwen3.8-max" &&
+          model.id !== "qwen3.8-flash",
+      );
       return models && models.length !== providerConfig.models?.length
         ? { ...providerConfig, models }
         : undefined;

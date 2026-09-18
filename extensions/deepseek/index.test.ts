@@ -200,6 +200,7 @@ describe("deepseek provider plugin", () => {
     expect(catalogProvider.models?.map((model) => model.id)).toEqual([
       "deepseek-v4-flash",
       "deepseek-v4-pro",
+      "deepseek-v4-flash-vision-exp",
       "deepseek-chat",
       "deepseek-reasoner",
     ]);
@@ -209,6 +210,9 @@ describe("deepseek provider plugin", () => {
     expect(flashModel?.maxTokens).toBe(384_000);
     expect(flashModel?.compat?.supportsReasoningEffort).toBe(true);
     expect(flashModel?.compat?.maxTokensField).toBe("max_tokens");
+    expect(
+      catalogProvider.models?.find((model) => model.id === "deepseek-v4-flash-vision-exp"),
+    ).toMatchObject({ reasoning: true, input: ["text", "image"] });
     expect(
       catalogProvider.models?.find((model) => model.id === "deepseek-reasoner")?.reasoning,
     ).toBe(true);

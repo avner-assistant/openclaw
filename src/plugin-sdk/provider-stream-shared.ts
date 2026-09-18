@@ -720,6 +720,13 @@ export function isGoogleGemini3ThinkingLevelModel(modelId: string): boolean {
   return isGoogleGemini3ProModel(modelId) || isGoogleGemini3FlashModel(modelId);
 }
 
+function googleFlashSupportsMinimalThinking(modelId: string): boolean {
+  const match = normalizeLowercaseStringOrEmpty(modelId).match(
+    /(?:^|\/)gemini-3\.(\d+)-flash(?:-|$)/,
+  );
+  return !match || Number.parseInt(match[1] ?? "0", 10) < 7;
+}
+
 /**
  * Maps legacy numeric/semantic thinking input onto Gemini 3's provider enum.
  * @deprecated Google provider-owned stream helper; do not use from third-party plugins.
@@ -762,7 +769,7 @@ export function resolveGoogleGemini3ThinkingLevel(params: {
   switch (params.thinkingLevel) {
     case "off":
     case "minimal":
-      return "MINIMAL";
+      return googleFlashSupportsMinimalThinking(params.modelId) ? "MINIMAL" : "LOW";
     case "low":
       return "LOW";
     case "medium":
@@ -783,7 +790,7 @@ export function resolveGoogleGemini3ThinkingLevel(params: {
     return undefined;
   }
   if (params.thinkingBudget <= 0) {
-    return "MINIMAL";
+    return googleFlashSupportsMinimalThinking(params.modelId) ? "MINIMAL" : "LOW";
   }
   if (params.thinkingBudget <= 2048) {
     return "LOW";

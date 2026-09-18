@@ -41,6 +41,7 @@ describe("moonshot provider catalog", () => {
     expect(provider.api).toBe("openai-completions");
     expect(provider.models.map((model) => model.id)).toEqual([
       "kimi-k2.6",
+      "kimi-k3",
       "kimi-k2.7-code",
       "kimi-k2.5",
       "kimi-k2-thinking",
@@ -52,6 +53,12 @@ describe("moonshot provider catalog", () => {
       output: 4,
       cacheRead: 0.16,
       cacheWrite: 0,
+    });
+    expect(requireMoonshotModel(provider, "kimi-k3")).toMatchObject({
+      reasoning: true,
+      contextWindow: 1_048_576,
+      maxTokens: 1_048_576,
+      compat: { supportsReasoningEffort: true },
     });
     expect(requireMoonshotModel(provider, "kimi-k2.7-code")).toMatchObject({
       reasoning: true,

@@ -70,6 +70,15 @@ const XAI_CODE_FAST_COST = {
 
 const XAI_MODEL_CATALOG = [
   {
+    id: "grok-4.6",
+    name: "Grok 4.6",
+    reasoning: true,
+    input: ["text", "image"],
+    contextWindow: 500_000,
+    maxTokens: XAI_DEFAULT_MAX_TOKENS,
+    cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+  },
+  {
     id: "grok-build-0.1",
     name: "Grok Build 0.1",
     reasoning: true,
@@ -197,6 +206,7 @@ const XAI_MODEL_CATALOG = [
 ] as const satisfies readonly XaiCatalogEntry[];
 
 const XAI_SELECTABLE_MODEL_IDS = new Set<string>([
+  "grok-4.6",
   "grok-build-0.1",
   "grok-4.3",
   "grok-4.20-beta-latest-reasoning",
@@ -310,6 +320,7 @@ export function resolveXaiCatalogEntry(modelId: string) {
     });
   }
   if (
+    lower.startsWith("grok-4.6") ||
     lower.startsWith("grok-4.3") ||
     lower.startsWith("grok-4.20") ||
     lower.startsWith("grok-4-1") ||
@@ -320,15 +331,22 @@ export function resolveXaiCatalogEntry(modelId: string) {
       name: trimmed,
       reasoning: !lower.includes("non-reasoning"),
       input: ["text", "image"],
-      contextWindow: lower.startsWith("grok-4.3")
-        ? XAI_DEFAULT_CONTEXT_WINDOW
-        : XAI_LARGE_CONTEXT_WINDOW,
-      maxTokens: lower.startsWith("grok-4.3") ? XAI_DEFAULT_MAX_TOKENS : 30_000,
-      cost: lower.startsWith("grok-4.3")
-        ? XAI_GROK_43_COST
-        : lower.startsWith("grok-4.20")
-          ? XAI_GROK_420_COST
-          : XAI_FAST_COST,
+      contextWindow: lower.startsWith("grok-4.6")
+        ? 500_000
+        : lower.startsWith("grok-4.3")
+          ? XAI_DEFAULT_CONTEXT_WINDOW
+          : XAI_LARGE_CONTEXT_WINDOW,
+      maxTokens:
+        lower.startsWith("grok-4.6") || lower.startsWith("grok-4.3")
+          ? XAI_DEFAULT_MAX_TOKENS
+          : 30_000,
+      cost: lower.startsWith("grok-4.6")
+        ? { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }
+        : lower.startsWith("grok-4.3")
+          ? XAI_GROK_43_COST
+          : lower.startsWith("grok-4.20")
+            ? XAI_GROK_420_COST
+            : XAI_FAST_COST,
     });
   }
   if (lower.startsWith("grok-4")) {

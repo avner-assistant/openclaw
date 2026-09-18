@@ -24,6 +24,8 @@ describe("qwen provider catalog", () => {
     expect(modelIds.length).toBeGreaterThan(0);
     expect(modelIds).toContain(QWEN_DEFAULT_MODEL_ID);
     expect(modelIds).not.toContain("qwen3.6-plus");
+    expect(modelIds).not.toContain("qwen3.8-max");
+    expect(modelIds).not.toContain("qwen3.8-flash");
   });
 
   it("only advertises qwen3.6-plus on Standard endpoints", () => {
@@ -36,6 +38,9 @@ describe("qwen provider catalog", () => {
     expect(getQwenModelIds(coding)).not.toContain("qwen3.6-plus");
     expect(getQwenModelIds(codingTrailingDot)).not.toContain("qwen3.6-plus");
     expect(getQwenModelIds(standard)).toContain("qwen3.6-plus");
+    expect(getQwenModelIds(standard)).toEqual(
+      expect.arrayContaining(["qwen3.8-max", "qwen3.8-flash"]),
+    );
   });
 
   it("opts native Qwen baseUrls into streaming usage only inside the extension", () => {

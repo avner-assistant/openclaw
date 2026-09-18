@@ -55,6 +55,24 @@ function createOutput(): AssistantMessage {
 }
 
 describe("buildGoogleSimpleThinking", () => {
+  it.each([
+    ["gemini-3.6-flash", "MINIMAL"],
+    ["gemini-3.7-flash", "LOW"],
+  ])("uses the supported thinking floor for %s", (id, expectedLevel) => {
+    const flashModel = { ...model, id };
+    expect(buildGoogleSimpleThinking(flashModel, { reasoning: "minimal" })).toEqual({
+      enabled: true,
+      level: expectedLevel,
+    });
+    expect(
+      buildGoogleGenerateContentParams(
+        flashModel,
+        { messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+        { thinking: { enabled: false } },
+      ).config?.thinkingConfig,
+    ).toEqual({ thinkingLevel: expectedLevel });
+  });
+
   it("keeps thinking disabled when a non-reasoning model clamps low to off", () => {
     const nonReasoningModel = { ...model, reasoning: false };
 

@@ -6,7 +6,8 @@ import type {
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 export function isGlm52ModelId(modelId?: string | null): boolean {
-  return normalizeLowercaseStringOrEmpty(modelId).startsWith("glm-5.2");
+  const normalized = normalizeLowercaseStringOrEmpty(modelId);
+  return normalized.startsWith("glm-5.2") || normalized.startsWith("glm-5.3");
 }
 
 export function resolveThinkingProfile(

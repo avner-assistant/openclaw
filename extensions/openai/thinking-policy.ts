@@ -27,6 +27,7 @@ const OPENAI_THINKING_LEVEL_ORDER = [
 type OpenAIThinkingLevelId = (typeof OPENAI_THINKING_LEVEL_ORDER)[number];
 
 const OPENAI_CODEX_XHIGH_MODEL_IDS = [
+  "gpt-6-astra",
   "gpt-5.6",
   "gpt-5.5",
   "gpt-5.5-pro",
@@ -85,30 +86,31 @@ function buildOpenAIThinkingProfile(params: {
   const modelId = normalizeModelId(params.modelId);
   const agentRuntime = normalizeModelId(params.agentRuntime ?? "");
   const isBare = modelId === "gpt-5.6";
+  const isAstra = modelId === "gpt-6-astra";
   const isSol = modelId === "gpt-5.6-sol";
   const isTerra = modelId === "gpt-5.6-terra";
   const isLuna = modelId === "gpt-5.6-luna";
   const codexEfforts = params.compat?.supportedReasoningEfforts?.map(normalizeModelId);
   const hasDirectOpenAICompat = codexEfforts?.includes("none") === true;
   const authoritativeCodexEfforts = hasDirectOpenAICompat ? undefined : codexEfforts;
-  const fallbackCodexMax = isSol || isTerra || isLuna;
+  const fallbackCodexMax = isAstra || isSol || isTerra || isLuna;
   const codexSupportsMax = authoritativeCodexEfforts
     ? authoritativeCodexEfforts.includes("max")
     : fallbackCodexMax;
   const supportsMax =
-    modelId.startsWith("gpt-5.6") && (agentRuntime !== "codex" || codexSupportsMax);
-  const fallbackCodexUltra = isSol || isTerra;
+    (isAstra || modelId.startsWith("gpt-5.6")) && (agentRuntime !== "codex" || codexSupportsMax);
+  const fallbackCodexUltra = isAstra || isSol || isTerra;
   const codexSupportsUltra = authoritativeCodexEfforts
     ? authoritativeCodexEfforts.includes("ultra")
     : fallbackCodexUltra;
   // OpenClaw owns its logical Ultra orchestration. Native Codex owns its Ultra
   // catalog; direct API metadata must not erase the known native fallback.
   const supportsUltra =
-    (isBare || isSol || isTerra || isLuna) &&
+    (isAstra || isBare || isSol || isTerra || isLuna) &&
     (agentRuntime === "openclaw" ||
       agentRuntime === "auto" ||
       (agentRuntime === "codex" && codexSupportsUltra));
-  const defaultLevel = isSol ? "low" : isTerra || isLuna ? "medium" : undefined;
+  const defaultLevel = isAstra || isTerra || isLuna ? "medium" : isSol ? "low" : undefined;
   const fallbackLevels: ProviderThinkingProfile["levels"] = [
     ...OPENAI_THINKING_BASE_LEVELS,
     ...(matchesExactOrPrefix(params.modelId, params.xhighModelIds)

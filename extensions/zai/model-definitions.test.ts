@@ -32,6 +32,19 @@ function expectZaiModelFields(expected: ExpectedZaiModelFields) {
 }
 
 describe("zai model definitions", () => {
+  it.each([
+    ["glm-5.3", ["text"]],
+    ["glm-5.3-flash", ["text", "image"]],
+  ])("uses current GLM 5.3 metadata for %s", (id, input) => {
+    expectZaiModelFields({
+      id,
+      reasoning: true,
+      input,
+      contextWindow: 1_048_576,
+      maxTokens: 131_072,
+    });
+  });
+
   it("uses official GLM-5.2 Coding Plan metadata", () => {
     expectZaiModelFields({
       id: "glm-5.2",

@@ -75,6 +75,79 @@ describe("fal image-generation provider", () => {
     );
   });
 
+  it("publishes GPT Image 2.5 fal contracts", () => {
+    const provider = buildFalImageGenerationProvider();
+    const model = "openai/gpt-image-2.5/flare/text-to-image";
+
+    expect(provider.models).toContain(model);
+    expect(provider.models).toContain("openai/gpt-image-2.5/sunburst/edit");
+    expect(provider.capabilities.edit.maxInputImagesByModel?.[model]).toBe(16);
+    expect(provider.capabilities.geometry?.sizesByModel?.[model]).toEqual([]);
+    expect(provider.capabilities.geometry?.resolutionsByModel?.[model]).toEqual([]);
+    expect(provider.capabilities.output?.formatsByModel?.[model]).toEqual(["png", "jpeg", "webp"]);
+    expect(provider.capabilities.output?.qualitiesByModel?.[model]).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "auto",
+    ]);
+    expect(provider.capabilities.output?.backgroundsByModel?.[model]).toEqual([
+      "transparent",
+      "opaque",
+      "auto",
+    ]);
+  });
+
+  it("generates with GPT Image 2.5 fal options", async () => {
+    vi.spyOn(providerAuth, "resolveApiKeyForProvider").mockResolvedValue({
+      apiKey: "fal-test-key",
+      source: "env",
+      mode: "api-key",
+    });
+    setFalFetchGuardForTesting(fetchWithSsrFGuardMock);
+    fetchWithSsrFGuardMock
+      .mockResolvedValueOnce({
+        response: new Response(
+          JSON.stringify({ images: [{ url: "https://v3.fal.media/files/example/flare.webp" }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+        release: vi.fn(async () => {}),
+      })
+      .mockResolvedValueOnce({
+        response: new Response(Buffer.from("webp-data"), {
+          status: 200,
+          headers: { "content-type": "image/webp" },
+        }),
+        release: vi.fn(async () => {}),
+      });
+
+    await buildFalImageGenerationProvider().generateImage({
+      provider: "fal",
+      model: "openai/gpt-image-2.5/flare/text-to-image",
+      prompt: "draw a release badge",
+      cfg: {},
+      size: "1536x864",
+      quality: "xhigh",
+      outputFormat: "webp",
+      background: "transparent",
+    });
+
+    expectFalJsonPost({
+      call: 1,
+      url: "https://fal.run/openai/gpt-image-2.5/flare/text-to-image",
+      body: {
+        prompt: "draw a release badge",
+        image_size: { width: 1536, height: 864 },
+        num_images: 1,
+        output_format: "webp",
+        quality: "xhigh",
+        background: "transparent",
+      },
+    });
+  });
+
   it("generates image buffers from the fal sync API", async () => {
     vi.spyOn(providerAuth, "resolveApiKeyForProvider").mockResolvedValue({
       apiKey: "fal-test-key",

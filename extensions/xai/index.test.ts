@@ -108,6 +108,7 @@ describe("xai provider plugin", () => {
     const fetchGuard: LiveModelCatalogFetchGuard = vi.fn(async () => ({
       response: Response.json({
         data: [
+          { id: "grok-4.6", object: "model" },
           { id: "grok-4.3", object: "model" },
           { id: "not-in-manifest", object: "model" },
         ],
@@ -123,6 +124,7 @@ describe("xai provider plugin", () => {
 
     expect(provider.apiKey).toBe("xai-key");
     expect(provider.models.map((model) => model.id)).toContain("grok-4.3");
+    expect(provider.models.map((model) => model.id)).toContain("grok-4.6");
     expect(provider.models.map((model) => model.id)).not.toContain("not-in-manifest");
     const fetchParams = vi.mocked(fetchGuard).mock.calls[0]?.[0];
     expect(fetchParams?.url).toBe("https://api.x.ai/v1/models");

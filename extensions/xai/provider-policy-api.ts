@@ -12,8 +12,16 @@ export function resolveThinkingProfile(
   if (ctx.provider !== "xai" || !reasoning) {
     return { levels: [{ id: "off" }], defaultLevel: "off" };
   }
+  const isGrok46 = ctx.modelId === "grok-4.6" || ctx.modelId.startsWith("grok-4.6-");
   return {
-    levels: [{ id: "off" }, { id: "minimal" }, { id: "low" }, { id: "medium" }, { id: "high" }],
+    levels: [
+      { id: "off" },
+      { id: "minimal" },
+      { id: "low" },
+      { id: "medium" },
+      { id: "high" },
+      ...(isGrok46 ? ([{ id: "xhigh" }] as const) : []),
+    ],
     defaultLevel: "low",
   };
 }

@@ -262,6 +262,14 @@ describe("buildOpenAIProvider", () => {
     );
     expect(OPENAI_DEFAULT_MODEL).toBe("openai/gpt-5.6");
     expect(OPENAI_CODEX_DEFAULT_MODEL).toBe("openai/gpt-5.6-sol");
+    expect(
+      result.providers.openai?.models.find((model) => model.id === "gpt-6-astra"),
+    ).toMatchObject({
+      contextWindow: 1_050_000,
+      contextTokens: 272_000,
+      maxTokens: 128_000,
+      thinkingLevelMap: { off: null, minimal: "low", xhigh: "xhigh", max: "max" },
+    });
   });
 
   it("scopes the OpenAI API-key catalog to the OpenAI provider id", async () => {
@@ -727,6 +735,7 @@ describe("buildOpenAIProvider", () => {
     expect(provider.auth).toBe("oauth");
     expect(provider.baseUrl).toBe("https://chatgpt.com/backend-api/codex");
     expect(provider.models.length).toBeGreaterThan(0);
+    expect(provider.models.map((model) => model.id)).not.toContain("gpt-6-astra");
     expect(provider.models.map((model) => model.id)).not.toContain("gpt-5.6");
     expect(provider.models.find((model) => model.id === "gpt-5.6-sol")).toMatchObject({
       contextWindow: 372_000,
@@ -1194,63 +1203,85 @@ describe("buildOpenAIProvider", () => {
 
   it.each([
     {
+      id: "gpt-6-astra",
+      contextTokens: 272_000,
+      cost: {
+        input: 10,
+        output: 50,
+        cacheRead: 1,
+        cacheWrite: 12.5,
+        tieredPricing: [
+          { range: [0, 272_001], input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+          { range: [272_001], input: 20, output: 75, cacheRead: 2, cacheWrite: 25 },
+        ],
+      },
+      thinkingLevelMap: { off: null, minimal: "low", xhigh: "xhigh", max: "max" },
+    },
+    {
       id: "gpt-5.6",
+      contextTokens: 1_050_000,
       cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
       thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
     },
     {
       id: "gpt-5.6-sol",
+      contextTokens: 1_050_000,
       cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 },
       thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
     },
     {
       id: "gpt-5.6-terra",
+      contextTokens: 1_050_000,
       cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 3.125 },
       thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
     },
     {
       id: "gpt-5.6-luna",
+      contextTokens: 1_050_000,
       cost: { input: 1, output: 6, cacheRead: 0.1, cacheWrite: 1.25 },
       thinkingLevelMap: { off: "none", xhigh: "xhigh", max: "max" },
     },
-  ])("resolves $id locally with direct API metadata", ({ id, cost, thinkingLevelMap }) => {
-    const provider = buildOpenAIProvider();
+  ])(
+    "resolves $id locally with direct API metadata",
+    ({ id, contextTokens, cost, thinkingLevelMap }) => {
+      const provider = buildOpenAIProvider();
 
-    const model = provider.resolveDynamicModel?.({
-      provider: "openai",
-      modelId: id,
-      modelRegistry: {
-        find: (_provider: string, templateId: string) =>
-          templateId === "gpt-5.5"
-            ? {
-                id: templateId,
-                name: "GPT-5.5",
-                provider: "openai",
-                api: "openai-responses",
-                baseUrl: "https://api.openai.com/v1",
-                reasoning: true,
-                input: ["text", "image"],
-                cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
-                contextWindow: 1_000_000,
-                contextTokens: 272_000,
-                maxTokens: 128_000,
-              }
-            : null,
-      } as never,
-    } as never);
+      const model = provider.resolveDynamicModel?.({
+        provider: "openai",
+        modelId: id,
+        modelRegistry: {
+          find: (_provider: string, templateId: string) =>
+            templateId === "gpt-5.5"
+              ? {
+                  id: templateId,
+                  name: "GPT-5.5",
+                  provider: "openai",
+                  api: "openai-responses",
+                  baseUrl: "https://api.openai.com/v1",
+                  reasoning: true,
+                  input: ["text", "image"],
+                  cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+                  contextWindow: 1_000_000,
+                  contextTokens: 272_000,
+                  maxTokens: 128_000,
+                }
+              : null,
+        } as never,
+      } as never);
 
-    expectFields(model, {
-      id,
-      provider: "openai",
-      api: "openai-responses",
-      baseUrl: "https://api.openai.com/v1",
-      contextWindow: 1_050_000,
-      contextTokens: 1_050_000,
-      maxTokens: 128_000,
-      cost,
-      thinkingLevelMap,
-    });
-  });
+      expectFields(model, {
+        id,
+        provider: "openai",
+        api: "openai-responses",
+        baseUrl: "https://api.openai.com/v1",
+        contextWindow: 1_050_000,
+        contextTokens,
+        maxTokens: 128_000,
+        cost,
+        thinkingLevelMap,
+      });
+    },
+  );
 
   it("resolves gpt-5.5-pro locally", () => {
     const provider = buildOpenAIProvider();

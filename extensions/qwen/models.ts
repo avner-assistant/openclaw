@@ -19,6 +19,7 @@ export const QWEN_OAUTH_BASE_URL = "https://portal.qwen.ai/v1";
 
 export const QWEN_DEFAULT_MODEL_ID = "qwen3.5-plus";
 export const QWEN_36_PLUS_MODEL_ID = "qwen3.6-plus";
+const QWEN_STANDARD_ONLY_MODEL_IDS = new Set(["qwen3.6-plus", "qwen3.8-max", "qwen3.8-flash"]);
 export const QWEN_DEFAULT_COST = {
   input: 0,
   output: 0,
@@ -46,6 +47,37 @@ export const QWEN_MODEL_CATALOG: ReadonlyArray<ModelDefinitionConfig> = [
     cost: QWEN_DEFAULT_COST,
     contextWindow: 1_000_000,
     maxTokens: 65_536,
+  },
+  {
+    id: "qwen3.8-max",
+    name: "qwen3.8-max",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: QWEN_DEFAULT_COST,
+    contextWindow: 1_000_000,
+    maxTokens: 131_072,
+    thinkingLevelMap: { minimal: "low", high: "xhigh", max: "xhigh" },
+    compat: {
+      codeMode: "capable",
+      supportsReasoningEffort: true,
+      supportedReasoningEfforts: ["low", "medium", "xhigh"],
+      reasoningEffortMap: { minimal: "low", high: "xhigh", max: "xhigh" },
+    },
+  },
+  {
+    id: "qwen3.8-flash",
+    name: "qwen3.8-flash",
+    reasoning: true,
+    input: ["text", "image"],
+    cost: QWEN_DEFAULT_COST,
+    contextWindow: 1_000_000,
+    maxTokens: 131_072,
+    thinkingLevelMap: { minimal: "low", high: "xhigh", max: "xhigh" },
+    compat: {
+      supportsReasoningEffort: true,
+      supportedReasoningEfforts: ["low", "medium", "xhigh"],
+      reasoningEffortMap: { minimal: "low", high: "xhigh", max: "xhigh" },
+    },
   },
   {
     id: "qwen3-max-2026-01-23",
@@ -137,7 +169,7 @@ export function buildQwenModelCatalogForBaseUrl(
 ): ReadonlyArray<ModelDefinitionConfig> {
   return isQwen36PlusSupportedBaseUrl(baseUrl)
     ? QWEN_MODEL_CATALOG
-    : QWEN_MODEL_CATALOG.filter((model) => model.id !== QWEN_36_PLUS_MODEL_ID);
+    : QWEN_MODEL_CATALOG.filter((model) => !QWEN_STANDARD_ONLY_MODEL_IDS.has(model.id));
 }
 
 export function isNativeQwenBaseUrl(baseUrl: string | undefined): boolean {

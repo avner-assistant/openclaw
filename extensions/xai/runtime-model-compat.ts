@@ -1,5 +1,5 @@
 // Xai plugin module implements runtime model compat behavior.
-// Reasoning effort is configurable only for grok-4.3*; encrypted reasoning include/replay is
+// Reasoning effort is configurable for grok-4.3* and grok-4.6*; encrypted reasoning include/replay is
 // handled separately in stream.ts for all reasoning-capable xAI models.
 import { applyXaiModelCompat } from "./model-compat.js";
 
@@ -32,6 +32,11 @@ const XAI_REASONING_EFFORTS = {
 } satisfies NonNullable<XaiRuntimeModelCompat["thinkingLevelMap"]>;
 
 const XAI_SUPPORTED_REASONING_EFFORTS = ["low", "medium", "high"] as const;
+const XAI_GROK_46_REASONING_EFFORTS = {
+  ...XAI_REASONING_EFFORTS,
+  xhigh: "xhigh",
+} satisfies NonNullable<XaiRuntimeModelCompat["thinkingLevelMap"]>;
+const XAI_GROK_46_SUPPORTED_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
 function normalizeXaiCompatModelId(id: unknown): string {
   return typeof id === "string" ? id.trim().toLowerCase() : "";
@@ -39,14 +44,25 @@ function normalizeXaiCompatModelId(id: unknown): string {
 
 function supportsConfigurableXaiReasoningEffort(model: XaiRuntimeModelCompat): boolean {
   const id = normalizeXaiCompatModelId(model.id);
-  return model.reasoning === true && (id === "grok-4.3" || id.startsWith("grok-4.3-"));
+  return (
+    model.reasoning === true &&
+    (id === "grok-4.3" ||
+      id.startsWith("grok-4.3-") ||
+      id === "grok-4.6" ||
+      id.startsWith("grok-4.6-"))
+  );
 }
 
 function resolveXaiReasoningEffortCompat(model: XaiRuntimeModelCompat): Record<string, unknown> {
   if (supportsConfigurableXaiReasoningEffort(model)) {
+    const id = normalizeXaiCompatModelId(model.id);
     return {
       supportsReasoningEffort: true,
-      supportedReasoningEfforts: [...XAI_SUPPORTED_REASONING_EFFORTS],
+      supportedReasoningEfforts: [
+        ...(id === "grok-4.6" || id.startsWith("grok-4.6-")
+          ? XAI_GROK_46_SUPPORTED_REASONING_EFFORTS
+          : XAI_SUPPORTED_REASONING_EFFORTS),
+      ],
     };
   }
   return { supportsReasoningEffort: false };
@@ -57,6 +73,7 @@ export function applyXaiRuntimeModelCompat<T extends XaiRuntimeModelCompat>(
 ): T & { compat: Record<string, unknown>; thinkingLevelMap: XaiThinkingLevelMap } {
   const withCompat = applyXaiModelCompat(model);
   const supportsReasoningEffort = supportsConfigurableXaiReasoningEffort(withCompat);
+  const modelId = normalizeXaiCompatModelId(withCompat.id);
   const existingCompat =
     withCompat.compat && typeof withCompat.compat === "object"
       ? (withCompat.compat as Record<string, unknown>)
@@ -69,7 +86,11 @@ export function applyXaiRuntimeModelCompat<T extends XaiRuntimeModelCompat>(
     },
     thinkingLevelMap: {
       ...withCompat.thinkingLevelMap,
-      ...(supportsReasoningEffort ? XAI_REASONING_EFFORTS : XAI_UNSUPPORTED_REASONING_EFFORTS),
+      ...(supportsReasoningEffort
+        ? modelId === "grok-4.6" || modelId.startsWith("grok-4.6-")
+          ? XAI_GROK_46_REASONING_EFFORTS
+          : XAI_REASONING_EFFORTS
+        : XAI_UNSUPPORTED_REASONING_EFFORTS),
     },
   };
 }

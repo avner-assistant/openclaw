@@ -4,7 +4,6 @@ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/r
 import { getEnvApiKey } from "../env-api-keys.js";
 import { getAiTransportHost } from "../host.js";
 import type {
-  CacheRetention,
   Context,
   Model,
   OpenAIResponsesCompat,
@@ -17,7 +16,10 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { resolveCacheRetention } from "./cache-retention.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.js";
+import {
+  clampOpenAIPromptCacheKey,
+  resolveOpenAIResponsesCacheParams,
+} from "./openai-prompt-cache.js";
 import {
   applyCommonResponsesParams,
   convertResponsesMessages,
@@ -38,13 +40,6 @@ function getCompat(model: Model<"openai-responses">): ResolvedOpenAIResponsesCom
     sendSessionIdHeader: model.compat?.sendSessionIdHeader ?? true,
     supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
   };
-}
-
-function getPromptCacheRetention(
-  compat: ResolvedOpenAIResponsesCompat,
-  cacheRetention: CacheRetention,
-): "24h" | undefined {
-  return cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined;
 }
 
 function formatOpenAIResponsesError(error: unknown): string {
@@ -201,7 +196,7 @@ function buildParams(
       cacheRetention === "none"
         ? undefined
         : clampOpenAIPromptCacheKey(options?.promptCacheKey ?? options?.sessionId),
-    prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention),
+    ...resolveOpenAIResponsesCacheParams(model, cacheRetention, compat.supportsLongCacheRetention),
     store: false,
   };
 

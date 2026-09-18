@@ -21,7 +21,11 @@ export function buildDeepSeekModelDefinition(
   };
 }
 
-const DEEPSEEK_V4_MODEL_IDS = new Set(["deepseek-v4-flash", "deepseek-v4-pro"]);
+const DEEPSEEK_V4_MODEL_IDS = new Set([
+  "deepseek-v4-flash",
+  "deepseek-v4-pro",
+  "deepseek-v4-flash-vision-exp",
+]);
 
 export function isDeepSeekV4ModelId(modelId: string): boolean {
   return DEEPSEEK_V4_MODEL_IDS.has(modelId.toLowerCase());
