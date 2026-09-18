@@ -245,7 +245,14 @@ openclaw-chat-comment-pins {
 }
 
 .chat-comment-preview--editable .chat-comment-preview__item {
+  padding: 8px 10px;
+  padding-inline-start: 38px;
   border-radius: var(--radius-md);
+}
+
+.chat-comment-preview--editable .chat-comment-preview__item::before {
+  inset-block-start: 8px;
+  inset-inline-start: 10px;
 }
 
 .chat-comment-preview--editable .chat-comment-preview__item:is(:hover, :focus-within) {
@@ -253,6 +260,8 @@ openclaw-chat-comment-pins {
 }
 
 .chat-comment-preview--editable .chat-comment-preview__actions {
+  inset-block-start: 8px;
+  inset-inline-end: 10px;
   opacity: 0.65;
 }
 
