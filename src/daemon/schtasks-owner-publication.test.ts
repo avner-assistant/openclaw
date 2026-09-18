@@ -180,13 +180,27 @@ it.each(["snapshot", "per-pid"])(
         hints: [],
       });
       spawnSync.mockImplementation((command, args) => {
-        if (command.toLowerCase().endsWith("taskkill.exe")) {
+        const executable = command.toLowerCase();
+        if (executable.endsWith("taskkill.exe")) {
           forced = args?.includes("/F") ?? false;
-          legacy.release();
+          if (forced) {
+            legacy.release();
+          }
           return {
             pid: 0,
             output: [null, "", ""],
             stdout: "",
+            stderr: "",
+            status: 0,
+            signal: null,
+          };
+        }
+        if (executable.endsWith("tasklist.exe")) {
+          const output = forced ? "No tasks" : '"node.exe","4242","Console","1","1 K"';
+          return {
+            pid: 0,
+            output: [null, output, ""],
+            stdout: output,
             stderr: "",
             status: 0,
             signal: null,
@@ -218,7 +232,7 @@ it.each(["snapshot", "per-pid"])(
       });
       try {
         await expect(terminateScheduledTaskGatewayListeners(env)).resolves.toEqual([4242]);
-        expect(taskkillPids()).toEqual([4242]);
+        expect(taskkillPids()).toEqual([4242, 4242]);
         const successor = acquireGatewayLifecycleCoordinator({ databasePath });
         successor.release();
       } finally {
