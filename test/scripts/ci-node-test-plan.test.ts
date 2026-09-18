@@ -1585,7 +1585,13 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
             "retained ordinary group",
           );
           if (usesTwoWorkerPacking(originalHybridJob)) {
-            expect(retained).toEqual({
+            expect({
+              ...retained,
+              env: {
+                OPENCLAW_VITEST_MAX_WORKERS: shard.env?.OPENCLAW_VITEST_MAX_WORKERS,
+                ...retained.env,
+              },
+            }).toEqual({
               ...original,
               env: { OPENCLAW_VITEST_MAX_WORKERS: "2", ...original.env },
             });
@@ -4042,6 +4048,19 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         expectTimingFamilies(promoted, beforeInherited);
         expect(policies(promoted, beforeInherited)).toEqual(policies(before, beforeInherited));
         expect(recipient.groups.map((group) => group.timing_key)).toEqual(keys);
+        recipient.env = { ...recipient.env, OPENCLAW_VITEST_MAX_WORKERS: "2" };
+        for (const group of recipient.groups) {
+          const original = beforeInherited.get(group.shard_name);
+          if (original) {
+            group.env = original.env;
+          }
+        }
+        expectTimingFamilies(promoted, beforeInherited);
+        expect(policies(promoted, beforeInherited)).toEqual(policies(before, beforeInherited));
+        delete recipient.env.OPENCLAW_VITEST_MAX_WORKERS;
+        for (const group of recipient.groups) {
+          group.env = { OPENCLAW_VITEST_MAX_WORKERS: "2", ...group.env };
+        }
         const hosted = expectDefined(
           recipient.groups.find(
             (group) => group.timing_key && beforeInherited.has(group.shard_name),
