@@ -827,6 +827,8 @@ describe("Models provider login", () => {
       expect(controller.pageActions.connectDisabled).toBe(false);
       await controller.pageActions.onConnect();
       render(controller.render(), container);
+      const modal = container.querySelector("openclaw-modal-dialog")!;
+      expect(modal.isConnected).toBe(true);
       expect(providerChoices(container)).toEqual([]);
       expect(controller.busy).toBe(true);
       container.querySelector<HTMLButtonElement>("[data-models-login-discover]")!.click();
@@ -839,6 +841,9 @@ describe("Models provider login", () => {
       ).toBe(false);
       render(controller.render(), container);
       expect(container.querySelector("[data-models-login-search]")).toBeNull();
+      // Discovery can replace the picker before its first Lit update finishes.
+      await modal.updateComplete;
+      expect(document.openClawModalLayers?.has(modal)).toBe(false);
     },
   );
 });

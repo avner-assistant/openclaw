@@ -11,7 +11,6 @@ import { applicationContext, type ApplicationContext } from "../../app/context.t
 import { hasOperatorAdminAccess } from "../../app/operator-access.ts";
 import { t } from "../../i18n/index.ts";
 import { isGatewayMethodAdvertised } from "../../lib/gateway-methods.ts";
-import { resolveScrollBehavior } from "../../lib/scroll-behavior.ts";
 import { readSessionDefaults } from "../../lib/sessions/session-key.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
@@ -30,10 +29,11 @@ import {
   type ModelSetupPrepareOption,
   preparedModelActivation,
 } from "./prepare-options.ts";
-import { manualProviderActivation } from "./provider-picker.ts";
+import { focusManualProviderInput, manualProviderActivation } from "./provider-picker.ts";
 import { createModelSetupVerifyTask, detectModelSetup } from "./rpc.ts";
 import {
   activationTargetId,
+  preparedModelPageState,
   updateModelSetupWizardDraft,
   mapActivationResult,
   type ModelSetupActivationState,
@@ -438,16 +438,6 @@ export class ModelSetupPage extends OpenClawLightDomElement {
     this.manualError = null;
   }
 
-  private async useManualProvider(providerId: string): Promise<void> {
-    this.selectManualProvider(providerId);
-    await this.updateComplete;
-    const input = this.renderRoot.querySelector<HTMLInputElement>(
-      '.model-setup__manual input[type="password"]',
-    );
-    input?.scrollIntoView?.({ block: "center", behavior: resolveScrollBehavior() });
-    input?.focus();
-  }
-
   private async handleWizardDone({
     startMethod,
     preparedModelRef,
@@ -497,15 +487,7 @@ export class ModelSetupPage extends OpenClawLightDomElement {
       return;
     }
     if (prepareOption) {
-      // Preparation can persist an unverified model. Hide only its role;
-      // utility setup must not erase the existing primary from the ready surface.
-      this.pageState = {
-        phase: "ready",
-        result:
-          prepareOption.modelTarget === "utility"
-            ? { ...result, utilityModel: undefined, setupModel: undefined }
-            : { ...result, configuredModel: undefined, setupComplete: false },
-      };
+      this.pageState = preparedModelPageState(result, prepareOption.modelTarget);
       const candidate = findPreparedModelCandidate(result, prepareOption.id);
       if (!candidate) {
         this.wizard.fail(
@@ -721,7 +703,10 @@ export class ModelSetupPage extends OpenClawLightDomElement {
         );
       },
       onManualProviderChange: (providerId) => this.selectManualProvider(providerId),
-      onUseManualProvider: (providerId) => void this.useManualProvider(providerId),
+      onUseManualProvider: (providerId) => {
+        this.selectManualProvider(providerId);
+        void focusManualProviderInput(this);
+      },
       onManualApiKeyChange: (apiKey) => {
         this.manualApiKey = apiKey;
         this.manualError = null;

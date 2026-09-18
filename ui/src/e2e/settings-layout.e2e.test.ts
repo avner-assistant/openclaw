@@ -11,6 +11,7 @@ import {
   createControlUiE2eContextOptions,
   createControlUiE2eSuite,
 } from "./control-ui-e2e-suite.test-support.ts";
+import { openModelSetup } from "./model-setup.test-support.ts";
 
 const suite = createControlUiE2eSuite({
   name: "Control UI settings layout mocked Gateway E2E",
@@ -276,12 +277,13 @@ suite.define(() => {
             : page.locator(".agent-chat__composer-combobox textarea");
           await ready.waitFor();
           if (isSettings) {
-            for (const copy of settingsOnlyCopy) {
-              expect(settingsScripts.join("\n")).toContain(copy);
-            }
+            expect(settingsScripts.join("\n")).toContain(settingsOnlyCopy[0]);
             expect(await page.locator(".model-providers__defaults").textContent()).toContain(
               "Utility Model",
             );
+            await openModelSetup(page);
+            await page.getByText(/Find existing connections or prepare a local model/).waitFor();
+            expect(settingsScripts.join("\n")).toContain(settingsOnlyCopy[1]);
           } else {
             for (const copy of settingsOnlyCopy) {
               expect(startupScripts.join("\n")).not.toContain(copy);

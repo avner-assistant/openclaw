@@ -119,8 +119,7 @@ describe("ModelSetupPage first-run activation ownership", () => {
           page.querySelector<HTMLButtonElement>('[data-auth-choice="provider-login"] button')!
             .disabled,
         ).toBe(true);
-        const deadline = JSON.parse(receipt!).deadlineMs;
-        vi.spyOn(Date, "now").mockReturnValue(deadline + 1);
+        vi.spyOn(Date, "now").mockReturnValue(JSON.parse(receipt!).deadlineMs + 1);
         checkAgain().click();
         await waitForFast(() =>
           expect(

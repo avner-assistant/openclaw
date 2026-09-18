@@ -356,7 +356,7 @@ suite.define(() => {
       expect(pageErrors).toEqual([]);
 
       if (captureUiProofEnabled) {
-        await page.locator("openclaw-model-setup-page").screenshot({
+        await page.screenshot({
           animations: "disabled",
           path: path.join(artifactDir, "00-reconnected-model-visible.png"),
         });
