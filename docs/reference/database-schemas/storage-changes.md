@@ -332,6 +332,13 @@ A cached reader records shared maintenance ownership only after the worker enter
 its schema-validated query callback, including when that query later fails.
 Startup and schema refusals do not transfer ownership.
 
+Node-host configuration loads for connection, runner startup, and node-only status
+use the same independent read-only worker. Both readers preserve missing-store
+noncreation and existing JSON, metadata, and configuration validation. They capture
+the selected state environment before waiting and recheck retired-file refusal on
+that original root before accepting the worker reply. Configuration replacement
+retains its synchronous transaction owner.
+
 Model-context reads and session transcript preparation use the session-transcript
 worker with separate bounded queues. Background preparation cannot occupy the
 foreground context queue. Session exports read events, statistics, and session
