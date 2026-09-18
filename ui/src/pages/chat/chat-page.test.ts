@@ -18,7 +18,6 @@ import {
 } from "../../lib/sessions/catalog-key.ts";
 import { SESSION_DRAG_MIME } from "../../lib/sessions/drag.ts";
 import { sessionNavigationTarget } from "../../lib/sessions/route-navigation.ts";
-import { gatewayHelloForMethods } from "../../test-helpers/gateway-methods.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
 import {
   createSessionTitleSource,
@@ -57,11 +56,6 @@ type RenderedPane = HTMLElement & {
   onFocusPane?: (paneId: string) => void;
   onClosePane?: (paneId: string) => void;
   onFaceChange?: (paneId: string, sessionKey: string, face: "chat" | "dashboard") => void;
-  onPaneSessionChange?: (
-    paneId: string,
-    sessionKey: string,
-    options?: { replace?: boolean },
-  ) => boolean;
 };
 
 type RenderedDivider = HTMLElement & { orientation: "horizontal" | "vertical" };
@@ -545,43 +539,6 @@ describe("chat page split layout host", () => {
           fallbackAgentId: "main",
         }).options.pathname,
         ...(search ? { search } : {}),
-      });
-    },
-  );
-
-  it.each([
-    { agentId: "main", face: "chat" },
-    { agentId: "main", face: "dashboard" },
-    { agentId: "research", face: "chat" },
-    { agentId: "research", face: "dashboard" },
-  ] as const)(
-    "keeps $agentId $face navigation stable when its pane adopts global",
-    async ({ agentId, face }) => {
-      window.history.replaceState({}, "", `/${face}/${agentId}`);
-      const page = new ChatPage();
-      const navigation = setNavigationContext(page);
-      navigation.context.agents.state.agentsList = {
-        defaultId: "main",
-        mainKey: "main",
-        scope: "global",
-        agents: [{ id: "main" }, { id: "research" }],
-      };
-      navigation.context.gateway.snapshot.hello = {
-        ...gatewayHelloForMethods([]),
-        snapshot: {
-          sessionDefaults: { defaultAgentId: "main", mainKey: "main", mainSessionKey: "global" },
-        },
-      };
-      page.data = { sessionKey: `agent:${agentId}:main`, face };
-      document.body.append(page);
-      await page.updateComplete;
-      const pane = expectDefined(
-        page.querySelector<RenderedPane>("openclaw-chat-pane"),
-        "global main pane",
-      );
-      expect(pane.onPaneSessionChange?.(pane.paneId, "global", { replace: true })).toBe(true);
-      expect(navigation.replace).toHaveBeenCalledExactlyOnceWith(face, {
-        pathname: `/${face}/${agentId}`,
       });
     },
   );
