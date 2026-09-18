@@ -9,10 +9,7 @@ import {
 import type { ModelCatalogEntry } from "../agents/model-catalog.types.js";
 import { resolveThinkingDefault } from "../agents/model-thinking-default.js";
 import type { LoadPreparedModelCatalogParams } from "../agents/prepared-model-catalog.js";
-import { setPreparedModelRuntimeAuthStore } from "../agents/prepared-model-runtime-auth.js";
-import type { PreparedModelRuntimeSnapshot } from "../agents/prepared-model-runtime.types.js";
 import { createEmbeddedCallGateway } from "../agents/tools/embedded-gateway-stub.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isEmbeddedMode, setEmbeddedMode } from "../infra/embedded-mode.js";
 import {
   clearEmbeddedPluginApprovalBroker,
@@ -22,7 +19,6 @@ import {
   clearEmbeddedQuestionBroker,
   getEmbeddedQuestionBroker,
 } from "../infra/embedded-question-broker.js";
-import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import { defaultRuntime } from "../runtime.js";
 import { AGENT_HARNESS_SESSION_KEY_RESERVED_MESSAGE } from "../sessions/agent-harness-session-key.js";
@@ -31,7 +27,10 @@ import { withEnvAsync } from "../test-utils/env.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import type { EmbeddedTuiBackend as EmbeddedTuiBackendType } from "./embedded-backend.js";
 import { registerEmbeddedBackendStreamTests } from "./embedded-backend.stream.test-support.js";
-import { registerEmbeddedModelCatalogTests } from "./embedded-model-catalog.test-support.js";
+import {
+  registerEmbeddedModelCatalogTests,
+  withEmbeddedModelCatalogOwnerFixture,
+} from "./embedded-model-catalog.test-support.js";
 import type { TuiModelChoice } from "./tui-backend.js";
 
 type EmbeddedAgentResult = {
@@ -103,41 +102,7 @@ const buildModelsListResultMock = vi.fn(
     >[0],
   ): Promise<{ models: TuiModelChoice[] }> => ({ models: [] }),
 );
-const withPreparedModelCatalogOwnerMock = vi.fn(
-  async (
-    params: LoadPreparedModelCatalogParams,
-    read: (snapshot: PreparedModelRuntimeSnapshot) => Promise<unknown>,
-  ) => {
-    const config: OpenClawConfig = params.config ?? {};
-    const agentId = params.agentId ?? "main";
-    let active = true;
-    const snapshot: PreparedModelRuntimeSnapshot = {
-      catalogOwner: { agentId, workspaceDir: "/tmp/tui-catalog-workspace" },
-      agentId,
-      agentDir: "/tmp/tui-catalog-agent",
-      activeProjectKeys: [],
-      config,
-      observationConfig: config,
-      isCurrent: () => active,
-      authModes: {},
-      metadataSnapshot: createPluginMetadataSnapshotFixture(),
-      allowGatewaySubagentBinding: false,
-      modelCatalog: { entries: [], routeVariants: [] },
-      configuredRuntimeModels: [],
-      findConfiguredRuntimeModel: () => undefined,
-      inlineProviderModels: [],
-      createStores() {
-        throw new Error("Catalog projection must not create execution stores");
-      },
-    };
-    setPreparedModelRuntimeAuthStore(snapshot, { version: 1, profiles: {} });
-    try {
-      return await read(snapshot);
-    } finally {
-      active = false;
-    }
-  },
-);
+const withPreparedModelCatalogOwnerMock = vi.fn(withEmbeddedModelCatalogOwnerFixture);
 const readChatHistoryPageMock = vi.fn(
   async (_params?: unknown): Promise<{ messages: unknown[] }> => ({
     messages: [],

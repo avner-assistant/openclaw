@@ -21,7 +21,10 @@ import {
   replacePersistedPluginModelCatalogs,
 } from "../plugin-model-catalog.js";
 import type { PreparedModelRuntimeSnapshot } from "../prepared-model-runtime.owner.js";
-import { guardModelFixtureAuth } from "./model.fixture.test-support.js";
+import {
+  createEmptyPreparedModelRuntimeFixture,
+  guardModelFixtureAuth,
+} from "./model.fixture.test-support.js";
 import { createProviderRuntimeTestMock } from "./model.provider-runtime.test-support.js";
 import { createPreparedConfiguredRuntimeModelLookup } from "./model.static-id.js";
 
@@ -1232,22 +1235,12 @@ describe("resolveModel", () => {
       makeMistralCatalogModel({ input: ["text"] }),
     );
 
-    const preparedModelRuntime = {
-      catalogOwner: undefined,
+    const preparedModelRuntime = createEmptyPreparedModelRuntimeFixture({
       agentDir: state.agentDir(),
-      activeProjectKeys: [],
-      allowGatewaySubagentBinding: false,
       config,
-      observationConfig: config,
-      isCurrent: () => true,
-      authModes: {},
       metadataSnapshot: createPluginMetadataSnapshotFixture(),
-      modelCatalog: { entries: [], routeVariants: [] },
-      configuredRuntimeModels: [],
-      findConfiguredRuntimeModel: () => undefined,
-      inlineProviderModels: [],
       createStores: () => ({ authStorage: {} as never, modelRegistry: {} as never }),
-    } satisfies PreparedModelRuntimeSnapshot;
+    });
     const result = await resolveModelAsync(
       "mistral",
       "mistral-medium-3-5",
@@ -1274,22 +1267,12 @@ describe("resolveModel", () => {
   it("resolves opt-in provider static catalog rows while skipping agent discovery", async () => {
     const metadataSnapshot = createPluginMetadataSnapshotFixture();
     const config = {};
-    const preparedModelRuntime = {
-      catalogOwner: undefined,
+    const preparedModelRuntime = createEmptyPreparedModelRuntimeFixture({
       agentDir: state.agentDir(),
-      activeProjectKeys: [],
-      allowGatewaySubagentBinding: false,
       config,
-      observationConfig: config,
-      isCurrent: () => true,
-      authModes: {},
       metadataSnapshot,
-      modelCatalog: { entries: [], routeVariants: [] },
-      configuredRuntimeModels: [],
-      findConfiguredRuntimeModel: () => undefined,
-      inlineProviderModels: [],
       createStores: createEmptyAgentDiscoveryStores,
-    } satisfies PreparedModelRuntimeSnapshot;
+    });
     resolveBundledProviderStaticCatalogModelMock.mockResolvedValueOnce({
       provider: "google",
       id: "gemini-3.1-pro-preview",
