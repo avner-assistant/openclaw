@@ -4,7 +4,11 @@ import { setImmediate } from "node:timers/promises";
 import { isDeepStrictEqual } from "node:util";
 import { getRuntimeConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
-import { isPrimarySessionTranscriptFileName } from "../config/sessions/artifacts.js";
+import {
+  isPrimarySessionTranscriptFileName,
+  resolveTrajectoryPath,
+  resolveTrajectoryPointerPath,
+} from "../config/sessions/artifacts.js";
 import {
   isLegacySessionRecordOwnedByTarget,
   shouldFilterLegacySessionRecordsByTarget,
@@ -28,8 +32,6 @@ import {
 } from "../infra/deferred-plugin-migrations.js";
 import {
   captureDeferredPluginSessionSources,
-  resolveTrajectoryPath,
-  resolveTrajectoryPointerPath,
   deferredPluginSessionStoreIds,
   prepareSessionSourceVerification,
   readDeferredPluginSessionImport,
