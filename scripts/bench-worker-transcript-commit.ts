@@ -16,7 +16,7 @@ import type {
 import { SessionManager } from "../src/agents/sessions/session-manager.js";
 import { createZeroUsageFixture } from "../src/agents/test-helpers/usage-fixtures.js";
 import {
-  countSessionEntryRowsReadOnly,
+  listSessionEntryKeysReadOnly,
   loadSessionEntry,
   persistSessionTranscriptTurn,
   upsertSessionEntryCore,
@@ -190,7 +190,7 @@ async function seedFixture(state: OpenClawTestState, shape: typeof fixture) {
     shape.activeEvents + shape.abandonedEvents,
   );
   const initialDagEvents = verifiedSeed.getEntries().length;
-  const sessionRows = countSessionEntryRowsReadOnly({ agentId: "main", storePath });
+  const sessionRows = (await listSessionEntryKeysReadOnly({ agentId: "main", storePath })).length;
   assert.equal(sessionRows, shape.sessionCount);
   const seedSha256 = createHash("sha256").update(JSON.stringify(seed)).digest("hex");
   return { target, config, baseLeafId, initialDagEvents, sessionRows, seedSha256 };
