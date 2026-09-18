@@ -1575,8 +1575,8 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
         originalHybridJob.pretestBuildMode === undefined &&
         shard.pretestBuildMode === "runtime";
       if (promoted) {
-        expect(shard.pretestBuildMode).toBe("runtime");
         expect(shard.planConcurrency).toBe(1);
+        expect(shard.env).toEqual(originalHybridJob.env);
         expect(exclusiveCount).toBe(0);
         expect(shard.requiresDist).toBe(false);
         for (const original of originalHybridJob.groups) {
@@ -1584,7 +1584,7 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
             shard.groups.find((group) => group.shard_name === original.shard_name),
             "retained ordinary group",
           );
-          if (usesTwoWorkerPacking(originalHybridJob)) {
+          if (originalHybridJob.planConcurrency === 2) {
             expect(retained).toEqual({
               ...original,
               env: { OPENCLAW_VITEST_MAX_WORKERS: "2", ...original.env },
