@@ -428,7 +428,7 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
   }>;
   owners: Map<string, PreparedModelRuntimeOwner>;
   agentBuildCompletions: Map<string, Promise<void>>;
-  buildTimeoutMs: number;
+  buildTimeoutMs: number | undefined;
   includeCredentialProviders?: boolean;
   isPublicationCurrent?: () => boolean;
   isBuildCurrent?: () => boolean;
@@ -436,11 +436,14 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
   registerEntriesAfterBuildStart?: boolean;
   reusePluginGenerations?: boolean;
   pluginMetadataSnapshot?: PreparedModelRuntimePluginGeneration["pluginMetadataSnapshot"];
+  progress?: { onStage: (stage: string) => void; onPublished: () => void };
+  acquisitionSignal?: AbortSignal;
 }): Promise<void> {
   const candidates = params.entries.map(({ owner }) => {
     const input = owner.input;
     owner.environmentFingerprint = effectiveEnvironmentFingerprint(input);
     owner.generation += 1;
+    owner.authCaptureStarted = false;
     owner.needsRefresh = true;
     owner.refreshError = undefined;
     owner.pendingPluginGeneration = params.reusePluginGenerations
@@ -465,7 +468,11 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
         owner.provenance === "run" || (owner.provenance === "ephemeral" && input.readOnly === true),
       isGenerationCurrent,
       isBuildCurrent: params.isBuildCurrent ?? isCurrent,
-      isPreparationCurrent: params.isBuildCurrent,
+      onBeforeAuthCapture: () => {
+        if (owner.generation === generation) {
+          owner.authCaptureStarted = true;
+        }
+      },
       isEligible: () =>
         (params.isPublicationCurrent?.() ?? true) &&
         owner.generation === generation &&
@@ -491,6 +498,20 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
     }
   }
   const results = new Map<PreparedModelRuntimeOwner, PreparedModelRuntimeBuildResult>();
+  const publishCandidate = (candidate: (typeof candidates)[number]) => {
+    if (!candidate.isCurrent()) {
+      return;
+    }
+    const result = results.get(candidate.owner);
+    if (!result || candidate.owner.snapshot === result.snapshot) {
+      return;
+    }
+    publishPreparedPluginGeneration(candidate.owner, result.pluginGeneration);
+    const snapshot = publishPreparedModelRuntimeOwnerSnapshot(candidate.owner, result.snapshot);
+    results.set(candidate.owner, { ...result, snapshot });
+    candidate.owner.pluginGeneration = result.pluginGeneration;
+    candidate.owner.needsRefresh = false;
+  };
   const publication = (async () => {
     await using _ = {
       [Symbol.asyncDispose]: async () => {
@@ -533,11 +554,23 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
               params.onBuildStats,
               params.pluginMetadataSnapshot,
               params.includeCredentialProviders,
+              params.progress
+                ? {
+                    onStage: params.progress.onStage,
+                    onPrepared: (input, result) => {
+                      const candidate = currentGroup.find((entry) => entry.input === input)!;
+                      results.set(candidate.owner, result);
+                      publishCandidate(candidate);
+                      params.progress!.onPublished();
+                    },
+                  }
+                : undefined,
+              params.acquisitionSignal,
             );
             for (const candidate of currentGroup) {
               if (params.registerEntriesAfterBuildStart === true) {
-                // First-build hooks may emit auth mutations. Publish the owner only after those
-                // hooks start so an event cannot refresh a generation that was not visible yet.
+                // Pending owners become visible before awaited preparation; auth replay follows
+                // the explicit credential-capture boundary rather than promise scheduling.
                 const previous = params.owners.get(candidate.key);
                 params.owners.set(candidate.key, candidate.owner);
                 if (previous && previous !== candidate.owner) {
@@ -545,16 +578,19 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
                 }
                 candidate.markRegistered();
               }
-              candidate.owner.buildCompletion = build.completion;
-              void build.completion.then(() => {
-                if (candidate.owner.buildCompletion === build.completion) {
+              const completion = params.agentBuildCompletions.get(candidate.input.agentDir)!;
+              candidate.owner.buildCompletion = completion;
+              void completion.then(() => {
+                if (candidate.owner.buildCompletion === completion) {
                   candidate.owner.buildCompletion = undefined;
                 }
               });
             }
             const built = await build.pending;
             for (const [index, candidate] of currentGroup.entries()) {
-              results.set(candidate.owner, built[index]!);
+              if (!results.has(candidate.owner)) {
+                results.set(candidate.owner, built[index]!);
+              }
             }
           }
           break;
@@ -585,11 +621,7 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
             `prepared model runtime snapshot missing after auth refresh for ${candidate.input.agentDir}`,
           );
         }
-        publishPreparedPluginGeneration(candidate.owner, result.pluginGeneration);
-        const snapshot = publishPreparedModelRuntimeOwnerSnapshot(candidate.owner, result.snapshot);
-        results.set(candidate.owner, { ...result, snapshot });
-        candidate.owner.pluginGeneration = result.pluginGeneration;
-        candidate.owner.needsRefresh = false;
+        publishCandidate(candidate);
       }
     } catch (error) {
       const refreshError = toStringifiedError(error);
@@ -598,6 +630,9 @@ export async function publishPreparedModelRuntimeOwnerBatch(params: {
           candidate.owner.pendingPluginGeneration = undefined;
         }
         if (!candidate.isCurrent()) {
+          continue;
+        }
+        if (params.progress && candidate.owner.snapshot && !candidate.owner.needsRefresh) {
           continue;
         }
         candidate.owner.needsRefresh = true;
@@ -624,6 +659,7 @@ export async function publishModelRuntimeSnapshot(
   const key = ownerKey(input);
   const owner = prepareModelRuntimeOwner(input, provenance, catalogMode, existing);
   owner.generation += 1;
+  owner.authCaptureStarted = false;
   owner.needsRefresh = true;
   owner.refreshError = undefined;
   owner.pluginGeneration = undefined;
@@ -638,6 +674,11 @@ export async function publishModelRuntimeSnapshot(
         inventoryOwner: owner,
         isGenerationCurrent,
         isBuildCurrent: isGenerationCurrent,
+        onBeforeAuthCapture: () => {
+          if (owner.generation === generation) {
+            owner.authCaptureStarted = true;
+          }
+        },
         prepareInboundPluginRegistry: provenance === "configured",
         ownsRegistryResources:
           provenance === "run" || (provenance === "ephemeral" && input.readOnly === true),

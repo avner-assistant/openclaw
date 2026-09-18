@@ -253,6 +253,14 @@ gh workflow run plugin-npm-release.yml \
 The workflow covers all `all-publishable` packages, including unchanged ones,
 and verifies every exact version and selector. Reruns reuse published versions.
 
+For a plugin workflow-only recovery, use the same command with `--ref main`.
+The trusted workflow still requires `ref` to equal the canonical monthly branch
+tip and runs its tooling against that frozen source. This retains validated
+dependency pins when the candidate's older tooling rejects later npm `latest`
+drift. Save the successful recovery run ID and use the trusted-main core
+recovery command below; it verifies the plugin workflow's main ancestry and
+exact candidate-bound run identity.
+
 Then publish the prepared core tarball with all three saved run identities:
 
 ```bash
@@ -403,6 +411,15 @@ For beta, stable, and full profiles, Linux (`ubuntu`) cross-OS lanes gate npm pu
 6. If the qualified Code SHA already contains fully final notes, use that same commit as **Release SHA**. One successful fresh full qualification can supply both lifecycle roles and their exact publication bytes; do not create another commit or run solely to separate the labels. If notes change after qualification, commit the selected release entry and any matching record/index updates as a new Release SHA. Changes outside the [changelog-only delta](#changelog-only-evidence-reuse) return the release to step 2.
 7. When Code SHA equals Release SHA, retain its successful full validation parent and exact prepared npm/OCI descriptors. Only for a later genuine changelog-only descendant, optionally run SHA-pinned Full Release Validation with evidence reuse: the complete delta must satisfy `split-changelog-release-v1`, point at green Code evidence, and dispatch no product child lanes. That path still prepares and qualifies new Release SHA package/image bytes. Either path must satisfy every required profile gate. Regular final artifacts include SDK reports for both npm `beta` and `latest`; review the report and 8-character acknowledgement for the channel you will publish.
 8. Save that successful Full Release Validation run as both the validation run and `preflight_run_id`. Its read-only npm workflow builds and packs the root/core packages once, checks source in parallel, and qualifies the exact bytes with the final changelog. Docker images build in parallel and are preserved for later promotion. Review the **Plugin SDK API diff** summary. If it reports changes, inspect the readable diff (also uploaded as `plugin-sdk-api-release-diff-<run-id>-<run-attempt>`) and record the 8-character acknowledgement digest printed by the report; omit the acknowledgement when it reports no Plugin SDK API changes. Standalone `OpenClaw NPM Release` with `preflight_only=true` remains available for focused preflight and recovery.
+
+   Regular beta/latest SDK reports pool identical comparisons by their full diff digest.
+   The diff artifact (`openclaw.plugin-sdk-api-diff-set/v1`) maps each selector to
+   its complete entry in `diffs`. Evidence sets use `openclaw.plugin-sdk-api-release-evidence-set/v2`;
+   each selector retains its own predecessor, release, and tooling identity, with
+   `diff` referencing that same pool. The validator expands the selected receipt
+   and verifies the unchanged logical digest and acknowledgement. Historical v1
+   receipts remain readable; artifact hashes cover the new stored bytes. This
+   representation does not qualify or replace an earlier failed artifact.
 
    Prepared packing reuses the exact preflight build while retaining package smoke checks, inventory generation, docs and changelog preparation, and source restoration. It also runs `pnpm update:compat:check` against npm's current `latest` and `beta` tags before packing. Ordinary source packing still performs a clean package build without that registry freshness check.
 
@@ -1358,7 +1375,7 @@ SHA-256, and npm integrity. A mismatch requires a new package version.
 - `full_release_validation_run_id`: successful `Full Release Validation` run id for this tag/SHA, required for real publish. Beta publishes may proceed on preflight alone with a warning, but stable/`latest` promotion still requires it.
 - `full_release_validation_run_attempt`: exact positive run attempt paired with `full_release_validation_run_id`; required whenever the run id is provided so reruns cannot change the authorization evidence during publish.
 - `release_publish_run_id`: approved `OpenClaw Release Publish` run id; required when this workflow is dispatched by that parent (bot-actor real-publish calls)
-- `plugin_npm_run_id`: successful exact-head `Plugin NPM Release` run id; required for a real `extended-stable` core publish
+- `plugin_npm_run_id`: successful exact-candidate `Plugin NPM Release` run id; required for a real `extended-stable` core publish. Trusted-main core recovery also accepts a trusted-main plugin recovery run bound to that same candidate.
 - `npm_dist_tag`: npm target tag for the publish path; accepts `alpha`, `beta`, `latest`, or `extended-stable` and defaults to `beta`. Final patch `33` and later must use `extended-stable`; by default, `extended-stable` rejects earlier patches, and it always rejects non-final tags.
 - `bypass_extended_stable_guard`: testing-only boolean, default `false`; with `npm_dist_tag=extended-stable`, bypasses monthly extended-stable eligibility, including the trailing-completed-month rule, while preserving release identity, artifact, approval, and readback checks.
 
@@ -1366,7 +1383,8 @@ SHA-256, and npm integrity. A mismatch requires a new package version.
 behavior or `npm_dist_tag=extended-stable` for the guarded monthly path. The
 extended-stable option requires `publish_scope=all-publishable`, an empty
 `plugins` input, a final patch at or above `33`, and the canonical
-`extended-stable/YYYY.M.33` branch at its exact tip. It never moves plugin
+`extended-stable/YYYY.M.33` branch at its exact tip. The workflow may run from
+that branch or trusted `main` for workflow-only recovery. It never moves plugin
 `latest` or `beta`. New package versions receive `extended-stable` atomically
 through OIDC trusted publication (`npm publish --tag extended-stable`); this
 source workflow does not use token-authenticated `npm dist-tag add`. Retries

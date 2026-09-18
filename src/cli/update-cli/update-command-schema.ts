@@ -1,8 +1,10 @@
 import type { LegacyConfigUpdatePlan } from "../../commands/doctor/legacy-config-repair.js";
+import { checkGlobalPackageUpdatePermissions } from "../../infra/package-update-manager-preflight.js";
 import type { UpdateChannel } from "../../infra/update-channels.js";
 import type { DevUpdateTarget } from "../../infra/update-dev-target.js";
 import { canResolveRegistryVersionForPackageTarget } from "../../infra/update-global.js";
 import { recordUpdateRunPhase } from "../../infra/update-run-ledger.js";
+import { UPDATE_GLOBAL_PERMISSION_REASON } from "../../shared/update-outcome.js";
 import type { OpenClawDatabaseSchemaPreflight } from "../../state/openclaw-database-preflight.js";
 import type { OpenClawSchemaVersions } from "../../state/openclaw-schema-versions.js";
 import {
@@ -15,8 +17,13 @@ import {
   UpdatePreMutationError,
   type UpdateCommandOptions,
 } from "./shared.js";
-import { handleDryRunPreflightError, printUpdateDryRun } from "./update-command-dry-run.js";
+import {
+  handleDryRunPreflightError,
+  printUpdateDryRun,
+  type UpdateDryRunFailure,
+} from "./update-command-dry-run.js";
 import type { RefuseUpdate } from "./update-command-result.js";
+import type { PreManagedServiceStop } from "./update-command-service-context-types.js";
 import {
   resolvePackageRuntimePreflight,
   type ManagedServiceRootRedirect,
@@ -49,6 +56,21 @@ export async function previewUpdateCommand(params: {
       opts,
     }));
   if (preflight) {
+    if (
+      target.packageInstallTarget &&
+      !target.packageAlreadyCurrent &&
+      preflight.preflightFailures.length === 0
+    ) {
+      const permissions = await checkGlobalPackageUpdatePermissions(target.packageInstallTarget);
+      if (permissions?.stderrTail) {
+        preflight.preflightFailures.push({
+          reason: UPDATE_GLOBAL_PERMISSION_REASON,
+          message: permissions.stderrTail,
+          failureFacts: permissions.failureFacts,
+        });
+        preflight.preflightNotes.push(`Would refuse update: ${permissions.stderrTail}`);
+      }
+    }
     printUpdateDryRun({
       ...target,
       ...preflight,
@@ -76,6 +98,7 @@ export async function preflightUpdateCommandSchemas(params: {
   legacyConfigPlan?: LegacyConfigUpdatePlan;
   managedServiceRootRedirect: ManagedServiceRootRedirect | null;
   channel: UpdateChannel;
+  requestedChannel?: UpdateChannel | null;
   devTarget?: DevUpdateTarget;
   packageTargetSchemaVersions?: OpenClawSchemaVersions;
   packageTargetVersion?: string;
@@ -86,7 +109,13 @@ export async function preflightUpdateCommandSchemas(params: {
   opts: Pick<UpdateCommandOptions, "dryRun" | "json" | "run">;
   refuseUpdate: RefuseUpdate;
 }): Promise<
-  { packageSchemaPreflight: OpenClawDatabaseSchemaPreflight; preflightNotes: string[] } | undefined
+  | {
+      packageSchemaPreflight: OpenClawDatabaseSchemaPreflight;
+      preflightNotes: string[];
+      preflightFailures: UpdateDryRunFailure[];
+      service?: PreManagedServiceStop;
+    }
+  | undefined
 > {
   const {
     root,
@@ -111,6 +140,8 @@ export async function preflightUpdateCommandSchemas(params: {
     indeterminate: [],
   };
   const preflightNotes: string[] = [];
+  const preflightFailures: UpdateDryRunFailure[] = [];
+  let service: PreManagedServiceStop | undefined;
   if ((opts.dryRun || updateInstallKind === "package") && updateInstallKind !== "unknown") {
     try {
       const { inspectUpdateDatabaseContexts } =
@@ -126,6 +157,12 @@ export async function preflightUpdateCommandSchemas(params: {
         managedServiceRootRedirect,
         legacyConfigPlan: params.legacyConfigPlan,
       });
+      service = admission.service ?? admission.services.get(root);
+      for (const inspectedService of admission.services.values()) {
+        if (inspectedService.serviceUpdateVerdict?.kind === "unavailable") {
+          preflightNotes.push(inspectedService.serviceUpdateVerdict.message);
+        }
+      }
       const target =
         updateInstallKind === "git"
           ? await inspectGitDryRunTargetSchemaVersions({
@@ -152,11 +189,17 @@ export async function preflightUpdateCommandSchemas(params: {
           nodeRunner: params.managedServiceNodeRunner,
           timeoutMs: updateStepTimeoutMs,
           alreadyCurrent: params.packageAlreadyCurrent,
-          service: admission.service,
+          service,
           installedRoot: params.packageAlreadyCurrent ? root : undefined,
         });
         if (!runtime.ok) {
           preflightNotes.push(`Would refuse update: ${runtime.error}`);
+          preflightFailures.push({
+            reason: "node-runtime-preflight",
+            message: runtime.error,
+            failureFacts: runtime.failureFacts,
+            recoverySteps: runtime.recoverySteps,
+          });
         } else if (runtime.value.replacedNodeRunner) {
           preflightNotes.push(
             `Would replace managed gateway service Node (${runtime.value.replacedNodeRunner}) with current Node (${runtime.value.nodeRunner}) for openclaw@${runtime.value.targetVersion}.`,
@@ -167,7 +210,7 @@ export async function preflightUpdateCommandSchemas(params: {
           !canResolveRegistryVersionForPackageTarget(params.packageInstallSpec)
         ) {
           preflightNotes.push(
-            "Configured plugin availability will be checked against the staged package before rehearsal or activation; this preview does not stage the target.",
+            "Configured plugin availability will be checked against the staged package before update checks or activation; this preview does not stage the target.",
           );
         } else {
           const { preflightConfiguredNpmPluginTargets } =
@@ -186,7 +229,7 @@ export async function preflightUpdateCommandSchemas(params: {
     } catch (error) {
       if (!opts.dryRun) {
         if (error instanceof UpdatePreMutationError) {
-          await refuseUpdate(error.reason, error.message, error.failureFacts);
+          await refuseUpdate(error.reason, error.message, error.failureFacts, error.recoverySteps);
           return undefined;
         }
         throw error;
@@ -205,5 +248,5 @@ export async function preflightUpdateCommandSchemas(params: {
     );
     return undefined;
   }
-  return { packageSchemaPreflight, preflightNotes };
+  return { packageSchemaPreflight, preflightNotes, preflightFailures, service };
 }

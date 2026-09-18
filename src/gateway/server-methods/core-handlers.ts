@@ -3,7 +3,7 @@ import { createLazyPromise } from "../../shared/lazy-promise.js";
 import {
   listCoreGatewayHandlerMethodNames,
   type CoreGatewayHandlerFamily,
-} from "../methods/core-descriptors.js";
+} from "../methods/core-method-policy.js";
 import { createLazyCoreHandlers } from "./lazy-core-handlers.js";
 import type { GatewayRequestHandlers } from "./types.js";
 
@@ -66,6 +66,8 @@ const CORE_GATEWAY_HANDLER_MODULES = {
     import("./models-auth-status.js").then((module) => module.modelsAuthStatusHandlers),
   "models-auth-login": () =>
     import("./models-auth-login.js").then((module) => module.modelsAuthLoginHandlers),
+  "mcp-auth-login": () =>
+    import("./mcp-auth-login.js").then((module) => module.mcpAuthLoginHandlers),
   "models-auth-order": () =>
     import("./models-auth-order.js").then((module) => module.modelsAuthOrderHandlers),
   models: () => import("./models.js").then((module) => module.modelsHandlers),

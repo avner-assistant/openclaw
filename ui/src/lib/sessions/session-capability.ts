@@ -90,6 +90,10 @@ export type SessionRefreshOptions = SessionListOptions & {
   backgroundHydrate?: boolean;
 };
 
+export type SessionRefreshOutcome =
+  | { status: "refreshed" | "stale" }
+  | { status: "failed"; error: string };
+
 export type SessionListScope = Readonly<Omit<SessionListOptions, "offset" | "append">>;
 
 export type SessionListSnapshot = Pick<SessionState, "result" | "agentId" | "loading" | "error">;
@@ -206,7 +210,7 @@ export type SessionCapability = {
     listener: (snapshot: SessionListSnapshot) => void,
   ) => { refresh: () => Promise<void>; dispose: () => void };
   refreshList: (options?: SessionRefreshOptions) => Promise<void>;
-  /** Admits history through the deletion fence, even when outside the shared roster. */
+  /** Admits history through lifecycle fences; defaults-only never authorizes row publication. */
   reconcile: (
     row: GatewaySessionRow | undefined,
     defaults?: SessionsListResult["defaults"],
@@ -214,7 +218,7 @@ export type SessionCapability = {
       sourceCanonicalListRevision?: number;
       sourceListScope?: SessionListScope;
     },
-  ) => boolean;
+  ) => boolean | "defaults-only";
   /** Captures request ordering before a supplemental row read begins. */
   captureReconcile: () => SessionCapability["reconcile"];
   /** Owns a routed descriptor through reads and events until its consumer retires. */
@@ -237,9 +241,12 @@ export type SessionCapability = {
   refresh: (options?: SessionRefreshOptions) => Promise<void>;
   /** Schedules background list refreshes without replacing queued foreground queries. */
   invalidate: () => void;
-  /** Refreshes the remembered query without superseding queued foreground intent.
-   * An explicit agent forces replacement; null means the attempt retired or failed. */
-  refreshReplacement: (agentId?: string | null) => Promise<SessionsListResult | null>;
+  /** Refreshes the remembered query without superseding queued foreground intent. */
+  refreshReplacement: () => Promise<SessionsListResult | null>;
+  /** Reconciles an operation's agent without claiming the foreground query. */
+  reconcileMutation: (agentId?: string | null) => Promise<SessionRefreshOutcome>;
+  /** Captures freshness of this conversation's permission facts. */
+  capturePermissionObservation: (key: string, agentId?: string | null) => () => boolean;
   createResult: (
     params?: SessionCreateParams,
     options?: { reconciliation?: SessionCreateReconciliation },

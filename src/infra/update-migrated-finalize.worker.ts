@@ -20,6 +20,7 @@ import {
 import { createWindowsTaskAutoStartGuard } from "../cli/update-cli/update-command-service-maintenance.js";
 import { withUpdateCommandTerminalResult } from "../cli/update-cli/update-command-terminal.js";
 import { createWindowsTaskAutoStartRecovery } from "../cli/update-cli/update-command-windows-task.js";
+import { routeLogsToStderr } from "../logging/console.js";
 import { defaultRuntime } from "../runtime.js";
 import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../state/openclaw-agent-db-contract.js";
 import { OPENCLAW_STATE_SCHEMA_VERSION } from "../state/openclaw-state-db-contract.js";
@@ -43,8 +44,9 @@ async function finalizeMigratedUpdate(): Promise<void> {
   // Validation imports this whole candidate graph before activation. The helper
   // also needs the stable recovery barrel's writer after an actual schema bump.
   if (process.argv[2] === "--check") {
+    routeLogsToStderr();
     if (typeof finishUpdateRun !== "function") {
-      throw new Error("Candidate recovery writer is unavailable.");
+      throw new Error("Update recovery writer is unavailable.");
     }
     process.stdout.write(
       JSON.stringify({
@@ -71,6 +73,11 @@ async function finalizeMigratedUpdate(): Promise<void> {
   }
   // SAFETY: Only the typed parent continuation serializes this private input.
   const input = JSON.parse(text) as MigratedUpdateFinalizationInput;
+  if (input.params.opts.json) {
+    // The installed updater forwards this worker's stdout verbatim. Keep diagnostics
+    // on stderr through terminal-history reads and the process's database cleanup.
+    routeLogsToStderr();
+  }
   if (input.recoveryHandoff) {
     throw new Error(
       "Full-state checkpoint recovery is deferred; retained state was left unchanged.",
@@ -145,7 +152,7 @@ async function finalizeMigratedUpdate(): Promise<void> {
   }, input.params.opts);
   const terminal = getUpdateRun(finalized.run.runId, { env: finalized.run.env });
   if (!terminal || terminal.status === "running") {
-    throw new Error("Candidate finalization left the update run nonterminal.");
+    throw new Error("Update finalization left the update run nonterminal.");
   }
   const response: MigratedUpdateFinalizationResult = {
     result: finalized.result,
@@ -233,7 +240,7 @@ async function finalizeInput(
       input.params.rollbackBlockedReason !== "state-migrated-no-rollback" &&
       input.params.rollbackBlockedReason !== "rollback-state-unverified")
   ) {
-    throw new Error("Candidate finalization requires its migrated update run.");
+    throw new Error("Update finalization requires its migrated update run.");
   }
   const { requesterAuthority: descriptor, ...runIdentity } = transferredRun;
   executorFence?.assertCurrent();

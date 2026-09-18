@@ -1,5 +1,5 @@
 // Builds CI node/Vitest shard plans from the full suite configuration.
-import { statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { matchesGlob, relative } from "node:path";
 import {
   agentVitestProjectOwners,
@@ -47,6 +47,7 @@ import {
   resolveRuntimePlacementSeconds,
 } from "./ci-test-timings.mts";
 import { listTrackedTestFiles } from "./list-test-files.mts";
+import { isExclusiveCiTestConfig } from "./local-check-runtime.mts";
 import {
   listVitestRuntimeConsumerFiles,
   mergeVitestPretestBuildModes,
@@ -140,6 +141,17 @@ type PolicyTestWatch = {
 // this inventory covers the remaining tests that changed targeting cannot
 // discover from imports alone.
 const policyTestWatches = [
+  {
+    testFile: "test/scripts/pr-worktree-provision.test.ts",
+    ownerGlobs: ["scripts/pr-lib/wrapper-components.txt"],
+    watchGlobs: [
+      "scripts/pr",
+      "scripts/pr-lib/**",
+      ...readFileSync(new URL("../pr-lib/wrapper-components.txt", import.meta.url), "utf8")
+        .trim()
+        .split("\n"),
+    ],
+  },
   {
     testFile: "ui/src/components/web-awesome-migration.node.test.ts",
     watchGlobs: ["ui/src/**/*.ts"],
@@ -693,10 +705,10 @@ const COMPACT_PUSH_EXCLUDED_SHARDS = new Set([
   ),
   "core-tooling-isolated",
 ]);
-// Serial or worker-pinned owners exceeded their intended job walls in run
-// 33676780376. Reuse file splitting on Blacksmith without raising worker counts.
 const COMPACT_BLACKSMITH_SPLIT_OWNERS = new Set([
   "agentic-control-plane-agent-chat",
+  "agentic-gateway-core-1",
+  "agentic-gateway-core-2",
   "agentic-gateway-core-3",
   "core-runtime-infra-storage-state",
 ]);
@@ -886,6 +898,11 @@ function expandCompactGroup(group: NodeTestShardGroup): NodeTestShardGroup[] {
 }
 const TOOLING_CONFIG = "test/vitest/vitest.tooling.config.ts";
 const TOOLING_DOCKER_TEST_FILE = "test/scripts/docker-build-helper.test.ts";
+const TOOLING_UNIFIED_DECLARATIONS_TEST_FILE = "test/scripts/write-unified-entry-dts.test.ts";
+const TOOLING_DECLARATION_COMPILER_TEST_FILES = new Set([
+  "test/scripts/write-unified-entry-dts.test.ts",
+  "test/scripts/write-plugin-sdk-entry-dts.test.ts",
+]);
 const TOOLING_ISOLATED_CONFIG = "test/vitest/vitest.tooling-isolated.config.ts";
 // The full matrix is capped at 28 jobs. Admit the consistently slow serial
 // shards first so short alphabetical groups cannot leave them on the tail.
@@ -2228,7 +2245,7 @@ function resolveCiNodeTestRunner(shard: NodeTestShard, compactProfile?: string):
   // The full-build compiler fixture must pass the real 4352MB heap guard even
   // after earlier tooling tests have retained their module graphs.
   return KEEP_LARGE_NODE_TEST_RUNNER.has(shard.shardName) ||
-    shard.includePatterns?.includes("test/scripts/write-unified-entry-dts.test.ts")
+    shard.includePatterns?.includes(TOOLING_UNIFIED_DECLARATIONS_TEST_FILE)
     ? DEFAULT_NODE_TEST_RUNNER
     : BUNDLED_NODE_TEST_RUNNER;
 }
@@ -2539,6 +2556,27 @@ const WHOLE_CONFIG_SPLIT_FILE_LISTERS = new Map<string, () => string[]>([
   ["core-unit-fast-isolated", getUnitFastIsolatedTestFiles],
 ]);
 
+const wholeConfigSplitFileCache = new Map<string, string[]>();
+
+function listWholeConfigSplitFiles(shardName: string): string[] | undefined {
+  const listFiles = WHOLE_CONFIG_SPLIT_FILE_LISTERS.get(shardName);
+  if (!listFiles) {
+    return undefined;
+  }
+  // Test fixtures deliberately replace the CLI process inventory. The other
+  // owner inventories are immutable for the process lifetime and expensive to
+  // rediscover (git walks plus glob matching) on every candidate plan.
+  if (shardName === "agentic-cli-process") {
+    return listFiles();
+  }
+  let files = wholeConfigSplitFileCache.get(shardName);
+  if (!files) {
+    files = listFiles();
+    wholeConfigSplitFileCache.set(shardName, files);
+  }
+  return files;
+}
+
 type HostedToolingTailDonation = {
   parentShardName: string;
   file: string;
@@ -2614,8 +2652,7 @@ function splitOversizedCompactGroup(
   ) {
     return [{ group, seconds: measuredProfileSeconds }];
   }
-  const includePatterns =
-    group.includePatterns ?? WHOLE_CONFIG_SPLIT_FILE_LISTERS.get(group.shard_name)?.();
+  const includePatterns = group.includePatterns ?? listWholeConfigSplitFiles(group.shard_name);
   const buildModes = new Map(
     includePatterns?.map((file) => [file, resolveTestFilesBuildMode([file])]) ?? [],
   );
@@ -2925,7 +2962,9 @@ export function createSelectedNodeTestShardBundles(
     const matches = canonicalGroups.filter(
       (group) =>
         !group.requiresDist &&
-        ((group.configs.length === 1 && group.configs[0] === configs.get(target)) ||
+        ((group.configs.includes(configs.get(target)!) &&
+          group.configs.some(isExclusiveCiTestConfig)) ||
+          (group.configs.length === 1 && group.configs[0] === configs.get(target)) ||
           (isWholeToolingPair(group) && group.configs.includes(configs.get(target)!))) &&
         group.env?.OPENCLAW_NODE_TEST_VITEST_ARGS_JSON === undefined &&
         (!group.includePatterns || group.includePatterns.includes(target)),
@@ -3032,7 +3071,7 @@ function createCompactNodeTestShardBundles(
       shard_name: shard.shardName,
     });
     const partitionFiles = group.pretestBuildMode
-      ? (group.includePatterns ?? WHOLE_CONFIG_SPLIT_FILE_LISTERS.get(group.shard_name)?.())
+      ? (group.includePatterns ?? listWholeConfigSplitFiles(group.shard_name))
       : undefined;
     const partition = partitionFiles
       ? partitionRuntimeTestFiles(group.configs, partitionFiles)
@@ -3113,11 +3152,27 @@ function createCompactNodeTestShardBundles(
     }
   }
 
-  const estimateStripeSeconds = (group: NodeTestShardGroup) =>
-    Math.max(
-      synthesizedSplitSeconds.get(compactGroupTimingKey(group)) ?? 0,
-      estimateCompactStripeSeconds(group, options.runnerBackend),
-    );
+  // Packing revisits immutable groups; prepare their cost and family once.
+  // Keep facts within this plan's timing inputs and partitions.
+  const stripeFacts = new Map<
+    NodeTestShardGroup,
+    { seconds: number; family: string | undefined }
+  >();
+  const prepareStripe = (group: NodeTestShardGroup) => {
+    let facts = stripeFacts.get(group);
+    if (!facts) {
+      facts = {
+        seconds: Math.max(
+          synthesizedSplitSeconds.get(compactGroupTimingKey(group)) ?? 0,
+          estimateCompactStripeSeconds(group, options.runnerBackend),
+        ),
+        family: compactStripeFamily(group),
+      };
+      stripeFacts.set(group, facts);
+    }
+    return facts;
+  };
+  const estimateStripeSeconds = (group: NodeTestShardGroup) => prepareStripe(group).seconds;
   const estimateBinSeconds = (groups: NodeTestShardGroup[]) => {
     const mode = mergeVitestPretestBuildModes(groups.map((group) => group.pretestBuildMode));
     const buildSeconds = mode ? VITEST_PRETEST_BUILD_SECONDS[mode] : 0;
@@ -3137,7 +3192,7 @@ function createCompactNodeTestShardBundles(
     runnerRank(group) >= 0;
   const hasDistinctStripeFamilies = (groups: NodeTestShardGroup[]) => {
     const families = groups
-      .map(compactStripeFamily)
+      .map((group) => prepareStripe(group).family)
       .filter((family): family is string => family !== undefined);
     return new Set(families).size === families.length;
   };
@@ -3325,7 +3380,12 @@ function createCompactNodeTestShardBundles(
     const capacityRunner =
       runner === EXTRA_LARGE_NODE_TEST_RUNNER ||
       planConcurrency === 2 ||
-      (isBlacksmithProfile && bin.some((group) => group.configs.includes(TOOLING_CONFIG)))
+      (isBlacksmithProfile && bin.some((group) => group.configs.includes(TOOLING_CONFIG))) ||
+      (options.runnerBackend === "hybrid" &&
+        usesBlacksmithCapacity(runner) &&
+        bin.some((group) =>
+          group.includePatterns?.some((file) => TOOLING_DECLARATION_COMPILER_TEST_FILES.has(file)),
+        ))
         ? EXTRA_LARGE_NODE_TEST_RUNNER
         : usesBlacksmithCapacity(runner) && bin.some((group) => group.shard_name === "agentic-cli")
           ? CAPACITY_NODE_TEST_RUNNER
@@ -3465,12 +3525,17 @@ function createCompactNodeTestShardBundles(
     }
   }
 
-  // Preserve packing, rebalancing, check names and timing identities before
-  // requesting the available 16-vCPU class for former 32-vCPU placements.
   for (const job of compactJobs) {
-    if (job.runner === EXTRA_LARGE_NODE_TEST_RUNNER) {
-      job.runner = CAPACITY_NODE_TEST_RUNNER;
+    if (
+      job.planConcurrency !== 2 ||
+      !job.groups.some((group) => group.configs.some(isExclusiveCiTestConfig))
+    ) {
+      continue;
     }
+    // Keep packed jobs and their summed time budgets; Gateway boots own the host
+    // serially. Preserve the previous two-worker ceiling inside every child.
+    job.planConcurrency = 1;
+    job.env = { ...job.env, ...PINNED_COMPACT_GROUP_ENV };
   }
   return compactJobs.toSorted((a, b) => a.checkName.localeCompare(b.checkName));
 }

@@ -48,6 +48,7 @@ import {
 } from "./session-accessor.sqlite-generation-copy.js";
 import type { SqliteSessionGenerationClaim } from "./session-accessor.sqlite-generation.types.js";
 import { deleteSessionEntryLifecycle } from "./session-accessor.sqlite-lifecycle.js";
+import { invalidateSessionEntryMaintenanceAgeFact } from "./session-accessor.sqlite-maintenance-age.js";
 import { copySessionNodeArtifactsForRepair } from "./session-accessor.sqlite-node-artifacts.js";
 import { replaceSessionOwnerInTransaction } from "./session-accessor.sqlite-owner.js";
 import {
@@ -87,6 +88,7 @@ function writeMigratedSessionClaim(
   sessionKey: string,
   entry: SessionEntry,
 ): void {
+  invalidateSessionEntryMaintenanceAgeFact(database.db);
   writeSessionEntry(database, sessionKey, entry, {
     allowStoredAliases: true,
     previousEntry: null,
@@ -530,7 +532,7 @@ export async function processIdenticalClaims(params: {
   const crossStore = params.aliases.some(
     (claim) => !samePhysicalStore(claim.store, params.destination),
   );
-  if (params.mode === "detect") {
+  if (params.mode !== "doctor-fix") {
     return {
       kind: params.canonical
         ? "canonical-exists-identical"
@@ -647,7 +649,7 @@ export async function repairDivergentClaims(params: {
       canonicalKey: params.canonicalKey,
       destination: params.destination,
       env: params.env,
-      mode: "automatic",
+      mode: "doctor-fix",
     });
     if (migrated.kind === "divergent-aliases" || migrated.kind === "divergent-canonical") {
       return { quarantinedKeys: [], resolved: false };
@@ -678,7 +680,7 @@ export async function repairDivergentClaims(params: {
       canonicalKey: params.canonicalKey,
       destination: params.destination,
       env: params.env,
-      mode: "automatic",
+      mode: "doctor-fix",
     });
     if (migrated.kind === "divergent-aliases" || migrated.kind === "divergent-canonical") {
       return { quarantinedKeys: [], resolved: false };
