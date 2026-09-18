@@ -1715,45 +1715,48 @@ describe("capability cli", () => {
     expect(generationCall?.providerOptions).toBeUndefined();
   });
 
-  it("passes image quality and OpenAI moderation hints through to generation runtime", async () => {
-    mocks.generateImage.mockResolvedValue({
-      provider: "openai",
-      model: "gpt-image-2",
-      attempts: [],
-      images: [
-        {
-          buffer: Buffer.from("png-bytes"),
-          mimeType: "image/png",
-          fileName: "draft.png",
+  it.each(["low", "xhigh", "max"] as const)(
+    "passes %s image quality and OpenAI moderation through to runtime",
+    async (quality) => {
+      mocks.generateImage.mockResolvedValue({
+        provider: "openai",
+        model: "gpt-image-2",
+        attempts: [],
+        images: [
+          {
+            buffer: Buffer.from("png-bytes"),
+            mimeType: "image/png",
+            fileName: "draft.png",
+          },
+        ],
+      });
+
+      await runRegisteredCli({
+        register: registerCapabilityCli as (program: Command) => void,
+        argv: [
+          "capability",
+          "image",
+          "generate",
+          "--prompt",
+          "low-cost draft",
+          "--quality",
+          quality,
+          "--openai-moderation",
+          "low",
+          "--json",
+        ],
+      });
+
+      const generationCall = firstImageGenerationCall();
+      expect(generationCall?.prompt).toBe("low-cost draft");
+      expect(generationCall?.quality).toBe(quality);
+      expect(generationCall?.providerOptions).toEqual({
+        openai: {
+          moderation: "low",
         },
-      ],
-    });
-
-    await runRegisteredCli({
-      register: registerCapabilityCli as (program: Command) => void,
-      argv: [
-        "capability",
-        "image",
-        "generate",
-        "--prompt",
-        "low-cost draft",
-        "--quality",
-        "low",
-        "--openai-moderation",
-        "low",
-        "--json",
-      ],
-    });
-
-    const generationCall = firstImageGenerationCall();
-    expect(generationCall?.prompt).toBe("low-cost draft");
-    expect(generationCall?.quality).toBe("low");
-    expect(generationCall?.providerOptions).toEqual({
-      openai: {
-        moderation: "low",
-      },
-    });
-  });
+      });
+    },
+  );
 
   it("passes image output format, quality, and OpenAI hints through to edit runtime", async () => {
     mocks.generateImage.mockResolvedValue({
@@ -1918,7 +1921,7 @@ describe("capability cli", () => {
       }),
     ).rejects.toThrow("exit 1");
     expect(mocks.runtime.error).toHaveBeenCalledWith(
-      "Error: --quality must be one of low, medium, high, or auto",
+      "Error: --quality must be one of low, medium, high, xhigh, max, or auto",
     );
 
     mocks.runtime.error.mockClear();

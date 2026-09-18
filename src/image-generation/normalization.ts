@@ -191,7 +191,9 @@ export function resolveImageGenerationOverrides(params: {
     resolution = undefined;
   }
 
-  const supportedQualities = params.provider.capabilities.output?.qualities;
+  const output = params.provider.capabilities.output;
+  const supportedQualities =
+    (params.model ? output?.qualitiesByModel?.[params.model] : undefined) ?? output?.qualities;
   if (quality && !(supportedQualities ?? []).includes(quality)) {
     ignoredOverrides.push({ key: "quality", value: quality });
     quality = undefined;

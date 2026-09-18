@@ -1421,55 +1421,58 @@ describe("createImageGenerateTool", () => {
     expect(resultDetails(overrideResult).timeoutMs).toBe(12_345);
   });
 
-  it("forwards output hints and OpenAI provider options", async () => {
-    const generateImage = vi.spyOn(imageGenerationRuntime, "generateImage").mockResolvedValue({
-      provider: "openai",
-      model: "gpt-image-2",
-      attempts: [],
-      ignoredOverrides: [],
-      images: [
-        {
-          buffer: Buffer.from("jpg-out"),
-          mimeType: "image/jpeg",
-          fileName: "preview.jpg",
+  it.each(["low", "xhigh", "max"] as const)(
+    "forwards %s quality and OpenAI provider options",
+    async (quality) => {
+      const generateImage = vi.spyOn(imageGenerationRuntime, "generateImage").mockResolvedValue({
+        provider: "openai",
+        model: "gpt-image-2",
+        attempts: [],
+        ignoredOverrides: [],
+        images: [
+          {
+            buffer: Buffer.from("jpg-out"),
+            mimeType: "image/jpeg",
+            fileName: "preview.jpg",
+          },
+        ],
+      });
+      vi.spyOn(mediaStore, "saveMediaBuffer").mockResolvedValue({
+        path: "/tmp/generated.jpg",
+        id: "generated.jpg",
+        size: 5,
+        contentType: "image/jpeg",
+      });
+
+      const tool = createToolWithPrimaryImageModel("openai/gpt-image-2");
+      const result = await tool.execute("call-openai-hints", {
+        prompt: "Cheap preview",
+        quality,
+        outputFormat: "jpeg",
+        openai: {
+          background: "opaque",
+          moderation: "low",
+          outputCompression: 60,
+          user: "end-user-42",
         },
-      ],
-    });
-    vi.spyOn(mediaStore, "saveMediaBuffer").mockResolvedValue({
-      path: "/tmp/generated.jpg",
-      id: "generated.jpg",
-      size: 5,
-      contentType: "image/jpeg",
-    });
+      });
 
-    const tool = createToolWithPrimaryImageModel("openai/gpt-image-2");
-    const result = await tool.execute("call-openai-hints", {
-      prompt: "Cheap preview",
-      quality: "low",
-      outputFormat: "jpeg",
-      openai: {
-        background: "opaque",
-        moderation: "low",
-        outputCompression: 60,
-        user: "end-user-42",
-      },
-    });
-
-    const generateArgs = mockCallArg(generateImage, 0, "generateImage");
-    expect(generateArgs.quality).toBe("low");
-    expect(generateArgs.outputFormat).toBe("jpeg");
-    expect(generateArgs.providerOptions).toEqual({
-      openai: {
-        background: "opaque",
-        moderation: "low",
-        outputCompression: 60,
-        user: "end-user-42",
-      },
-    });
-    const details = resultDetails(result);
-    expect(details.quality).toBe("low");
-    expect(details.outputFormat).toBe("jpeg");
-  });
+      const generateArgs = mockCallArg(generateImage, 0, "generateImage");
+      expect(generateArgs.quality).toBe(quality);
+      expect(generateArgs.outputFormat).toBe("jpeg");
+      expect(generateArgs.providerOptions).toEqual({
+        openai: {
+          background: "opaque",
+          moderation: "low",
+          outputCompression: 60,
+          user: "end-user-42",
+        },
+      });
+      const details = resultDetails(result);
+      expect(details.quality).toBe(quality);
+      expect(details.outputFormat).toBe("jpeg");
+    },
+  );
 
   it("forwards generic fal provider options", async () => {
     const generateImage = vi.spyOn(imageGenerationRuntime, "generateImage").mockResolvedValue({
@@ -1568,6 +1571,18 @@ describe("createImageGenerateTool", () => {
 
   it.each([
     {
+      model: "openai/gpt-image-2.5/flare/text-to-image",
+      primaryRef: "fal/openai/gpt-image-2.5/flare/text-to-image",
+      maxInputImages: 16,
+      disablesResolution: true,
+    },
+    {
+      model: "openai/gpt-image-2.5/sunburst/edit",
+      primaryRef: "fal/openai/gpt-image-2.5/sunburst/edit",
+      maxInputImages: 16,
+      disablesResolution: true,
+    },
+    {
       model: "fal-ai/nano-banana-2",
       primaryRef: "fal/fal-ai/nano-banana-2",
       maxInputImages: 14,
@@ -1634,6 +1649,16 @@ describe("createImageGenerateTool", () => {
     });
 
     expect(mockCallArg(generateImage, 0, "generateImage").inputImages).toHaveLength(maxInputImages);
+    await expect(
+      tool.execute("call-too-many-references", {
+        prompt: "combine references",
+        images: Array.from(
+          { length: maxInputImages + 1 },
+          (_, index) => `./fixtures/ref-${index + 1}.png`,
+        ),
+      }),
+    ).rejects.toThrow(/reference image/);
+    expect(generateImage).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the default edit limit at 10 for providers without limit metadata", async () => {

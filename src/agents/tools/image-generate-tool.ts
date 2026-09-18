@@ -113,9 +113,9 @@ import {
 const DEFAULT_COUNT = 1;
 const MAX_COUNT = 4;
 const DEFAULT_MAX_INPUT_IMAGES = 10;
-const MAX_REFERENCE_IMAGE_INPUTS = 14;
+const MAX_REFERENCE_IMAGE_INPUTS = 16;
 const DEFAULT_RESOLUTION: ImageGenerationResolution = "1K";
-const SUPPORTED_QUALITIES = ["low", "medium", "high", "auto"] as const;
+const SUPPORTED_QUALITIES = ["low", "medium", "high", "xhigh", "max", "auto"] as const;
 const SUPPORTED_OUTPUT_FORMATS = ["png", "jpeg", "webp"] as const;
 const SUPPORTED_BACKGROUNDS = ["transparent", "opaque", "auto"] as const;
 const SUPPORTED_OPENAI_MODERATIONS = ["low", "auto"] as const;
@@ -192,7 +192,7 @@ const ImageGenerateToolSchema = Type.Object({
     }),
   ),
   quality: optionalStringEnum(SUPPORTED_QUALITIES, {
-    description: "Quality: low, medium, high, auto.",
+    description: "Quality: low, medium, high, xhigh, max, auto; model-specific.",
   }),
   outputFormat: optionalStringEnum(SUPPORTED_OUTPUT_FORMATS, {
     description: "Output format: png, jpeg, webp.",
