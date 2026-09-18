@@ -110,7 +110,10 @@ export function spawnWindowsJobChild(
       certification ??= (async (): Promise<WindowsJobExtinction> => {
         try {
           // An empty Job before launcher admission is not proof of completed ownership.
-          while (!exited || job.inspect().length !== 0) {
+          while (true) {
+            if (exited && job.inspect().length === 0) {
+              break;
+            }
             if (stopDeadline !== undefined && performance.now() >= stopDeadline) {
               throw new Error("Windows Job descendant extinction deadline expired");
             }

@@ -15,14 +15,15 @@ vi.mock("node:child_process", async (original) => ({
 }));
 vi.mock("node:module", async (original) => {
   const actual = await original<typeof import("node:module")>();
-  return {
-    ...actual,
-    createRequire: (...args: Parameters<typeof actual.createRequire>) =>
-      new Proxy(actual.createRequire(...args), {
-        apply: (target, receiver, argumentsList) =>
-          argumentsList[0] === "koffi" ? {} : Reflect.apply(target, receiver, argumentsList),
-      }),
-  };
+  const createRequire = (...args: Parameters<typeof actual.createRequire>) =>
+    new Proxy(actual.createRequire(...args), {
+      apply: (target, receiver, argumentsList) =>
+        argumentsList[0] === "koffi" ? {} : Reflect.apply(target, receiver, argumentsList),
+    });
+  return new Proxy(actual, {
+    get: (target, property, receiver) =>
+      property === "createRequire" ? createRequire : Reflect.get(target, property, receiver),
+  });
 });
 vi.mock("./supervisor/service-child-windows-job-native.ts", () => ({
   createWindowsJobBindings: () => ({
