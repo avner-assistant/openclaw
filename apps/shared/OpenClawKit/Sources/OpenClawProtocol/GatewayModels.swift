@@ -17985,6 +17985,56 @@ public struct ShutdownEvent: Codable, Sendable {
     }
 }
 
+public struct SkillCuratorLiveEntry: Codable, Sendable {
+    public let skillfile: String
+    public let skillkey: String
+    public let skillname: String
+    public let state: AnyCodable
+    public let pinned: Bool
+    public let createdatms: AnyCodable
+    public let statechangedatms: AnyCodable
+    public let lastusedatms: AnyCodable
+    public let usecount: Double
+    public let archivedreason: AnyCodable
+
+    public init(
+        skillfile: String,
+        skillkey: String,
+        skillname: String,
+        state: AnyCodable,
+        pinned: Bool,
+        createdatms: AnyCodable,
+        statechangedatms: AnyCodable,
+        lastusedatms: AnyCodable,
+        usecount: Double,
+        archivedreason: AnyCodable)
+    {
+        self.skillfile = skillfile
+        self.skillkey = skillkey
+        self.skillname = skillname
+        self.state = state
+        self.pinned = pinned
+        self.createdatms = createdatms
+        self.statechangedatms = statechangedatms
+        self.lastusedatms = lastusedatms
+        self.usecount = usecount
+        self.archivedreason = archivedreason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case skillfile = "skillFile"
+        case skillkey = "skillKey"
+        case skillname = "skillName"
+        case state
+        case pinned
+        case createdatms = "createdAtMs"
+        case statechangedatms = "stateChangedAtMs"
+        case lastusedatms = "lastUsedAtMs"
+        case usecount = "useCount"
+        case archivedreason = "archivedReason"
+    }
+}
+
 public struct SkillProposalRevisionChangedErrorDetails: Codable, Sendable {
     public let code: String
     public let expectedrevisionhash: String
@@ -18076,6 +18126,52 @@ public struct SkillsCuratorActionResult: Codable, Sendable {
         case lastusedatms = "lastUsedAtMs"
         case usecount = "useCount"
         case archivedreason = "archivedReason"
+    }
+}
+
+public struct SkillsCuratorLiveStatusResult: Codable, Sendable {
+    public let lastattemptatms: AnyCodable
+    public let lastsuccessatms: AnyCodable
+    public let lasterror: AnyCodable
+    public let collectionreview: [String: AnyCodable]?
+    public let experiencereview: [String: AnyCodable]?
+    public let counts: [String: AnyCodable]
+    public let skills: [SkillCuratorLiveEntry]
+    public let overlaps: [[String: AnyCodable]]
+    public let inventory: String
+
+    public init(
+        lastattemptatms: AnyCodable,
+        lastsuccessatms: AnyCodable,
+        lasterror: AnyCodable,
+        collectionreview: [String: AnyCodable]? = nil,
+        experiencereview: [String: AnyCodable]? = nil,
+        counts: [String: AnyCodable],
+        skills: [SkillCuratorLiveEntry],
+        overlaps: [[String: AnyCodable]],
+        inventory: String)
+    {
+        self.lastattemptatms = lastattemptatms
+        self.lastsuccessatms = lastsuccessatms
+        self.lasterror = lasterror
+        self.collectionreview = collectionreview
+        self.experiencereview = experiencereview
+        self.counts = counts
+        self.skills = skills
+        self.overlaps = overlaps
+        self.inventory = inventory
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case lastattemptatms = "lastAttemptAtMs"
+        case lastsuccessatms = "lastSuccessAtMs"
+        case lasterror = "lastError"
+        case collectionreview = "collectionReview"
+        case experiencereview = "experienceReview"
+        case counts
+        case skills
+        case overlaps
+        case inventory
     }
 }
 

@@ -410,11 +410,7 @@
     corner-shape: superellipse(1.5);
   }
 
-  /* The composer's resting shape is the multiline one; its single-line pill
-     opts back out to a circular corner in chat/layout.css, because the
-     superellipse flattens a fully rounded end. */
-  .option-card.option-card,
-  .agent-chat__input.agent-chat__input {
+  .option-card.option-card {
     border-radius: calc(20px * var(--openclaw-corner-radius-scale));
     corner-shape: superellipse(1.5);
   }
