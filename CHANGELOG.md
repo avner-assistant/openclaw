@@ -2,6 +2,21 @@
 
 Docs: https://docs.openclaw.ai
 
+## 2026.7.34
+
+### Highlights
+
+- **Current model families:** add GPT-6 Astra, GPT Image 2.5 Flare/Sunburst, Muse Spark 1.3, Claude Opus 5 and Fable 5.1, Gemini 3.6/3.7 Flash, Grok 4.6, Kimi K3, GLM 5.3, Qwen 3.8, DeepSeek V4 Flash Vision Experimental, and Nemotron 3.5 Lightning support across the provider catalogs and runtime policies that ship on extended stable.
+- **GPT-5.6 compatibility:** retain and verify the complete GPT-5.6 Sol, Terra, and Luna family across direct OpenAI and Codex OAuth routing, reasoning controls, pricing, context, and vision metadata.
+
+### Fixes
+
+- **Installer recovery:** preserve the original npm recovery diagnostics when an install repair attempt also fails, so operators see the actionable package-manager error instead of a secondary cleanup failure.
+
+### Complete contribution record
+
+This extended-stable candidate was selected from a complete 11,198-commit audit after `v2026.7.33`. It adapts the approved provider and installer slices to the 7.33 SDK and configuration surface without importing later architectural refactors.
+
 ## 2026.7.33
 
 ### Highlights
