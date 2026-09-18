@@ -1596,7 +1596,7 @@
     {"id":"native.android.aefc42b77ff1a612","source":"Token (optional)","surface":"android","sites":[{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/ui/GatewayAdditionDialog.kt"}]},
     {"id":"native.android.c2b152fd48621b0b","source":"Too many shares are waiting to be added.","surface":"android","sites":[{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/MainActivity.kt"}]},
     {"id":"native.android.0deafe1f1bd75ff1","source":"Tool","surface":"android","sites":[{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/ui/chat/ChatScreen.kt"}]},
-    {"id":"native.android.b4df872f3281c099","source":"Tool error","surface":"android","sites":[{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/ui/chat/ToolActivityPresentation.kt"}]},
+    {"id":"native.android.b4df872f3281c099","source":"Tool error","surface":"android","sites":[{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/ui/chat/ChatScreen.kt"},{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/ui/chat/ToolActivityPresentation.kt"}]},
     {"id":"native.android.76e70d7303965e31","source":"Tools running","surface":"android","sites":[{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/ui/chat/ChatScreen.kt"}]},
     {"id":"native.android.7bf4695db832bccd","source":"Transcribe voice prompts","surface":"android","sites":[{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/ui/OnboardingFlow.kt"}]},
     {"id":"native.android.f66a7f2fb15c7155","source":"Transcribing…","surface":"android","sites":[{"kind":"ui-call","path":"apps/android/app/src/main/java/ai/openclaw/app/ui/chat/ChatComposerActivity.kt"}]},
