@@ -256,7 +256,7 @@ export function renderAppSidebarHomeRow(host: AppSidebarRenderHost) {
   const agentId = host.expandedAgentId();
   const mainKey = host.selectedAgentMainSessionKey(agentId);
   const mainRow = host.mainSessionRow(agentId);
-  const attention = host.resolveHomeSessionAttention(mainKey, mainRow);
+  const attention = host.resolveSessionAttention({ ...mainRow, key: mainKey, agentId });
   const attentionLabel = sessionAttentionTooltipLabel(attention);
   const outboxAttentionCount = host.outboxAttentionCountForSession(mainKey);
   const active =

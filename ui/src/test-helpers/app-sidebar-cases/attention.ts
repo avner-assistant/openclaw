@@ -61,6 +61,90 @@ function agentAttentionRow(
 }
 
 describe("AppSidebar session attention", () => {
+  it.each([
+    ["main", "research", false],
+    ["research", "research", true],
+    ["main", undefined, true],
+    ["research", undefined, false],
+  ] as const)(
+    "keeps global Home and row attention scoped to %s for requester %s",
+    async (agentId, requesterAgentId, ownsRequest) => {
+      const now = Date.now();
+      const requestTarget = { sessionKey: "global", agentId: requesterAgentId };
+      const approval = {
+        id: "global-approval",
+        kind: "exec",
+        request: { command: "git status --short", ...requestTarget },
+        createdAtMs: now + 1,
+        expiresAtMs: now + 60_000,
+      } satisfies ExecApprovalRequest;
+      const gatewayHarness = createGatewayHarness({
+        request: vi.fn().mockResolvedValue({ questions: [] }),
+      } as unknown as GatewayBrowserClient);
+      gatewayHarness.publish({ assistantAgentId: agentId, sessionKey: "global" });
+      const sessionsHarness = createSessionsHarness(agentId, ["global"]);
+      setRows(sessionsHarness, [
+        {
+          key: "global",
+          agentId,
+          kind: "global",
+          label: "Global conversation",
+          updatedAt: now,
+          status: "done",
+          childSessions: [`agent:${agentId}:subagent:child`],
+        },
+      ]);
+      const { sidebar } = await mountSidebar(
+        gatewayHarness.gateway,
+        sessionsHarness.sessions,
+        "panel",
+        { ...TWO_AGENTS, scope: "global" },
+        [approval],
+      );
+      gatewayHarness.publishEvent("question.requested", {
+        id: "global-question",
+        ...requestTarget,
+        questions: [
+          {
+            questionId: "confirm",
+            header: "Confirm",
+            question: "Review the changes?",
+            options: [],
+          },
+        ],
+        createdAtMs: now,
+        expiresAtMs: now + 60_000,
+        status: "pending",
+      });
+      await sidebar.updateComplete;
+      const home = sidebar.querySelector(".nav-item--home")!;
+      const row = sidebar.querySelector('[data-session-key="global"]')!;
+      expect(row).not.toBeNull();
+      for (const surface of [home, row]) {
+        expect(surface.querySelector("[data-session-attention]")?.getAttribute("aria-label")).toBe(
+          ownsRequest ? "Waiting for your answer\nReview the changes?" : undefined,
+        );
+      }
+      expect(row.querySelector(".session-row-badge--approval") !== null).toBe(ownsRequest);
+      gatewayHarness.publishEvent("question.resolved", {
+        id: "global-question",
+        status: "cancelled",
+      });
+      await sidebar.updateComplete;
+      for (const surface of [home, row]) {
+        expect(surface.querySelector("[data-session-attention]")?.getAttribute("aria-label")).toBe(
+          ownsRequest ? "Waiting for approval\ngit status --short" : undefined,
+        );
+      }
+      expect(row.querySelector(".session-row-badge--approval") !== null).toBe(ownsRequest);
+      setRows(sessionsHarness, []);
+      await sidebar.updateComplete;
+      expect(home.querySelector("[data-session-attention]")?.getAttribute("aria-label")).toBe(
+        ownsRequest ? "Waiting for approval\ngit status --short" : undefined,
+      );
+    },
+  );
+
   it("keeps an active waiting session hand-only and restores its ring after resolution", async () => {
     const client = {
       request: vi.fn().mockResolvedValue({ questions: [] }),

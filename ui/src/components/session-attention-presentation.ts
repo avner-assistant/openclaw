@@ -166,10 +166,7 @@ export function renderTeamSessionSlots(
   groupConflicts = 0,
 ) {
   const attention = summarizeSidebarSessionAttention(
-    rows.flatMap((row) => [
-      row.ownAttention ?? row.attention,
-      ...(includeChildren ? (row.childAttention ?? []) : []),
-    ]),
+    rows.map((row) => (includeChildren ? row.attention : (row.ownAttention ?? row.attention))),
   );
   const active = rows.reduce(
     (n, row) => n + Number(row.hasActiveRun) + (includeChildren ? row.runningChildCount : 0),

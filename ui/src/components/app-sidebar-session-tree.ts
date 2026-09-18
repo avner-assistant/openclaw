@@ -1,21 +1,15 @@
 import type { GatewaySessionRow } from "../api/types.ts";
-import { areUiSessionKeysEquivalent, isSubagentSessionKey } from "../lib/sessions/session-key.ts";
+import {
+  areUiSessionKeysEquivalent,
+  isSubagentSessionKey,
+  parseAgentSessionKey,
+} from "../lib/sessions/session-key.ts";
 import { resolveSidebarSessionParentKey } from "./app-sidebar-session-parent.ts";
 import {
   summarizeSidebarSessionAttention,
-  type SidebarKnownSessionAttention,
   type SidebarRecentSession,
   type SidebarSessionAttention,
 } from "./app-sidebar-session-types.ts";
-
-function attributeChildAttention(
-  attention: SidebarSessionAttention,
-  childLabel: string,
-): SidebarSessionAttention {
-  return attention.kind === "error" && attention.childLabel === undefined
-    ? { ...attention, childLabel }
-    : attention;
-}
 
 /**
  * Pure projection of flat session rows into the sidebar's parent/child tree.
@@ -28,7 +22,7 @@ export function projectSessionTree(params: {
   mainSessionKeys?: ReadonlySet<string>;
   rowsByKey: ReadonlyMap<string, GatewaySessionRow>;
   loadingChildKeys: ReadonlySet<string>;
-  knownSessionAttention: readonly SidebarKnownSessionAttention[];
+  resolveAttention: (row: Pick<GatewaySessionRow, "key" | "agentId">) => SidebarSessionAttention;
   toSidebarSession: (row: GatewaySessionRow, isChild?: boolean) => SidebarRecentSession;
 }): SidebarRecentSession[] {
   const {
@@ -36,7 +30,7 @@ export function projectSessionTree(params: {
     mainSessionKeys = new Set<string>(),
     rowsByKey,
     loadingChildKeys,
-    knownSessionAttention,
+    resolveAttention,
     toSidebarSession,
   } = params;
   const childKeysByParent = new Map<string, string[]>();
@@ -92,33 +86,26 @@ export function projectSessionTree(params: {
     }
     const projected = toSidebarSession(row, isChild);
     const unloadedChildKeys = childSessionKeys.filter((key) => !rowsByKey.has(key));
-    // Only direct unloaded children can match: parents carry their keys, but not grandchildren's.
-    // Grandchildren join the normal transitive fold after their branch is materialized.
-    const childAttention = [
-      ...new Map(
-        [
-          ...children.flatMap((child) => [
-            attributeChildAttention(child.ownAttention ?? child.attention, child.label),
-            ...(child.childAttention ?? []),
-          ]),
-          ...knownSessionAttention
-            .filter((entry) =>
-              unloadedChildKeys.some((key) => areUiSessionKeysEquivalent(entry.sessionKey, key)),
-            )
-            .map((entry) => entry.attention),
-        ]
-          .filter((value) => value.kind !== "none")
-          .map((value) => [JSON.stringify(value), value]),
-      ).values(),
-    ];
+    // Parents expose only direct unloaded keys. Loaded descendants fold transitively;
+    // terminal outcomes still require child details.
+    const attention = summarizeSidebarSessionAttention([
+      projected.attention,
+      ...children.map(({ attention: childAttention, label }) =>
+        childAttention.kind === "error" && childAttention.childLabel === undefined
+          ? { ...childAttention, childLabel: label }
+          : childAttention,
+      ),
+      ...unloadedChildKeys.map((key) =>
+        resolveAttention({
+          key,
+          agentId: parseAgentSessionKey(key)?.agentId ?? projected.agentId,
+        }),
+      ),
+    ]);
     const unreadChildCount = children.reduce(
       (count, child) => count + Number(child.unread) + (child.unreadChildCount ?? 0),
       0,
     );
-    // Unloaded terminal outcomes require the existing child-detail loader.
-    // Child attention is transitive just like live-run counts: a collapsed
-    // ancestor remains actionable even when the blocked descendant is hidden.
-    const attention = summarizeSidebarSessionAttention([projected.attention, ...childAttention]);
     let runningChildCount = 0;
     let failedChildCount = 0;
     let queuedChildCount = 0;
@@ -149,7 +136,6 @@ export function projectSessionTree(params: {
     return {
       ...projected,
       ownAttention: projected.attention,
-      childAttention,
       unreadChildCount,
       queuedChildCount,
       attention,
