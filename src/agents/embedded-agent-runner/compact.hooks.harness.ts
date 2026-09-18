@@ -432,6 +432,7 @@ export const acquireAgentRunPreparedModelRuntimeMock = vi.fn(
       workspaceDir: input.workspaceDir,
       metadataSnapshot: { ...emptyPluginMetadataSnapshot, workspaceDir: input.workspaceDir },
       configuredRuntimeModels: [],
+      findConfiguredRuntimeModel: () => undefined,
       inlineProviderModels: [],
       createStores: () => ({ authStorage: {}, modelRegistry: {} }),
     },

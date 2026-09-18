@@ -124,6 +124,7 @@ const withPreparedModelCatalogOwnerMock = vi.fn(
       allowGatewaySubagentBinding: false,
       modelCatalog: { entries: [], routeVariants: [] },
       configuredRuntimeModels: [],
+      findConfiguredRuntimeModel: () => undefined,
       inlineProviderModels: [],
       createStores() {
         throw new Error("Catalog projection must not create execution stores");

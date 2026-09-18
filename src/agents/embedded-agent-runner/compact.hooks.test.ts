@@ -1806,6 +1806,7 @@ describe("compactEmbeddedAgentSessionDirect hooks", () => {
       workspaceDir: join(TEST_WORKSPACE_DIR, "workspace"),
       metadataSnapshot,
       configuredRuntimeModels: [],
+      findConfiguredRuntimeModel: () => undefined,
       inlineProviderModels: [],
       createStores: () => ({ authStorage: {}, modelRegistry: {} }),
     } as never;

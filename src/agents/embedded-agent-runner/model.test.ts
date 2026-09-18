@@ -23,6 +23,7 @@ import {
 import type { PreparedModelRuntimeSnapshot } from "../prepared-model-runtime.owner.js";
 import { guardModelFixtureAuth } from "./model.fixture.test-support.js";
 import { createProviderRuntimeTestMock } from "./model.provider-runtime.test-support.js";
+import { createPreparedConfiguredRuntimeModelLookup } from "./model.static-id.js";
 
 let state: OpenClawTestState;
 let auth: ReturnType<typeof guardModelFixtureAuth>;
@@ -218,6 +219,7 @@ vi.mock("../prepared-model-runtime.js", async () => {
     if (!("fork" in modelRegistry)) {
       Object.assign(modelRegistry, { fork: () => modelRegistry });
     }
+    const metadataSnapshot = createPluginMetadataSnapshotFixture();
     const snapshot = {
       catalogOwner: undefined,
       agentDir: input.agentDir,
@@ -225,10 +227,14 @@ vi.mock("../prepared-model-runtime.js", async () => {
       activeProjectKeys: [],
       config: input.config ?? {},
       authModes: {},
-      metadataSnapshot: createPluginMetadataSnapshotFixture(),
+      metadataSnapshot,
       allowGatewaySubagentBinding: false,
       modelCatalog: { entries: [], routeVariants: [] },
       configuredRuntimeModels: preparedSnapshotState.configuredRuntimeModels,
+      findConfiguredRuntimeModel: createPreparedConfiguredRuntimeModelLookup(
+        preparedSnapshotState.configuredRuntimeModels,
+        metadataSnapshot,
+      ),
       inlineProviderModels: preparedSnapshotState.inlineProviderModels,
       createStores: () => ({ authStorage, modelRegistry }),
     };
@@ -1112,6 +1118,14 @@ describe("resolveModel", () => {
       api: "openai-completions",
       models: [{ id: "deepseek-v4-pro", name: "Configured DeepSeek" }],
     });
+    const metadataSnapshot = createPluginMetadataSnapshotFixture();
+    const configuredRuntimeModels = [
+      {
+        provider: "deepseek",
+        modelId: "deepseek-v4-pro",
+        model: makeDeepSeekCatalogModel(),
+      },
+    ];
     const preparedModelRuntime = {
       catalogOwner: undefined,
       agentDir: state.agentDir(),
@@ -1121,15 +1135,13 @@ describe("resolveModel", () => {
       observationConfig: cfg,
       isCurrent: () => true,
       authModes: {},
-      metadataSnapshot: createPluginMetadataSnapshotFixture(),
+      metadataSnapshot,
       modelCatalog: { entries: [], routeVariants: [] },
-      configuredRuntimeModels: [
-        {
-          provider: "deepseek",
-          modelId: "deepseek-v4-pro",
-          model: makeDeepSeekCatalogModel(),
-        },
-      ],
+      configuredRuntimeModels,
+      findConfiguredRuntimeModel: createPreparedConfiguredRuntimeModelLookup(
+        configuredRuntimeModels,
+        metadataSnapshot,
+      ),
       inlineProviderModels: buildInlineProviderModels(cfg.models?.providers ?? {}),
       createStores: () => ({ authStorage: {} as never, modelRegistry: {} as never }),
     } satisfies PreparedModelRuntimeSnapshot;
@@ -1232,6 +1244,7 @@ describe("resolveModel", () => {
       metadataSnapshot: createPluginMetadataSnapshotFixture(),
       modelCatalog: { entries: [], routeVariants: [] },
       configuredRuntimeModels: [],
+      findConfiguredRuntimeModel: () => undefined,
       inlineProviderModels: [],
       createStores: () => ({ authStorage: {} as never, modelRegistry: {} as never }),
     } satisfies PreparedModelRuntimeSnapshot;
@@ -1273,6 +1286,7 @@ describe("resolveModel", () => {
       metadataSnapshot,
       modelCatalog: { entries: [], routeVariants: [] },
       configuredRuntimeModels: [],
+      findConfiguredRuntimeModel: () => undefined,
       inlineProviderModels: [],
       createStores: createEmptyAgentDiscoveryStores,
     } satisfies PreparedModelRuntimeSnapshot;
