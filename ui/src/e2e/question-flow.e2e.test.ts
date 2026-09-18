@@ -443,6 +443,10 @@ suite.define(() => {
           const inputBox = input.getBoundingClientRect();
           return {
             composerBorder: getComputedStyle(input).borderTopWidth,
+            composerTopCorners: [
+              getComputedStyle(input).borderTopLeftRadius,
+              getComputedStyle(input).borderTopRightRadius,
+            ],
             joined: Math.abs(panelBox.bottom - inputBox.top) <= 1,
             panelBorder: getComputedStyle(collapsedPanel).borderTopWidth,
             rowHeight: Math.round(panelBox.height),
@@ -456,6 +460,7 @@ suite.define(() => {
         }),
       ).toEqual({
         composerBorder: "0px",
+        composerTopCorners: ["0px", "0px"],
         joined: true,
         panelBorder: "0px",
         rowHeight: 48,
