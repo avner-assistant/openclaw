@@ -1111,7 +1111,7 @@ vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => {
                 kind: "patch",
                 phase: "end",
                 status: "completed",
-                title: entry.title ?? "Apply patch",
+                title: entry.title ?? "Apply Patch",
                 name: entry.name,
                 meta: entry.summary,
               });
