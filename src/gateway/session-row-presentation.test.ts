@@ -155,9 +155,9 @@ it("presents current recipient roles without SQLite while rejecting source overr
       };
       connection.chatAbortControllers.set("old-run", activeRun);
       for (const client of clients) {
-        vi.mocked(client.socket.send).mockClear();
+        vi.mocked(client.socket).send.mockClear();
       }
-      vi.mocked(clients[0]!.socket.send).mockImplementationOnce(() => {
+      vi.mocked(clients[0]!.socket).send.mockImplementationOnce(() => {
         connection.chatAbortControllers.delete("old-run");
         connection.chatAbortControllers.set("replacement-run", {
           ...activeRun,
@@ -174,14 +174,14 @@ it("presents current recipient roles without SQLite while rejecting source overr
         [0, "old-run"],
         [1, "replacement-run"],
       ] as const) {
-        const sends = vi.mocked(clients[index]!.socket.send).mock.calls;
+        const sends = vi.mocked(clients[index]!.socket).send.mock.calls;
         expect(sends).toHaveLength(1);
         expect(JSON.parse(String(sends[0]?.[0])).payload.session).toMatchObject({
           hasActiveRun: true,
           activeRunIds: [runId],
         });
       }
-      expect(vi.mocked(clients[2]!.socket.send)).not.toHaveBeenCalled();
+      expect(vi.mocked(clients[2]!.socket).send.mock.calls).toHaveLength(0);
       connection.chatAbortControllers.clear();
       expect(prepares).not.toHaveBeenCalled();
       expect(exec).not.toHaveBeenCalled();
