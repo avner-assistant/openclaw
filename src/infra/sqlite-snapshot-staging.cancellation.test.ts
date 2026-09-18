@@ -13,10 +13,7 @@ import { requireNodeSqlite } from "./node-sqlite.js";
 import { SQLITE_READONLY_CHILD_ARG } from "./runtime-process-entrypoints.js";
 import * as workerUrls from "./runtime-worker-url.js";
 import { withSqliteReadOnlyWorkerScope } from "./sqlite-readonly-worker.js";
-import {
-  inspectSqliteSchemaHeader,
-  prepareSqliteReadOnlyLocation,
-} from "./sqlite-snapshot-source.js";
+import { prepareSqliteReadOnlyLocation } from "./sqlite-snapshot-source.js";
 import { readUpdateStateSchemaVersions } from "./update-candidate-state.js";
 
 const processMocks = vi.hoisted(() => ({
@@ -205,7 +202,7 @@ function createOwnedDatabase() {
 }
 
 it("detaches a cancelled snapshot caller while reclamation finishes its directory", async () => {
-  for (const mode of ["snapshot", "header", "update", "owned"] as const) {
+  for (const mode of ["snapshot", "update", "owned"] as const) {
     const owned = mode === "owned" ? createOwnedDatabase() : undefined;
     const f = mode === "snapshot" ? fixture(64, 4 * 1024 * 1024) : fixture();
     const controller = new AbortController();
@@ -213,8 +210,6 @@ it("detaches a cancelled snapshot caller while reclamation finishes its director
     const operation = withSqliteReadOnlyWorkerScope(async () => {
       if (mode === "snapshot") {
         await readSnapshot(f.source, controller.signal);
-      } else if (mode === "header") {
-        await inspectSqliteSchemaHeader(f.source, { signal: controller.signal });
       } else if (mode === "update") {
         await readUpdateStateSchemaVersions({
           stateDir: path.dirname(f.source),

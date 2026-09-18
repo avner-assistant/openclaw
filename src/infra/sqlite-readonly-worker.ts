@@ -20,7 +20,6 @@ import {
   type SqliteReadOnlyWorkerMode,
   type SqliteReadOnlyWorkerResult,
 } from "./sqlite-readonly-worker-protocol.js";
-import type { SqliteSchemaHeader } from "./sqlite-schema-header.js";
 
 const SQLITE_READONLY_STDERR_TAIL_CHARS = 4_000;
 const SLOW_HARDWARE_HEADROOM = 10;
@@ -113,12 +112,11 @@ export function sqliteInspectionTimeoutError(
 }
 
 type SqliteReadOnlyWorkerOutput = { failure?: string; stderr: string; stdout: string };
-type SqliteReadOnlyWorkerValue = string | SqliteSchemaHeader | string[];
+type SqliteReadOnlyWorkerValue = string | string[];
 type SqliteReadOnlyWorkerOptions = {
   mode: SqliteReadOnlyWorkerMode;
   stagingRoot?: string;
   signal?: AbortSignal;
-  agentSchemaVersionForOwnership?: number;
 };
 
 type SqliteReadOnlyWorkerScope = {
@@ -176,42 +174,12 @@ export function resolveSqliteInspectionSignal(signal?: AbortSignal): AbortSignal
     : signal;
 }
 
-function isAgentSchemaMeta(value: unknown): boolean {
-  return (
-    value === null ||
-    (typeof value === "object" &&
-      !Array.isArray(value) &&
-      Object.keys(value).length === 3 &&
-      "agentId" in value &&
-      (value.agentId === null || typeof value.agentId === "string") &&
-      "role" in value &&
-      (value.role === null || typeof value.role === "string") &&
-      "schemaVersion" in value &&
-      (value.schemaVersion === null || typeof value.schemaVersion === "number"))
-  );
-}
-
 function isSqliteReadOnlyWorkerResult(value: unknown): value is SqliteReadOnlyWorkerResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
   if (Object.keys(value).length !== 2 || !("ok" in value)) {
     return false;
-  }
-  if (value.ok === true && "header" in value) {
-    const header = value.header;
-    return (
-      header !== null &&
-      typeof header === "object" &&
-      "userVersion" in header &&
-      typeof header.userVersion === "number" &&
-      Number.isInteger(header.userVersion) &&
-      Object.keys(header).every(
-        (key) => key === "userVersion" || key === "writerAppVersion" || key === "agentSchemaMeta",
-      ) &&
-      (!("writerAppVersion" in header) || typeof header.writerAppVersion === "string") &&
-      (!("agentSchemaMeta" in header) || isAgentSchemaMeta(header.agentSchemaMeta))
-    );
   }
   return (
     (value.ok === true && "location" in value && typeof value.location === "string") ||
@@ -252,10 +220,6 @@ function parseSqliteReadOnlyWorkerResult(
 
 function readSqliteReadOnlyWorkerValue(
   params: SqliteReadOnlyWorkerOutput,
-  mode: "schema-header",
-): SqliteSchemaHeader;
-function readSqliteReadOnlyWorkerValue(
-  params: SqliteReadOnlyWorkerOutput,
   mode: "sync" | "async",
 ): string;
 function readSqliteReadOnlyWorkerValue(
@@ -285,9 +249,6 @@ function readSqliteReadOnlyWorkerValue(
       params.stderr,
     );
   }
-  if (mode === "schema-header" && "header" in result) {
-    return result.header;
-  }
   if ((mode === "sync" || mode === "async") && "location" in result) {
     return result.location;
   }
@@ -304,12 +265,7 @@ function sqliteReadOnlyWorkerRequestArgs(pathname: string, options: SqliteReadOn
   return [
     options.mode,
     path.resolve(pathname),
-    ...(options.stagingRoot || options.agentSchemaVersionForOwnership !== undefined
-      ? [options.stagingRoot ?? ""]
-      : []),
-    ...(options.agentSchemaVersionForOwnership !== undefined
-      ? [String(options.agentSchemaVersionForOwnership)]
-      : []),
+    ...(options.stagingRoot ? [options.stagingRoot] : []),
   ];
 }
 
@@ -515,15 +471,6 @@ function createScopedSqliteReadOnlyWorker() {
 
 export function runSqliteReadOnlyWorker(
   pathname: string,
-  options: {
-    mode: "schema-header";
-    stagingRoot?: string;
-    signal?: AbortSignal;
-    agentSchemaVersionForOwnership?: number;
-  },
-): Promise<SqliteSchemaHeader>;
-export function runSqliteReadOnlyWorker(
-  pathname: string,
   options: { mode: "sync" | "async"; stagingRoot?: string; signal?: AbortSignal },
 ): Promise<string>;
 export function runSqliteReadOnlyWorker(
@@ -552,8 +499,8 @@ export function runSqliteReadOnlyWorker(
       : scope.controller.signal,
   };
   // Native backup promises can stall with a persistent IPC handle on Node 26.
-  // Header inspection may also need a backup during recovery. Keep both modes
-  // one-shot; concurrent raw reads need separate processes for POSIX lock isolation.
+  // Keep async backups one-shot; concurrent raw reads need separate processes
+  // for POSIX lock isolation.
   const useScopedWorker = options.mode === "sync" && !scope.busy;
   if (useScopedWorker) {
     scope.busy = true;

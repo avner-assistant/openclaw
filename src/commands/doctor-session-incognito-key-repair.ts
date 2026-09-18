@@ -36,6 +36,7 @@ import {
 import {
   listExistingAgentDatabaseTargets,
   resolveTargetSqliteOptions,
+  type ExistingAgentDatabaseTarget,
 } from "./doctor-session-sqlite-readers.js";
 
 export type ReservedIncognitoKeyRepairReport = {
@@ -47,11 +48,14 @@ export async function repairReservedIncognitoSessionKeys(params: {
   apply: boolean;
   cfg: OpenClawConfig;
   env: NodeJS.ProcessEnv;
+  targets?: readonly ExistingAgentDatabaseTarget[];
 }): Promise<ReservedIncognitoKeyRepairReport> {
-  const targets = listExistingAgentDatabaseTargets(params.cfg, params.env).map((target) => ({
-    target,
-    databaseOptions: resolveTargetSqliteOptions(target, params.env),
-  }));
+  const targets = (params.targets ?? listExistingAgentDatabaseTargets(params.cfg, params.env)).map(
+    (target) => ({
+      target,
+      databaseOptions: resolveTargetSqliteOptions(target, params.env),
+    }),
+  );
   const reservedKeys = new Set<string>();
   const sharedDatabase = params.apply ? openOpenClawStateDatabase({ env: params.env }) : undefined;
   const journalRenames = sharedDatabase
