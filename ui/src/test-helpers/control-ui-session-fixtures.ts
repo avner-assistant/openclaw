@@ -77,10 +77,13 @@ export function createControlUiChatHistoryMessage(
   };
 }
 
-export function createControlUiSessionFixtures(input: {
-  rows: ControlUiSessionFixture[];
-  mainKey: string;
-}) {
+export function createControlUiSessionFixtures(
+  input: {
+    rows: ControlUiSessionFixture[];
+    mainKey: string;
+  },
+  isRecord: (value: unknown) => value is Record<string, unknown>,
+) {
   const records = new Map<
     string,
     { row: ControlUiSessionFixture; changed: Set<string>; lastRunEventSequence?: number }
@@ -340,8 +343,6 @@ export function createControlUiSessionFixtures(input: {
       archiveFiltering: boolean;
     },
   ): unknown {
-    const isRecord = (value: unknown): value is Record<string, unknown> =>
-      Boolean(value) && typeof value === "object" && !Array.isArray(value);
     if (!isRecord(response) || !Array.isArray(response.sessions)) {
       return response;
     }

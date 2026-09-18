@@ -1440,10 +1440,13 @@ function installControlUiMockGateway(
   } catch {
     // The scenario remains authoritative when browser storage is unavailable.
   }
-  const sessions = createSessions({
-    rows: canonicalSessionRows,
-    mainKey: scenario.mainSessionKey,
-  });
+  const sessions = createSessions(
+    {
+      rows: canonicalSessionRows,
+      mainKey: scenario.mainSessionKey,
+    },
+    isRecord,
+  );
   if (hasCanonicalSessionsOverride) {
     // Persisted explicit snapshots bypass scenario-default enrichment so reload
     // preserves the same exact owner rows used by CAS, describe, and startup.
