@@ -125,7 +125,6 @@ export function seedCronHistory(stateDir, artifactRoot, baselineRoot, candidateT
 }
 
 function assertImported(fixture, state) {
-  assert.equal(state.stateSchemaVersion, fixture.candidate.stateSchemaVersion);
   assert.equal(state.legacySchema, null, "retained cron_run_logs table was not retired");
   assert.deepEqual(state.legacyRows, []);
   assert.equal(state.tasks.length, fixture.entries.length, "retained cron task count changed");
@@ -176,13 +175,19 @@ function assertImported(fixture, state) {
   });
 }
 
-function observeDoctor() {
+function observeUpdateProcess() {
   const fixturePath = process.env.OPENCLAW_UPGRADE_SURVIVOR_CRON_HISTORY_FIXTURE;
   const observations = process.env.OPENCLAW_UPGRADE_SURVIVOR_ARTIFACT_ROOT;
-  if (!isMainThread || !fixturePath || !observations || process.argv[2] !== "doctor") {
+  const command = process.argv[2];
+  if (!isMainThread || !fixturePath || !observations || !["doctor", "update"].includes(command)) {
     return;
   }
-  const receipt = { pid: process.pid, parentPid: process.ppid };
+  const receipt = {
+    role: command,
+    pid: process.pid,
+    parentPid: process.ppid,
+    startedAtMs: Date.now(),
+  };
   let fixture;
   try {
     fixture = readJson(fixturePath);
@@ -205,7 +210,7 @@ function observeDoctor() {
   } catch (error) {
     receipt.observationError = String(error);
   }
-  const file = path.join(observations, `cron-history-doctor-${process.pid}.json`);
+  const file = path.join(observations, `cron-history-${command}-${process.pid}.json`);
   writeJson(file, receipt);
   process.once("exit", (exitCode) => {
     try {
@@ -217,49 +222,143 @@ function observeDoctor() {
   });
 }
 
-export function assertCronHistory(artifactRoot, observations) {
-  const fixture = readJson(path.join(artifactRoot, FIXTURE_NAME));
-  const receipts = fs
-    .readdirSync(observations)
-    .filter((name) => /^cron-history-doctor-\d+\.json$/u.test(name))
-    .map((name) => readJson(path.join(observations, name)));
-  const witness = receipts.find(
-    (receipt) =>
-      receipt.identity?.buildInfoSha256 === fixture.candidate.buildInfoSha256 &&
-      receipt.before?.legacySha256 === fixture.before.legacySha256,
-  );
-  assert(witness, "candidate Doctor never received the unchanged retained cron history");
-  assert.deepEqual(witness.identity, fixture.candidate);
-  assert.equal(witness.observationError, undefined);
-  assert.equal(witness.updateInProgress, true, "Doctor was not an updater child");
-  assert.equal(witness.exitCode, 0);
-  assert.equal(witness.before.stateSchemaVersion, fixture.before.stateSchemaVersion);
-  assert.deepEqual(witness.before.legacyRows, fixture.before.legacyRows);
-  assert.deepEqual(witness.before.tasks, []);
+function assertProcessReceipt(observations, witness, role) {
   const processReceipt = readJson(
     path.join(observations, "diagnostics", `process-${witness.pid}-exited.json`),
   );
-  assert.equal(processReceipt.role, "doctor");
+  assert.equal(processReceipt.role, role);
   assert.equal(processReceipt.pid, witness.pid);
-  assert.equal(processReceipt.packageVersion, fixture.candidate.version);
+  assert.equal(processReceipt.packageVersion, witness.identity.version);
   assert.equal(processReceipt.parentPid, witness.parentPid);
   assert.equal(processReceipt.exitCode, 0);
-  assertImported(fixture, witness.after);
-  const current = snapshot(fixture);
-  assertImported(fixture, current);
-  assert.deepEqual(current.tasks, witness.after.tasks, "cron history changed after Doctor");
-  writeJson(path.join(artifactRoot, "legacy-operator-cron-history-proof.json"), {
-    status: "passed",
-    baseline: fixture.baseline,
-    candidate: fixture.candidate,
-    currentSchemaAtDoctorEntry:
-      witness.before.stateSchemaVersion === fixture.candidate.stateSchemaVersion,
-    retainedSha256: fixture.before.legacySha256,
-    doctor: witness,
-  });
+  assert.equal(witness.observationError, undefined);
+  assert.equal(witness.exitCode, 0);
 }
 
-observeDoctor();
+function summarizeSnapshot(state) {
+  if (!state) {
+    return undefined;
+  }
+  return {
+    stateSchemaVersion: state.stateSchemaVersion,
+    legacySha256: state.legacySha256,
+    legacyRows: state.legacyRows.length,
+    tasks: state.tasks.length,
+    tasksSha256: hash(JSON.stringify(state.tasks)),
+    migration: state.migration
+      ? {
+          status: state.migration.status,
+          report_json: state.migration.report_json.slice(0, 160),
+        }
+      : null,
+  };
+}
+
+export function assertCronHistory(artifactRoot, observations) {
+  const fixture = readJson(path.join(artifactRoot, FIXTURE_NAME));
+  const proofFile = path.join(artifactRoot, "legacy-operator-cron-history-proof.json");
+  const proof = {
+    baseline: fixture.baseline,
+    candidate: fixture.candidate,
+    retainedSha256: fixture.before.legacySha256,
+  };
+  let receipts = [];
+  let current;
+  try {
+    receipts = fs
+      .readdirSync(observations)
+      .filter((name) => /^cron-history-(?:doctor|update)-\d+\.json$/u.test(name))
+      .map((name) => readJson(path.join(observations, name)))
+      .toSorted((left, right) => left.startedAtMs - right.startedAtMs);
+    current = snapshot(fixture);
+    const doctors = receipts.filter(
+      (receipt) =>
+        receipt.role === "doctor" &&
+        receipt.identity?.buildInfoSha256 === fixture.candidate.buildInfoSha256 &&
+        !receipt.observationError,
+    );
+    let updater;
+    let witness;
+    if (fixture.baseline.version === "2026.9.3") {
+      // The shipped 9.3 updater imports through its normal opener when admitting
+      // the update ledger, before candidate code runs. Its result must survive Doctor.
+      updater = receipts.find(
+        (receipt) =>
+          receipt.role === "update" &&
+          receipt.identity?.buildInfoSha256 === fixture.baseline.buildInfoSha256 &&
+          receipt.before?.legacySha256 === fixture.before.legacySha256,
+      );
+      assert(updater, "published updater never received the unchanged retained cron history");
+      assert.deepEqual(updater.identity, fixture.baseline);
+      assertProcessReceipt(observations, updater, "update");
+      assert.equal(updater.before.stateSchemaVersion, fixture.before.stateSchemaVersion);
+      assert.deepEqual(updater.before.legacyRows, fixture.before.legacyRows);
+      assert.deepEqual(updater.before.tasks, []);
+      witness = doctors[0];
+      assert(witness, "candidate Doctor was not observed against the live database");
+      assertImported(fixture, witness.before);
+      assert.deepEqual(witness.after.tasks, witness.before.tasks, "cron history changed in Doctor");
+      assert.equal(witness.after.migration?.report_json, witness.before.migration.report_json);
+    } else {
+      witness = doctors.find(
+        (receipt) => receipt.before?.legacySha256 === fixture.before.legacySha256,
+      );
+      assert(witness, "candidate Doctor never received the unchanged retained cron history");
+      assert.equal(witness.before.stateSchemaVersion, fixture.before.stateSchemaVersion);
+      assert.deepEqual(witness.before.legacyRows, fixture.before.legacyRows);
+      assert.deepEqual(witness.before.tasks, []);
+    }
+    assert.deepEqual(witness.identity, fixture.candidate);
+    assert.equal(witness.updateInProgress, true, "Doctor was not an updater child");
+    assertProcessReceipt(observations, witness, "doctor");
+    assertImported(fixture, witness.after);
+    assertImported(fixture, current);
+    assert.equal(witness.after.stateSchemaVersion, fixture.candidate.stateSchemaVersion);
+    assert.equal(current.stateSchemaVersion, fixture.candidate.stateSchemaVersion);
+    assert.deepEqual(current.tasks, witness.after.tasks, "cron history changed after Doctor");
+    writeJson(proofFile, {
+      ...proof,
+      status: "passed",
+      contract: updater ? "published-updater-import-preserved" : "candidate-doctor-import",
+      currentSchemaAtDoctorEntry:
+        witness.before.stateSchemaVersion === fixture.candidate.stateSchemaVersion,
+      ...(updater
+        ? {
+            updater: {
+              pid: updater.pid,
+              parentPid: updater.parentPid,
+              identity: updater.identity,
+              before: updater.before,
+            },
+          }
+        : {}),
+      doctor: witness,
+    });
+  } catch (error) {
+    writeJson(proofFile, {
+      ...proof,
+      status: "failed",
+      failure: String(error).slice(0, 500),
+      current: summarizeSnapshot(current),
+      observationCount: receipts.length,
+      // This file shares the existing 16 KiB diagnostic publication budget.
+      observations: receipts.slice(0, 8).map((receipt) => ({
+        role: receipt.role,
+        pid: receipt.pid,
+        parentPid: receipt.parentPid,
+        startedAtMs: receipt.startedAtMs,
+        identity: receipt.identity,
+        exitCode: receipt.exitCode,
+        observationError: receipt.observationError?.slice(0, 160),
+        before: summarizeSnapshot(receipt.before),
+        after: summarizeSnapshot(receipt.after),
+      })),
+    });
+    throw error;
+  }
+}
+
+observeUpdateProcess();
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   const [command, ...args] = process.argv.slice(2);
