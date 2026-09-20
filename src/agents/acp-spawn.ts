@@ -1080,14 +1080,14 @@ async function initializeAcpSpawnRuntime(params: {
   cwd?: string;
 }): Promise<AcpSpawnInitializedRuntime> {
   const storePath = resolveStorePath(params.cfg.session?.store, { agentId: params.targetAgentId });
-  let sessionEntry = loadSessionEntry({
+  const sessionEntry = loadSessionEntry({
     storePath,
     sessionKey: params.sessionKey,
     clone: false,
   });
   const sessionId = sessionEntry?.sessionId;
   if (sessionId) {
-    sessionEntry = await persistAcpSpawnSessionFileBestEffort({
+    await persistAcpSpawnSessionFileBestEffort({
       sessionId,
       sessionKey: params.sessionKey,
       storePath,
@@ -1107,7 +1107,6 @@ async function initializeAcpSpawnRuntime(params: {
     cwd: params.cwd,
     backendId: params.cfg.acp?.backend,
   });
-  sessionEntry = initialized.entry;
   return {
     initialized,
     runtimeCloseHandle: {
@@ -1115,7 +1114,7 @@ async function initializeAcpSpawnRuntime(params: {
       handle: initialized.handle,
     },
     sessionId,
-    sessionEntry,
+    sessionEntry: initialized.entry,
     storePath,
   };
 }

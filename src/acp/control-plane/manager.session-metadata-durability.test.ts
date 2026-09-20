@@ -9,7 +9,7 @@
  */
 import path from "node:path";
 import type { AcpRuntime } from "@openclaw/acp-core/runtime/types";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearSessionStoreCacheForTest } from "../../config/sessions/store-writer-state.js";
 import { writeSessionStoreForTestAsync } from "../../config/sessions/test-helpers.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
@@ -25,12 +25,13 @@ function createStubRuntime(): AcpRuntime {
       backend: "acpx",
       runtimeSessionName: `${input.sessionKey}:${input.mode}:runtime`,
     }),
-    async *runTurn() {
+    async *runTurn(input) {
+      yield { type: "text_delta", text: `reply:${input.text}` };
       yield { type: "done" as const };
     },
     cancel: async () => {},
     close: async () => {},
-  } as unknown as AcpRuntime;
+  };
 }
 
 function createManager(): AcpSessionManager {
@@ -40,7 +41,7 @@ function createManager(): AcpSessionManager {
     ...DEFAULT_DEPS,
     getRuntimeBackend: () => backend,
     requireRuntimeBackend: () => backend,
-  } as unknown as typeof DEFAULT_DEPS);
+  });
 }
 
 async function withAcpFixture(
@@ -51,12 +52,20 @@ async function withAcpFixture(
   }) => Promise<void>,
 ): Promise<void> {
   await withTempDir({ prefix: "openclaw-acp-durability-" }, async (dir) => {
+    // The fast test project has no shared home isolation; keep the real SQLite
+    // owner inside this fixture rather than touching the operator's state DB.
+    vi.stubEnv("OPENCLAW_STATE_DIR", dir);
     const storePath = path.join(dir, "sessions.json");
     const cfg = {
       session: { store: storePath },
       acp: { backend: "acpx" },
     } as OpenClawConfig;
-    await run({ cfg, storePath, manager: createManager() });
+    try {
+      await run({ cfg, storePath, manager: createManager() });
+    } finally {
+      closeOpenClawStateDatabaseForTest();
+      vi.unstubAllEnvs();
+    }
   });
 }
 
@@ -99,6 +108,12 @@ describe("ACP session metadata durability", () => {
       }
       expect(followUp.meta.mode).toBe("persistent");
       expect(followUp.meta.agent).toBe("claude");
+      for (const text of ["initial task", "follow-up"]) {
+        const onEvent = vi.fn();
+        await manager.runTurn({ cfg, sessionKey, text, mode: "prompt", requestId: text, onEvent });
+        expect(onEvent).toHaveBeenCalledWith({ type: "text_delta", text: `reply:${text}` });
+        expect(manager.resolveSession({ cfg, sessionKey }).kind).toBe("ready");
+      }
     });
   });
 
@@ -124,12 +139,23 @@ describe("ACP session metadata durability", () => {
       closeOpenClawStateDatabaseForTest();
       clearSessionStoreCacheForTest();
 
-      const restarted = createManager().resolveSession({ cfg, sessionKey });
+      const restartedManager = createManager();
+      const restarted = restartedManager.resolveSession({ cfg, sessionKey });
       expect(restarted.kind).toBe("ready");
       if (restarted.kind !== "ready") {
         return;
       }
       expect(restarted.meta.runtimeSessionName).toBe(`${sessionKey}:persistent:runtime`);
+      const onEvent = vi.fn();
+      await restartedManager.runTurn({
+        cfg,
+        sessionKey,
+        text: "after reopen",
+        mode: "prompt",
+        requestId: "after-reopen",
+        onEvent,
+      });
+      expect(onEvent).toHaveBeenCalledWith({ type: "text_delta", text: "reply:after reopen" });
     });
   });
 
