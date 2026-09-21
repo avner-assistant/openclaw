@@ -23,7 +23,7 @@ import {
   validateAgentParams,
   validateAgentWaitParams,
 } from "../../../packages/gateway-protocol/src/index.js";
-import { readAcpSessionMeta } from "../../acp/runtime/session-meta.js";
+import { readAcpSessionMeta, readAcpSessionMetaForEntry } from "../../acp/runtime/session-meta.js";
 import { listAgentIds, resolveDefaultAgentId } from "../../agents/agent-scope.js";
 import { resolveTrustedGroupId } from "../../agents/agent-tools.policy.js";
 import {
@@ -1771,6 +1771,12 @@ export const agentHandlers: GatewayRequestHandlers = {
           candidateEntry: SessionEntry | undefined,
         ) => {
           if (candidateEntry?.status !== "failed" || !candidateEntry.sessionId?.trim()) {
+            return false;
+          }
+          // ACP owns its conversation independently of the OpenClaw transcript,
+          // which is written only after a successful turn. Rotating on an initial
+          // provider failure would invalidate the session-ID-pinned ACP metadata.
+          if (readAcpSessionMetaForEntry({ sessionKey: canonicalKey, entry: candidateEntry })) {
             return false;
           }
           try {
