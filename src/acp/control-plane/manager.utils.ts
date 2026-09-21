@@ -2,6 +2,11 @@
 import { ACP_ERROR_CODES, AcpRuntimeError } from "@openclaw/acp-core/runtime/errors";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import {
+  getRuntimeConfigSnapshot,
+  getRuntimeConfigSnapshotMetadata,
+  hashRuntimeConfigValue,
+} from "../../config/runtime-snapshot.js";
+import {
   canonicalizeMainSessionAlias,
   resolveMainSessionKey,
 } from "../../config/sessions/main-session.js";
@@ -14,6 +19,16 @@ import {
   parseAgentSessionKey,
 } from "../../routing/session-key.js";
 import type { AcpSessionResolution } from "./manager.types.js";
+
+/** Identifies the config content that owns a live ACP client, not snapshot registration churn. */
+export function resolveManagerRuntimeConfigSignature(cfg: OpenClawConfig): string {
+  // Agent commands register the same snapshot again before dispatch. Its new
+  // revision must not close an unprompted client that cannot yet be resumed.
+  const metadata = getRuntimeConfigSnapshotMetadata();
+  return cfg === getRuntimeConfigSnapshot() && metadata
+    ? metadata.fingerprint
+    : hashRuntimeConfigValue(cfg);
+}
 
 /** Resolves the agent id encoded in an ACP session key. */
 export function resolveAcpAgentFromSessionKey(sessionKey: string, fallback = "main"): string {

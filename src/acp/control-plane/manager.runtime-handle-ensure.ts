@@ -9,7 +9,6 @@ import {
   resolveSessionIdentityFromMeta,
 } from "@openclaw/acp-core/runtime/session-identity";
 import type { AcpRuntime, AcpRuntimeHandle } from "@openclaw/acp-core/runtime/types";
-import { resolveRuntimeConfigCacheKey } from "../../config/runtime-snapshot.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
 import { toAcpRuntimeError, withAcpRuntimeErrorBoundary } from "../runtime/errors.js";
@@ -19,7 +18,11 @@ import type {
   SessionAcpMeta,
   WriteManagerSessionMeta,
 } from "./manager.types.js";
-import { hasLegacyAcpIdentityProjection, resolveAcpAgentFromSessionKey } from "./manager.utils.js";
+import {
+  hasLegacyAcpIdentityProjection,
+  resolveAcpAgentFromSessionKey,
+  resolveManagerRuntimeConfigSignature,
+} from "./manager.utils.js";
 import {
   normalizeRuntimeOptions,
   normalizeText,
@@ -45,7 +48,7 @@ export async function ensureManagerRuntimeHandle(params: {
   const model = normalizeText(runtimeOptions.model);
   const thinking = normalizeText(runtimeOptions.thinking);
   const configuredBackend = (params.meta.backend || params.cfg.acp?.backend || "").trim();
-  const configSignature = resolveRuntimeConfigCacheKey(params.cfg);
+  const configSignature = resolveManagerRuntimeConfigSignature(params.cfg);
   const cached = params.runtimeHandles.get(params.sessionKey);
   if (cached) {
     const backendMatches = !configuredBackend || cached.backend === configuredBackend;
