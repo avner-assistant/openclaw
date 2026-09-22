@@ -421,7 +421,15 @@ function isFinitePositiveTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-function shouldKeepStoreOnlyChildLink(entry: SessionEntry, now: number): boolean {
+function shouldKeepStoreOnlyChildLink(key: string, entry: SessionEntry, now: number): boolean {
+  // A terminal turn does not end a persistent ACP session. Keep its ownership
+  // link after idle periods/restarts; the same link authorizes parent follow-ups.
+  if (
+    isAcpSessionKey(key) &&
+    readAcpSessionMetaForEntry({ sessionKey: key, entry })?.mode === "persistent"
+  ) {
+    return true;
+  }
   if (isTerminalSessionStatus(entry.status) || isFinitePositiveTimestamp(entry.endedAt)) {
     const endedAt = isFinitePositiveTimestamp(entry.endedAt) ? entry.endedAt : entry.updatedAt;
     return (
@@ -635,7 +643,7 @@ function buildStoreChildSessionIndex(
       ) {
         continue;
       }
-    } else if (!shouldKeepStoreOnlyChildLink(entry, now)) {
+    } else if (!shouldKeepStoreOnlyChildLink(key, entry, now)) {
       continue;
     }
     for (const parentKey of parentKeys) {
@@ -679,7 +687,7 @@ function resolveStoreChildSessionKeysFromCandidates(params: {
       childSessionKeys.push(childKey);
       continue;
     }
-    if (!shouldKeepStoreOnlyChildLink(entry, params.now)) {
+    if (!shouldKeepStoreOnlyChildLink(childKey, entry, params.now)) {
       continue;
     }
     childSessionKeys.push(childKey);
@@ -2551,7 +2559,7 @@ function filterSessionEntries(params: {
         );
       }
       return (
-        shouldKeepStoreOnlyChildLink(entry, now) &&
+        shouldKeepStoreOnlyChildLink(key, entry, now) &&
         (entry?.spawnedBy === spawnedBy || entry?.parentSessionKey === spawnedBy)
       );
     })

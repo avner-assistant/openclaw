@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { writeAcpSessionMetaForMigration } from "../acp/runtime/session-meta.js";
 import {
   addSubagentRunForTests,
   resetSubagentRegistryForTests,
@@ -1005,6 +1006,66 @@ describe("listSessionsFromStore subagent metadata", () => {
       },
     });
     expect(filtered.sessions.map((session) => session.key)).toStrictEqual([]);
+  });
+
+  test("retains persistent ACP ownership after idle time without adopting unrelated or expired children", async () => {
+    await withStateDirEnv("openclaw-persistent-acp-ownership-", async () => {
+      const now = Date.now();
+      const staleAt = now - 2 * 60 * 60_000;
+      const parent = "agent:main:main";
+      const cousin = "agent:main:other";
+      const store: Record<string, SessionEntry> = {
+        [parent]: { sessionId: "parent", updatedAt: now },
+      };
+      const fixtures = [
+        { id: "persistent", mode: "persistent", owner: parent },
+        { id: "oneshot", mode: "oneshot", owner: parent },
+        { id: "cousin", mode: "persistent", owner: cousin },
+        { id: "unbound", mode: "persistent" },
+        { id: "rotated", mode: "persistent", owner: parent },
+      ] as const;
+      for (const fixture of fixtures) {
+        const key = `agent:claude:acp:${fixture.id}`;
+        store[key] = {
+          sessionId: fixture.id,
+          updatedAt: staleAt,
+          status: "failed",
+          endedAt: staleAt,
+          spawnedBy: "owner" in fixture ? fixture.owner : undefined,
+        };
+        writeAcpSessionMetaForMigration({
+          sessionKey: key,
+          sessionId: fixture.id === "rotated" ? "old-session-id" : fixture.id,
+          meta: {
+            backend: "fixture",
+            agent: "claude",
+            runtimeSessionName: key,
+            mode: fixture.mode,
+            state: "error",
+            lastActivityAt: staleAt,
+          },
+        });
+      }
+      store["agent:main:subagent:native"] = {
+        sessionId: "native",
+        updatedAt: staleAt,
+        spawnedBy: parent,
+        status: "done",
+        endedAt: staleAt,
+      };
+      const list = (spawnedBy?: string) =>
+        listSessionsFromStore({
+          cfg,
+          storePath: "/tmp/sessions.json",
+          store,
+          opts: spawnedBy ? { spawnedBy } : {},
+        });
+      expect(list(parent).sessions.map((row) => row.key)).toEqual(["agent:claude:acp:persistent"]);
+      expect(list(cousin).sessions.map((row) => row.key)).toEqual(["agent:claude:acp:cousin"]);
+      expect(list().sessions.find((row) => row.key === parent)?.childSessions).toEqual([
+        "agent:claude:acp:persistent",
+      ]);
+    });
   });
 
   test("does not reattach stale orphan store-only child links without lifecycle fields", () => {

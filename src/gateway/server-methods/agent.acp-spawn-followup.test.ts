@@ -62,7 +62,7 @@ describe("accepted ACP public tool follow-up", () => {
           defaults: { workspace: dir, skipBootstrap: true, subagents: { allowAgents: ["claude"] } },
           list: [{ id: "main", default: true }, { id: "claude" }],
         },
-        tools: { sessions: { visibility: "all" }, agentToAgent: { enabled: true, allow: ["*"] } },
+        tools: { sessions: { visibility: "tree" } },
         channels: { discord: { threadBindings: { enabled: true, spawnSessions: true } } },
       };
       setRuntimeConfigSnapshot(cfg);
@@ -248,6 +248,48 @@ describe("accepted ACP public tool follow-up", () => {
         expect(JSON.stringify(finals.get(followup.runId))).not.toContain("ACP metadata is missing");
         expect(JSON.stringify(finals.get(followup.runId))).toContain("monthly usage limit");
         expect(turns).toHaveLength(2);
+        const cousinSend = createSessionsSendTool({
+          config: cfg,
+          agentSessionKey: "agent:main:other",
+        });
+        const assertCousinDenied = async () => {
+          const denied = await cousinSend.execute("cousin", {
+            sessionKey: accepted.childSessionKey,
+            message: "must not deliver",
+            timeoutSeconds: 0,
+          });
+          expect(denied.details).toMatchObject({ status: "forbidden" });
+        };
+        await assertCousinDenied();
+        await Promise.all(terminalPersistence);
+        resetSubagentRegistryForTests({ persist: false });
+        resetTaskRegistryForTests({ persist: false });
+        managerTesting.resetAcpSessionManagerForTests();
+        closeOpenClawStateDatabaseForTest();
+        clearSessionStoreCacheForTest();
+        const afterRestart = Date.now() + 2 * 60 * 60_000;
+        vi.spyOn(Date, "now").mockReturnValue(afterRestart);
+        expect(
+          loadSessionEntry({ storePath, sessionKey: accepted.childSessionKey })?.spawnedBy,
+        ).toBe("agent:main:main");
+        expect(readAcpSessionMeta({ cfg, sessionKey: accepted.childSessionKey })?.mode).toBe(
+          "persistent",
+        );
+        const listed = await transport.call({ method: "sessions.list", params: {} });
+        expect(
+          listed.sessions.some((row: { key: string }) => row.key === accepted.childSessionKey),
+        ).toBe(true);
+        const restartedSend = await send.execute("post-restart", {
+          sessionKey: accepted.childSessionKey,
+          message: "post-restart",
+          timeoutSeconds: 20,
+        });
+        expect(JSON.stringify(restartedSend.details)).not.toContain(
+          "Session send visibility is restricted",
+        );
+        expect(JSON.stringify(restartedSend.details)).toContain("monthly usage limit");
+        expect(turns).toHaveLength(3);
+        await assertCousinDenied();
         expect(
           loadSessionEntry({ storePath, sessionKey: accepted.childSessionKey })?.sessionId,
         ).toBe(failedEntry?.sessionId);
@@ -282,6 +324,7 @@ describe("accepted ACP public tool follow-up", () => {
           closeOpenClawStateDatabaseForTest();
           clearSessionStoreCacheForTest();
           vi.unstubAllEnvs();
+          vi.restoreAllMocks();
         }
       }
     });
