@@ -1825,7 +1825,11 @@ export const agentHandlers: GatewayRequestHandlers = {
           : false;
         const canReuseSession =
           Boolean(entry?.sessionId) &&
-          (freshness?.fresh ?? false) &&
+          // Persistent ACP conversations outlive native daily/idle resets.
+          // Rotating only the store entry would invalidate ACP's pinned identity.
+          ((freshness?.fresh ?? false) ||
+            readAcpSessionMetaForEntry({ sessionKey: canonicalKey, entry })?.mode ===
+              "persistent") &&
           !failedSessionTranscriptMissing &&
           !terminalMainTranscriptNewerThanRegistry;
         let usableRequestedSessionId =
@@ -1978,7 +1982,9 @@ export const agentHandlers: GatewayRequestHandlers = {
             resolveFailedSessionTranscriptMissingForEntry(freshEntry);
           const freshCanReuseSession =
             Boolean(freshEntry?.sessionId) &&
-            (freshFreshness?.fresh ?? false) &&
+            ((freshFreshness?.fresh ?? false) ||
+              readAcpSessionMetaForEntry({ sessionKey: canonicalKey, entry: freshEntry })?.mode ===
+                "persistent") &&
             !freshFailedSessionTranscriptMissing &&
             !freshTerminalMainTranscriptNewerThanRegistry;
           const freshUsableRequestedSessionId =

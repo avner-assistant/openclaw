@@ -48,18 +48,28 @@ import type { GatewayRequestContext, GatewayRequestHandler } from "./types.js";
 const transport = vi.hoisted(() => ({ call: vi.fn() }));
 vi.mock("../call.js", () => ({ callGateway: (...args: unknown[]) => transport.call(...args) }));
 
-describe("accepted ACP public tool follow-up", () => {
+describe.each(["daily", "idle"] as const)("ACP follow-up across %s reset", (resetMode) => {
   it("reaches the same provider after the accepted initial turn fails without a transcript", async () => {
     await withTempDir({ prefix: "openclaw-acp-public-seam-" }, async (dir) => {
       vi.stubEnv("OPENCLAW_STATE_DIR", dir);
       vi.stubEnv("OPENCLAW_CONFIG_PATH", path.join(dir, "openclaw.json"));
+      vi.stubEnv("TZ", "UTC");
+      // Cross the default 04:00 reset deterministically, regardless of test time.
+      vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-09-22T03:00:00Z"));
       const storePath = path.join(dir, "sessions.json");
       const cfg: OpenClawConfig = {
         plugins: { enabled: false },
-        session: { store: storePath },
+        session: {
+          store: storePath,
+          ...(resetMode === "idle" ? { reset: { mode: "idle", idleMinutes: 60 } } : {}),
+        },
         acp: { enabled: true, backend: "fixture", allowedAgents: ["claude"] },
         agents: {
-          defaults: { workspace: dir, skipBootstrap: true, subagents: { allowAgents: ["claude"] } },
+          defaults: {
+            workspace: dir,
+            skipBootstrap: true,
+            subagents: { allowAgents: ["claude"] },
+          },
           list: [{ id: "main", default: true }, { id: "claude" }],
         },
         tools: { sessions: { visibility: "tree" } },
@@ -82,7 +92,11 @@ describe("accepted ACP public tool follow-up", () => {
           if (turns.length === 1) {
             await initialGate;
           }
-          yield { type: "error", code: "ACP_TURN_FAILED", message: "monthly usage limit reached" };
+          yield {
+            type: "error",
+            code: "ACP_TURN_FAILED",
+            message: "monthly usage limit reached",
+          };
         },
         close: async () => {},
         cancel: async () => {},
